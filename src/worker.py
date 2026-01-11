@@ -2,10 +2,11 @@ from telebot import TeleBot
 from telebot.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChatMemberUpdated
 
 from src.core_database.database import CrudChatAdmins, CrudBannedUser
+from src.utils import Utils
 
 
 class SubBot:
-    def __init__(self, api_token_bot: str, channel_username: str, hello_msg: str):
+    def __init__(self, api_token_bot: str, channel_username: str, hello_msg: str, ban_usr_msg: str):
         self.bot_info = None
 
         self.admins_database = CrudChatAdmins()
@@ -14,6 +15,7 @@ class SubBot:
         self.token = api_token_bot
         self.channel_username = channel_username
         self.hello_msg = hello_msg
+        self.ban_usr_msg = ban_usr_msg
         self.sup_bot = TeleBot(self.token)
         self.bot_info = self.sup_bot.get_me()
 
@@ -26,6 +28,9 @@ class SubBot:
         self.__setup_handlers()
 
     def __setup_handlers(self):
+        def answer_for_ban_user(message: Message):
+            self.sup_bot.send_message(chat_id=message.chat.id, text=self.ban_usr_msg)
+
         @self.sup_bot.message_handler(commands=['start'])
         def start(message: Message):
             self.sup_bot.send_message(message.chat.id, self.hello_msg)
@@ -47,10 +52,15 @@ class SubBot:
                     })
                 self.chat_suggest = None
 
-        @self.sup_bot.message_handler(content_types=["text", "photo", "video"])
+        @self.sup_bot.message_handler(content_types=["text", "photo", "video", "animation"])
         def get_suggest(message: Message):
             if message.chat.id == self.chat_suggest or message.chat.id < 0:
                 return
+
+            if Utils.check_banned_user(message.chat.id, self.channel_id):
+                answer_for_ban_user(message)
+                return
+
             markup = InlineKeyboardMarkup(row_width=2)
 
             banned_user = InlineKeyboardButton(
@@ -126,7 +136,33 @@ class SubBot:
             )
 
         def add_ban_user(call: CallbackQuery):
-            ...
+            user_info = self.sup_bot.get_chat(call.data.split(";")[1])
+
+            markup = InlineKeyboardMarkup()
+            addition_info = InlineKeyboardButton(
+                text=f"@{user_info.username}",
+                callback_data=f"add_info;{user_info.id}"
+            )
+            markup.add(addition_info)
+
+            self.ban_database.add_banned_user({
+                "id_user": user_info.id,
+                "id_channel": self.channel_id,
+            })
+
+            self.ban_database.add_banned_user({
+                "id_user": user_info.id,
+                "id_channel": self.channel_id,
+            })
+            self.sup_bot.edit_message_reply_markup(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                reply_markup=markup,
+            )
+            self.sup_bot.send_message(
+                text=f"@{user_info.username} забанен",
+                chat_id=self.chat_suggest,
+            )
 
         @self.sup_bot.callback_query_handler(func=lambda call: True)
         def callback(call: CallbackQuery):
@@ -147,4 +183,3 @@ class SubBot:
             self.sup_bot.infinity_polling(timeout=10, long_polling_timeout=150)
         except Exception as ex:
             print(f"[ERROR] bot: @{self.bot_info.username}, mistake: {ex}")
-
