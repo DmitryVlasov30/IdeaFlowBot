@@ -4,6 +4,7 @@ from src.core_database.models.base import Base
 from src.core_database.models.banned_user import BannedUser
 from src.core_database.models.channel_suggest import ChannelSuggest
 from src.core_database.models.chat_admins import ChatAdmins
+from src.core_database.models.service_message import ServiceMessage
 from src.core_database.models.db_helper import db_helper
 
 
@@ -17,10 +18,22 @@ def drop_table():
 
 class CrudBannedUser:
     @staticmethod
-    def get_banned_users():
+    def get_banned_users(id_user: int, id_channel: int):
         with db_helper.engine.connect() as conn:
-            result = conn.execute(select(BannedUser)).fetchall()
-            return result
+            if id_user is None and id_channel is None:
+                return conn.execute(select(BannedUser)).fetchall()
+            elif id_user is None and id_channel is not None:
+                return conn.execute(select(BannedUser).filter(BannedUser.id_channel == id_channel)).fetchall()
+            elif id_channel is None and id_user is not None:
+                return conn.execute(select(BannedUser).filter(BannedUser.id_user == id_user)).fetchall()
+            else:
+                return conn.execute(
+                    select(BannedUser)
+                    .filter(and_(
+                        BannedUser.id_channel == id_channel,
+                        BannedUser.id_user == id_user
+                    ))
+                ).fetchall()
 
     @staticmethod
     def add_banned_user(user: dict):
@@ -107,3 +120,25 @@ class CrudChatAdmins:
             )
             conn.commit()
 
+
+class CrudServiceMessage:
+    @staticmethod
+    def get_service_message(bot_id: int):
+        with db_helper.engine.connect() as conn:
+            return conn.execute(select(ServiceMessage).filter(ServiceMessage.bot_id == bot_id)).scalar()
+
+    @staticmethod
+    def add_service_message(data: dict):
+        with db_helper.engine.connect() as conn:
+            conn.execute(insert(ServiceMessage).values(data))
+            conn.commit()
+
+    @staticmethod
+    def update_service_message(bot_id: int, hello_message: str, ban_user_message: str):
+        with db_helper.engine.connect() as conn:
+            conn.execute(
+                update(ServiceMessage)
+                .filter(ServiceMessage.bot_id == bot_id)
+                .values(hello_message=hello_message, ban_user_message=ban_user_message)
+            )
+            conn.commit()
