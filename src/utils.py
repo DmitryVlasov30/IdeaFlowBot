@@ -1,5 +1,7 @@
+from telebot.types import Message
+
 from core_database.database import CrudBannedUser
-from src.core_database.models.db_helper import db_helper
+from config import settings
 
 
 class Utils:
@@ -8,3 +10,12 @@ class Utils:
         db_session = CrudBannedUser()
         all_info = db_session.get_banned_users(id_user=id_user, id_channel=id_channel)
         return bool(all_info)
+
+
+def filter_chats(func):
+    def wrapper(message: Message):
+        if (message.chat.id < 0 or
+                message.chat.id == settings.general_admin or
+                message.chat.id in settings.moderators):
+            return func(message)
+    return wrapper
