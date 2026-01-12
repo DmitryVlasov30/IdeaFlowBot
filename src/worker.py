@@ -65,7 +65,6 @@ class SubBot:
             )
             markup.add(btn_subscribe)
             info_subscribe = self.sup_bot.get_chat_member(user_id=message.chat.id, chat_id=self.channel_id)
-            print(info_subscribe)
             if info_subscribe.status != "left":
                 markup = None
 
@@ -129,6 +128,8 @@ class SubBot:
             if from_usr_id != settings.general_admin and from_usr_id not in settings.moderators:
                 self.sup_bot.leave_chat(chat_member_info.chat.id)
                 return
+            if chat_member_info.chat.type == "channel":
+                return
             if chat_member_info.new_chat_member.status == "administrator":
                 self.admins_database.add_chat_admins({
                     "bot_id": self.bot_info.id,
@@ -156,6 +157,8 @@ class SubBot:
 
         @self.sup_bot.message_handler(content_types=["text", "photo", "video", "animation"])
         def get_suggest(message: Message):
+            if message.chat.id < 0:
+                return
             info_subscribe = self.sup_bot.get_chat_member(user_id=message.chat.id, chat_id=self.channel_id)
             if info_subscribe.status == "left":
                 start(message)
