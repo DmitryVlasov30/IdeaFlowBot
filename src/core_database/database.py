@@ -78,7 +78,7 @@ class CrudBotsData:
                 delete(BotsData)
                 .filter(and_(
                     BotsData.channel_id == data["channel_id"],
-                    BotsData.bot_api_token == data["bot_api_token"],
+                    BotsData.bot_username == data["bot_username"],
                 ))
             )
             conn.commit()
