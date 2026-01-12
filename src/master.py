@@ -1,6 +1,7 @@
 from config import settings
 from src.core_database.database import CrudBotsData
 from src.worker import SubBot
+from src.utils import filter_admin
 
 from telebot import TeleBot
 from requests import get
@@ -20,6 +21,7 @@ class MasterBot:
 
     def __setup_handlers(self):
         @self.main_bot.message_handler(commands=["bots"])
+        @filter_admin
         def get_all_subbot(message):
             all_info = self.bots_database.get_bots_info()
             answer = "боты:\n"
@@ -36,8 +38,14 @@ class MasterBot:
             self.main_bot.send_message(message.chat.id, answer, parse_mode="Markdown")
 
         @self.main_bot.message_handler(commands=["add"])
+        @filter_admin
         def add_bot(message):
             command, api_token, channel_username = message.text.split(" ")
+            if "https" in channel_username:
+                channel_username = "@" + channel_username.split("/")[-1]
+            if "@" not in channel_username:
+                channel_username = "@" + channel_username
+
             try:
                 channel_id = self.main_bot.get_chat(channel_username).id
             except Exception as e:
@@ -63,6 +71,7 @@ class MasterBot:
             )
 
         @self.main_bot.message_handler(commands=["remove"])
+        @filter_admin
         def remove_bot(message):
             command, username_bot, channel_username = message.text.split(" ")
             try:

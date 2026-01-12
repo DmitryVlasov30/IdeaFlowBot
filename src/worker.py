@@ -97,9 +97,10 @@ class SubBot:
         def update_hello(message: Message):
             hello_msg = message.text[13:]
             self.hello_msg = hello_msg
-            self.service_msg_database.add_service_message({
-                "hello_message": hello_msg,
-                "ban_user_message": self.ban_usr_msg,
+            self.service_msg_database.update_service_message(**{
+                "bot_id": self.bot_info.id,
+                "hello_message": hello_msg.strip(),
+                "ban_user_message": self.ban_usr_msg.strip(),
             })
             self.sup_bot.send_message(message.chat.id, "👍")
 
@@ -108,10 +109,12 @@ class SubBot:
         def update_ban_user(message: Message):
             ban_usr_msg = message.text[16:]
             self.ban_usr_msg = ban_usr_msg
-            self.service_msg_database.add_service_message({
-                "hello_message": self.hello_msg,
-                "ban_user_message": self.ban_usr_msg,
+            self.service_msg_database.update_service_message(**{
+                "bot_id": self.bot_info.id,
+                "hello_message": self.hello_msg.strip(),
+                "ban_user_message": self.ban_usr_msg.strip(),
             })
+            self.sup_bot.send_message(message.chat.id, "👍")
 
         @self.sup_bot.message_handler(commands=["get_msg"])
         @filter_chats
@@ -194,7 +197,10 @@ class SubBot:
             markup.add(send_button, reject_button)
 
             if self.chat_suggest is None:
-                print(1)
+                self.sup_bot.send_message(
+                    chat_id=settings.general_admin,
+                    text="Бот предлога не добавлен в чат"
+                )
                 return
 
             self.sup_bot.copy_message(

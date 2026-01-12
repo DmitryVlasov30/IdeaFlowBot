@@ -1,6 +1,6 @@
 from telebot.types import Message
 
-from core_database.database import CrudBannedUser
+from src.core_database.database import CrudBannedUser
 from config import settings
 
 
@@ -17,5 +17,12 @@ def filter_chats(func):
         if (message.chat.id < 0 or
                 message.chat.id == settings.general_admin or
                 message.chat.id in settings.moderators):
+            return func(message)
+    return wrapper
+
+
+def filter_admin(func):
+    def wrapper(message: Message):
+        if message.chat.id == settings.general_admin or message.chat.id in settings.moderators:
             return func(message)
     return wrapper
