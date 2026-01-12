@@ -2,8 +2,9 @@ from sqlalchemy import insert, select, and_, delete, update
 
 from src.core_database.models.base import Base
 from src.core_database.models.banned_user import BannedUser
-from src.core_database.models.channel_suggest import ChannelSuggest
+from src.core_database.models.bots_data import BotsData
 from src.core_database.models.chat_admins import ChatAdmins
+from src.core_database.models.public_posts import PublicPosts
 from src.core_database.models.service_message import ServiceMessage
 from src.core_database.models.db_helper import db_helper
 
@@ -18,7 +19,7 @@ def drop_table():
 
 class CrudBannedUser:
     @staticmethod
-    def get_banned_users(id_user: int, id_channel: int):
+    def get_banned_users(id_user: int = None, id_channel: int = None):
         with db_helper.engine.connect() as conn:
             if id_user is None and id_channel is None:
                 return conn.execute(select(BannedUser)).fetchall()
@@ -58,26 +59,26 @@ class CrudBannedUser:
             conn.commit()
 
 
-class CrudChannelSuggest:
+class CrudBotsData:
     @staticmethod
-    def get_chat_suggest():
+    def get_bots_info():
         with db_helper.engine.connect() as conn:
-            return conn.execute(select(ChannelSuggest)).fetchall()
+            return conn.execute(select(BotsData)).fetchall()
 
     @staticmethod
-    def add_chat_suggest(data: dict):
+    def add_bots_info(data: dict):
         with db_helper.engine.connect() as conn:
-            conn.execute(insert(ChannelSuggest).values(data))
+            conn.execute(insert(BotsData).values(data))
             conn.commit()
 
     @staticmethod
-    def delete_chat_suggest(data: dict):
+    def delete_bots_info(data: dict):
         with db_helper.engine.connect() as conn:
             conn.execute(
-                delete(ChannelSuggest)
+                delete(BotsData)
                 .filter(and_(
-                    ChannelSuggest.channel_id == data["channel_id"],
-                    ChannelSuggest.bot_id == data["bot_id"],
+                    BotsData.channel_id == data["channel_id"],
+                    BotsData.bot_api_token == data["bot_api_token"],
                 ))
             )
             conn.commit()
@@ -125,7 +126,7 @@ class CrudServiceMessage:
     @staticmethod
     def get_service_message(bot_id: int):
         with db_helper.engine.connect() as conn:
-            return conn.execute(select(ServiceMessage).filter(ServiceMessage.bot_id == bot_id)).scalar()
+            return conn.execute(select(ServiceMessage).filter(ServiceMessage.bot_id == bot_id)).fetchall()
 
     @staticmethod
     def add_service_message(data: dict):
@@ -142,3 +143,20 @@ class CrudServiceMessage:
                 .values(hello_message=hello_message, ban_user_message=ban_user_message)
             )
             conn.commit()
+
+
+class CrudPublicPosts:
+    @staticmethod
+    def get_public_posts():
+        with db_helper.engine.connect() as conn:
+            return conn.execute(select(PublicPosts)).fetchall()
+
+    @staticmethod
+    def add_public_posts(data: dict):
+        with db_helper.engine.connect() as conn:
+            conn.execute(insert(PublicPosts).values(data))
+            conn.commit()
+
+
+if __name__ == '__main__':
+    ...
