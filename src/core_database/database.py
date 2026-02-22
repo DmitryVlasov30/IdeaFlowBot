@@ -1,4 +1,5 @@
 from sqlalchemy import insert, select, and_, delete, update
+from sqlalchemy.orm import Mapped
 
 from src.core_database.models.base import Base
 from src.core_database.models.banned_user import BannedUser
@@ -6,6 +7,7 @@ from src.core_database.models.bots_data import BotsData
 from src.core_database.models.chat_admins import ChatAdmins
 from src.core_database.models.public_posts import PublicPosts
 from src.core_database.models.service_message import ServiceMessage
+from src.core_database.models.users import UserData
 from src.core_database.models.db_helper import db_helper
 
 
@@ -15,6 +17,45 @@ def create_table():
 
 def drop_table():
     Base.metadata.drop_all(db_helper.engine)
+
+
+class CrudUserData:
+    @staticmethod
+    def get_user_data(user_id: int = None, bot_username: str = None):
+        with db_helper.engine.connect() as conn:
+            if user_id is None and bot_username is None:
+                return conn.execute(select(UserData)).fetchall()
+            elif bot_username is None:
+                return conn.execute(select(UserData).filter(UserData.user_id == user_id)).fetchall()
+            elif user_id is None:
+                return conn.execute(select(UserData).filter(UserData.bot_username == bot_username)).fetchall()
+            else:
+                return conn.execute(
+                    select(UserData)
+                    .filter(and_(UserData.user_id == user_id, UserData.bot_username == bot_username))
+                ).fetchall()
+
+    @staticmethod
+    def insert_user(data: dict):
+        with db_helper.engine.connect() as conn:
+            stmt = (
+                insert(UserData).values(data)
+            )
+            conn.execute(stmt)
+            conn.commit()
+
+    @staticmethod
+    def delete_user_data(user_id: int, bot_username: str):
+        with db_helper.engine.connect() as conn:
+            stmt = (
+                delete(UserData)
+                .filter(and_(
+                    UserData.user_id == user_id,
+                    UserData.bot_username == bot_username
+                ))
+            )
+            conn.execute(stmt)
+            conn.commit()
 
 
 class CrudBannedUser:
@@ -135,12 +176,16 @@ class CrudServiceMessage:
             conn.commit()
 
     @staticmethod
-    def update_service_message(bot_id: int, hello_message: str, ban_user_message: str):
+    def update_service_message(bot_id: int, hello_message: str, ban_user_message: str, send_post_message: str):
         with db_helper.engine.connect() as conn:
             conn.execute(
                 update(ServiceMessage)
                 .filter(ServiceMessage.bot_id == bot_id)
-                .values(hello_message=hello_message, ban_user_message=ban_user_message)
+                .values(
+                    hello_message=hello_message,
+                    ban_user_message=ban_user_message,
+                    send_post_message=send_post_message
+                )
             )
             conn.commit()
 

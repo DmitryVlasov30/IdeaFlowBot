@@ -8,3 +8,4 @@ class ServiceMessage(Base):
     bot_id: Mapped[int] = mapped_column(unique=True)
     hello_message: Mapped[str]
     ban_user_message: Mapped[str]
+    send_post_message: Mapped[str]
