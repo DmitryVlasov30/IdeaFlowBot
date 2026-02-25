@@ -1,9 +1,11 @@
 class Settings:
     api_token_bot = "АПИ токен телеграмма"
-    general_admin: int = "Главный админ"
+    general_admin: int = 0
     moderators: set = set()
-    hello_msg: str = "hello"
-    ban_msg: str = "ban"
+    hello_msg: str = "Здравствуйте!\n\nНапишите Ваш вопрос, и мы ответим Вам в ближайшее время"
+    ban_msg: str = "К сожалению администратор предложки дал вам бан("
+    send_post_msg: str = ("Спасибо за пост, мы опубликуем его в скором времени\n\n"
+                          "Просьба не спамить, все посты публикуются в порядке очереди")
 
 
 settings = Settings()
