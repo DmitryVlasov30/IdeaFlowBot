@@ -130,6 +130,9 @@ class CrudChatAdmins:
     @staticmethod
     async def get_chat_admins(bot: int = None, chat: int = None):
         async with db_helper.engine.connect() as conn:
+            if bot is not None and chat is None:
+                result = (await conn.execute(select(ChatAdmins).filter(ChatAdmins.bot_id == bot))).fetchall()
+                return result[0][1] if result else None
             if bot is None and chat is None:
                 return (await conn.execute(select(ChatAdmins))).fetchall()
             elif bot is None:

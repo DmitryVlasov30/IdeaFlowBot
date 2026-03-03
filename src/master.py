@@ -7,9 +7,9 @@ from src.utils import filter_admin
 
 from telebot.async_telebot import AsyncTeleBot
 from telebot.types import BotCommand, BotCommandScopeChat, Message
-import requests
-from threading import Thread
+from loguru import logger
 import asyncio
+import aiohttp
 
 
 class MasterBot:
@@ -33,6 +33,7 @@ class MasterBot:
 
         asyncio.create_task(self.__setup_bot_info())
         self.__setup_handlers()
+        logger.info("init bot")
 
     async def __setup_bot_info(self):
         await self.main_bot.set_my_commands(
@@ -52,14 +53,15 @@ class MasterBot:
                 print(1)
                 channel_username = ""
                 try:
-                    result = requests.get(
-                        url=f"https://api.telegram.org/bot{api_token}/getchat",
-                        params={"chat_id": channel_id}
-                    ).json()
-                    if result["ok"]:
-                        channel_username = result["result"]["username"]
-                    else:
-                        raise HTTPError(result)
+                    url = f"https://api.telegram.org/bot{api_token}/getchat?chat_id={channel_id}"
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(url) as response:
+                            result = await response.json()
+                            if result["ok"]:
+                                channel_username = result["result"]["username"]
+                            else:
+                                raise HTTPError(result)
+                            await session.close()
                 except:
                     print(bot_username, channel_id)
                     continue
@@ -70,6 +72,7 @@ class MasterBot:
 
         @self.main_bot.message_handler(commands=["add"])
         @filter_admin
+        @logger.catch
         async def add_bot(message: Message):
             command, api_token, channel_username = message.text.split(" ")
             if "https" in channel_username:
@@ -83,6 +86,7 @@ class MasterBot:
                 await self.main_bot.send_message(message.chat.id, "канал не найден")
                 return
             print(1)
+            logger.info("add")
             bot = await SubBot.create(
                 api_token_bot=api_token,
                 channel_username=channel_username,
@@ -90,6 +94,7 @@ class MasterBot:
                 ban_usr_msg=settings.ban_msg,
                 send_post_msg=settings.send_post_msg,
             )
+            logger.info("init bot")
             print(await bot.check_admin(channel_id))
             if not (await bot.check_admin(channel_id)):
                 await self.main_bot.send_message(
@@ -97,7 +102,7 @@ class MasterBot:
                     text=f"добавьте бота в администраторы канала: {channel_username}"
                 )
                 return
-            for bots in await self.bots_database.get_bots_info():
+            for bots in (await self.bots_database.get_bots_info()):
                 if bots[1] == bot.bot_info.username.replace("@", ""):
                     await self.main_bot.send_message(
                         text="бот уже привязан к чату",
@@ -138,7 +143,7 @@ class MasterBot:
                 username = (await self.bots_work[idx].getter_name()).replace("@", "")
                 if username == username_bot.replace("@", ""):
                     index_bot = idx
-                    await self.bots_work[idx][1].stop_bot()
+                    await self.bots_work[idx].stop_bot()
                     print(self.bots_work)
 
             print(index_bot)
@@ -168,34 +173,32 @@ class MasterBot:
         self.bot_info = await self.main_bot.get_me()
         bots_lst = await self.bots_database.get_bots_info()
         print(bots_lst)
-        # self.bots_database.delete_bots_info({"bot_username": "Podslushano_mtusi_bot", "channel_id": "-1003005269923"})
         try:
             print(f"main bot @{self.bot_info.username} working")
             for api_token, bot_username, channel_id, id_row in bots_lst:
-                # https://core.telegram.org/bots/api#getchat
+                url = f"https://api.telegram.org/bot{api_token}/getchat?chat_id={channel_id}"
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url) as response:
+                        result = await response.json()
+                        if result["ok"]:
+                            channel_username = result["result"]["username"]
+                        else:
+                            print(result, api_token, url)
+                            raise HTTPError(result)
 
-                result = requests.get(
-                    url=f"https://api.telegram.org/bot{api_token}/getchat",
-                    params={"chat_id": channel_id}
-                ).json()
-                if result["ok"]:
-                    channel_username = result["result"]["username"]
-                else:
-                    raise HTTPError(result)
-
-                print(channel_id)
-                channel_username = "@" + channel_username
-                print(channel_username)
-                print(channel_username)
-                bot = await SubBot.create(
-                    api_token_bot=api_token,
-                    channel_username=channel_username,
-                    hello_msg=settings.hello_msg,
-                    ban_usr_msg=settings.ban_msg,
-                    send_post_msg=settings.send_post_msg
-                )
-                await bot.run_bot()
-                self.bots_work.append(bot)
+                        print(channel_id)
+                        channel_username = "@" + channel_username
+                        print(channel_username)
+                        bot = await SubBot.create(
+                            api_token_bot=api_token,
+                            channel_username=channel_username,
+                            hello_msg=settings.hello_msg,
+                            ban_usr_msg=settings.ban_msg,
+                            send_post_msg=settings.send_post_msg
+                        )
+                        await bot.run_bot()
+                        self.bots_work.append(bot)
+                        await session.close()
             await self.main_bot.infinity_polling(timeout=10)
         except Exception as ex:
             print(f"[ERROR] bot: @{self.bot_info.username}, mistake: {ex}")

@@ -1,6 +1,9 @@
 from src.master import MasterBot
 from config import settings
+from loguru import logger
 import asyncio
+
+logger.add(settings.logging_path, level="DEBUG")
 
 
 async def main():

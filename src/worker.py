@@ -1,8 +1,9 @@
 import asyncio
-from threading import Timer
+from loguru import logger
 
 from sqlalchemy.exc import IntegrityError
 from telebot.async_telebot import AsyncTeleBot
+from telebot import formatting
 from telebot.asyncio_helper import ApiTelegramException
 from telebot.types import (Message, InlineKeyboardMarkup,
                            InlineKeyboardButton, CallbackQuery,
@@ -45,13 +46,8 @@ class SubBot:
         self.channel_username = channel_username
         self.sup_bot = AsyncTeleBot(self.token)
         self.users_data = set()
-        asyncio.create_task(self.__setup_bot_info())
 
         self.chat_suggests = None
-        if self.chat_suggests:
-            self.chat_suggest = self.chat_suggests[0][-2]
-        else:
-            self.chat_suggest = None
 
     @classmethod
     async def create(cls,
@@ -62,10 +58,12 @@ class SubBot:
                      send_post_msg: str
                      ):
         self = cls(api_token_bot, channel_username, hello_msg, ban_usr_msg, send_post_msg)
+        logger.info("init")
         await self.__setup_bot_info()
         await self.__setup_service_msg()
         await self.__setup_handlers()
 
+        logger.info("create")
         return self
 
     async def __setup_bot_info(self):
@@ -79,8 +77,8 @@ class SubBot:
         )
         self.bot_info = await self.sup_bot.get_me()
         self.channel_id = (await self.sup_bot.get_chat(self.channel_username)).id
-        self.chat_suggest = (await self.admins_database.get_chat_admins(bot=self.bot_info.id))[0][1]
-        # print(self.chat_suggest)
+        self.chat_suggest = (await self.admins_database.get_chat_admins(bot=self.bot_info.id))
+        logger.info(f"{self.chat_suggest}")
         users = await self.user_database.get_user_data(bot_username=self.bot_info.username)
         self.users_data = set(user_id for user_id, bot_username, id_el in users)
 
@@ -129,7 +127,7 @@ class SubBot:
             await __check_exist_user(message)
             message_text = self.hello_msg
             if not is_command:
-                message_text += f"Подпишитесь на канал: {self.channel_username}"
+                message_text = f"Чтобы продолжить, подпишитесь на канал: {self.channel_username}"
 
             markup = InlineKeyboardMarkup()
             btn_subscribe = InlineKeyboardButton(
@@ -242,7 +240,7 @@ class SubBot:
                 })
                 self.chat_suggest = chat_member_info.chat.id
             else:
-                chats = self.admins_database.get_chat_admins(bot=self.bot_info.id, chat=chat_member_info.chat.id)
+                chats = await self.admins_database.get_chat_admins(bot=self.bot_info.id, chat=chat_member_info.chat.id)
                 if chats:
                     await self.admins_database.delete_chat_admins({
                         "bot_id": self.bot_info.id,
@@ -267,6 +265,7 @@ class SubBot:
 
         @self.sup_bot.message_handler(content_types=["text", "photo", "video", "animation"])
         async def get_suggest(message: Message):
+            print(self.chat_suggest)
             if message.chat.id < 0:
                 return
             await __check_exist_user(message)
@@ -373,7 +372,8 @@ class SubBot:
 
         async def add_info(call: CallbackQuery):
             info = await self.sup_bot.get_chat(call.data.split(";")[1])
-            msg = "информация: \n" + f"id: `{info.id}`\n" + f"username @{info.username}\n" + f"name: `{info.first_name}`"
+            user = formatting.escape_markdown(info.username)
+            msg = "информация: \n" + f"id: `{info.id}`\n" + f"username @{user}\n" + f"name: `{info.first_name}`"
             if info.last_name is not None:
                 msg += f" last_name: `{info.last_name}`"
             await self.sup_bot.send_message(
@@ -404,6 +404,11 @@ class SubBot:
                 )
             except Exception as ex:
                 await self.sup_bot.send_message(chat_id=call.message.chat.id, text=f"Произошла ошибка при обработки: {ex}")
+
+        async def delayed_task(delay, coro):
+            print(12)
+            await asyncio.sleep(delay)
+            await coro
 
         async def send_suggest(call: CallbackQuery):
             command, chat_id, time = call.data.split(";")
@@ -437,13 +442,8 @@ class SubBot:
                 message_id=call.message.message_id,
                 reply_markup=markup,
             )
-            timer_th = Timer(
-                seconds_time,
-                __send_suggest, args=(
-                    call,
-                )
-            )
-            timer_th.start()
+            print(12)
+            await delayed_task(15, __send_suggest(call))
 
         async def reject_post(call: CallbackQuery):
             message_id = call.message.message_id
@@ -545,6 +545,7 @@ class SubBot:
     async def check_admin(self, channel_id) -> bool:
         try:
             info = await self.sup_bot.get_chat_member(channel_id, self.bot_info.id)
+            print(13)
             return True
         except ApiTelegramException:
             return False
