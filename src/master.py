@@ -1,11 +1,13 @@
+from datetime import timezone, timedelta, datetime
+
 from requests import HTTPError
 
 from config import settings
-from src.core_database.database import CrudBotsData
+from src.core_database.database import CrudBotsData, CrudDelayedPosts
 from src.worker import SubBot
 from src.utils import filter_admin
 
-from telebot.async_telebot import AsyncTeleBot
+from telebot.async_telebot import AsyncTeleBot, asyncio_helper
 from telebot.types import BotCommand, BotCommandScopeChat, Message
 from loguru import logger
 import asyncio
@@ -14,9 +16,11 @@ import aiohttp
 
 class MasterBot:
     def __init__(self, api_token_bot):
+        self.delayed_task = None
         self.bot_info = None
 
         self.bots_database = CrudBotsData()
+        self.delayed_database = CrudDelayedPosts()
 
         self.commands = [
             BotCommand("bots", "выводит список подчиненных ботов"),
@@ -25,6 +29,8 @@ class MasterBot:
         ]
 
         self.api_token_bot = api_token_bot
+        asyncio_helper.proxy = settings.proxies["http"]
+        asyncio_helper.REQUEST_LIMIT = 500
         self.main_bot = AsyncTeleBot(self.api_token_bot)
         self.bots_work = []
 
@@ -34,6 +40,42 @@ class MasterBot:
         asyncio.create_task(self.__setup_bot_info())
         self.__setup_handlers()
         logger.info("init bot")
+
+    @logger.catch
+    async def __send_post(self, delayed_post):
+        tz = timezone(timedelta(hours=3))
+        now = datetime.now(tz)
+        bots_data = {}
+        for bot in self.bots_work:
+            bots_data[bot.bot_info.id] = bot
+
+        public_data = []
+        for bot, info_post in delayed_post.items():
+            for message_id, info in info_post:
+                time_post, sender_id = info
+                if now.timestamp() >= time_post:
+                    public_data.append((message_id, sender_id, bot))
+
+        for message_id, sender_id, bot in public_data:
+            await self.delayed_database.delete_delayed_posts({
+                "bot_id": bot,
+                "message_id": message_id,
+            })
+
+            await bots_data[bot].send_delayed_message(message_id, sender_id)
+
+    @logger.catch
+    async def __delayed_posts_checker(self):
+        while True:
+            delayed_posts = {}
+            for bot in self.bots_work:
+                delayed_message = await bot.getter_delayed_info()
+                info_lst = sorted(delayed_message.items(), key=lambda item: (item[1], item[0]))
+                delayed_posts[bot.bot_info.id] = info_lst
+
+            print(delayed_posts)
+            await self.__send_post(delayed_posts)
+            await asyncio.sleep(settings.const_time_sleep)
 
     async def __setup_bot_info(self):
         await self.main_bot.set_my_commands(
@@ -49,24 +91,26 @@ class MasterBot:
             all_info = await self.bots_database.get_bots_info()
             print(all_info)
             answer = "боты:\n"
-            for api_token, bot_username, channel_id, id_row in all_info:
-                print(1)
-                channel_username = ""
-                try:
-                    url = f"https://api.telegram.org/bot{api_token}/getchat?chat_id={channel_id}"
-                    async with aiohttp.ClientSession() as session:
-                        async with session.get(url) as response:
+            async with aiohttp.ClientSession() as session:
+                for api_token, bot_username, channel_id, id_row in all_info:
+                    channel_username = ""
+                    # noinspection PyBroadException
+                    try:
+                        url = f"https://api.telegram.org/bot{api_token}/getchat?chat_id={channel_id}"
+                        proxy_auth = aiohttp.BasicAuth(settings.proxy_user, settings.proxy_password)
+                        print(12)
+                        async with session.get(url, proxy=f"http://{settings.proxy_host_port}", proxy_auth=proxy_auth) as response:
                             result = await response.json()
                             if result["ok"]:
                                 channel_username = result["result"]["username"]
                             else:
                                 raise HTTPError(result)
-                            await session.close()
-                except:
-                    print(bot_username, channel_id)
-                    continue
-                answer += (f"channel: @{channel_username}\n"
-                           f"bot: @{bot_username}\n\n")
+                    except:
+                        print(bot_username, channel_id)
+                        continue
+                    answer += (f"channel: @{channel_username}\n"
+                               f"bot: @{bot_username}\n\n")
+                await session.close()
             answer += "\n"
             await self.main_bot.send_message(message.chat.id, answer)
 
@@ -74,15 +118,20 @@ class MasterBot:
         @filter_admin
         @logger.catch
         async def add_bot(message: Message):
-            command, api_token, channel_username = message.text.split(" ")
+            try:
+                command, api_token, channel_username = message.text.split(" ")
+            except ValueError:
+                await self.main_bot.send_message(settings.general_admin, "указаны не правильные входные данные")
+                return
             if "https" in channel_username:
                 channel_username = "@" + channel_username.split("/")[-1]
             if "@" not in channel_username:
                 channel_username = "@" + channel_username
 
+            # noinspection PyBroadException
             try:
                 channel_id = (await self.main_bot.get_chat(channel_username)).id
-            except Exception as e:
+            except Exception:
                 await self.main_bot.send_message(message.chat.id, "канал не найден")
                 return
             print(1)
@@ -121,14 +170,25 @@ class MasterBot:
                 "бот добавлен"
             )
 
+        @self.main_bot.message_handler(commands=["start"])
+        @logger.catch
+        async def start(message: Message):
+            print(message)
+
+            await self.main_bot.send_message(
+                settings.general_admin, "start"
+            )
+
         @self.main_bot.message_handler(commands=["remove"])
         @filter_admin
         async def remove_bot(message: Message):
             command, username_bot, channel_username = message.text.split(" ")
+
+            # noinspection PyBroadException
             try:
                 channel_id = await self.main_bot.get_chat(channel_username)
                 channel_id = channel_id.id
-            except Exception as e:
+            except Exception:
                 await self.main_bot.send_message(message.chat.id, "канала не существует")
                 return
             await self.bots_database.delete_bots_info(
@@ -169,16 +229,20 @@ class MasterBot:
                     data=message,
                 )
 
+    @logger.catch
     async def run_bot(self):
+        print("run")
         self.bot_info = await self.main_bot.get_me()
+        print(self.bot_info)
         bots_lst = await self.bots_database.get_bots_info()
         print(bots_lst)
         try:
             print(f"main bot @{self.bot_info.username} working")
             for api_token, bot_username, channel_id, id_row in bots_lst:
                 url = f"https://api.telegram.org/bot{api_token}/getchat?chat_id={channel_id}"
+                proxy_auth = aiohttp.BasicAuth(settings.proxy_user, settings.proxy_password)
                 async with aiohttp.ClientSession() as session:
-                    async with session.get(url) as response:
+                    async with session.get(url, proxy=f"http://{settings.proxy_host_port}", proxy_auth=proxy_auth) as response:
                         result = await response.json()
                         if result["ok"]:
                             channel_username = result["result"]["username"]
@@ -198,7 +262,8 @@ class MasterBot:
                         )
                         await bot.run_bot()
                         self.bots_work.append(bot)
-                        await session.close()
-            await self.main_bot.infinity_polling(timeout=10)
+            self.delayed_task = asyncio.create_task(self.__delayed_posts_checker())
+            print(1234)
+            await self.main_bot.polling(none_stop=True)
         except Exception as ex:
             print(f"[ERROR] bot: @{self.bot_info.username}, mistake: {ex}")

@@ -1,17 +1,23 @@
 import asyncio
+
+import aiohttp
+from aiohttp import TCPConnector
 from loguru import logger
 
 from sqlalchemy.exc import IntegrityError
 from telebot.async_telebot import AsyncTeleBot
-from telebot import formatting
+from telebot import asyncio_helper
 from telebot.asyncio_helper import ApiTelegramException
 from telebot.types import (Message, InlineKeyboardMarkup,
                            InlineKeyboardButton, CallbackQuery,
                            ChatMemberUpdated, BotCommand, BotCommandScopeAllGroupChats)
 
-from src.core_database.database import CrudChatAdmins, CrudBannedUser, CrudServiceMessage, CrudPublicPosts, CrudUserData
+from src.core_database.database import (CrudChatAdmins, CrudBannedUser,
+                                        CrudServiceMessage, CrudPublicPosts, CrudUserData, CrudDelayedPosts)
 from src.utils import Utils, filter_chats
 from config import settings
+from src.markups import MarkupButton
+from datetime import datetime, timedelta, timezone
 
 
 class SubBot:
@@ -41,15 +47,21 @@ class SubBot:
         self.service_msg_database = CrudServiceMessage()
         self.public_posts = CrudPublicPosts()
         self.user_database = CrudUserData()
+        self.delayed_database = CrudDelayedPosts()
 
         self.token = api_token_bot
         self.channel_username = channel_username
+        asyncio_helper.proxy = settings.proxies["http"]
+        asyncio_helper.REQUEST_LIMIT = 100
         self.sup_bot = AsyncTeleBot(self.token)
         self.users_data = set()
+
+        self.delayed_message = {}
 
         self.chat_suggests = None
 
     @classmethod
+    @logger.catch
     async def create(cls,
                      api_token_bot: str,
                      channel_username: str,
@@ -60,12 +72,16 @@ class SubBot:
         self = cls(api_token_bot, channel_username, hello_msg, ban_usr_msg, send_post_msg)
         logger.info("init")
         await self.__setup_bot_info()
+        logger.info("setup bot info")
         await self.__setup_service_msg()
+        logger.info("setup service msg")
         await self.__setup_handlers()
+        logger.info("setup handlers")
 
         logger.info("create")
         return self
 
+    @logger.catch
     async def __setup_bot_info(self):
         await self.sup_bot.set_my_commands(
             commands=self.commands,
@@ -81,7 +97,12 @@ class SubBot:
         logger.info(f"{self.chat_suggest}")
         users = await self.user_database.get_user_data(bot_username=self.bot_info.username)
         self.users_data = set(user_id for user_id, bot_username, id_el in users)
+        delayed_message = await self.delayed_database.get_delayed_posts(bot_id=self.bot_info.id)
+        self.delayed_message = {}
+        for bot_id, time_seconds, message_id, sender_id, id_item in delayed_message:
+            self.delayed_message[message_id] = (time_seconds, sender_id)
 
+    @logger.catch
     async def __setup_service_msg(self):
         message_info = await self.service_msg_database.get_service_message(self.bot_info.id)
         if message_info:
@@ -96,6 +117,7 @@ class SubBot:
                 "send_post_message": self.send_post_msg,
             })
 
+    @logger.catch
     async def __setup_handlers(self):
         async def answer_for_ban_user(message: Message):
             await self.sup_bot.send_message(chat_id=message.chat.id, text=self.ban_usr_msg)
@@ -120,6 +142,7 @@ class SubBot:
             except IntegrityError:
                 pass
 
+        @logger.catch
         @self.sup_bot.message_handler(commands=['start'])
         async def start(message: Message, is_command=True):
             if message.chat.id < 0:
@@ -135,6 +158,7 @@ class SubBot:
                 url=f"https://t.me/{self.channel_username[1:]}",
             )
             markup.add(btn_subscribe)
+            logger.info("start")
             info_subscribe = await self.sup_bot.get_chat_member(user_id=message.chat.id, chat_id=self.channel_id)
             if info_subscribe.status != "left":
                 markup = None
@@ -143,6 +167,7 @@ class SubBot:
 
             await self.sup_bot.send_message(message.chat.id, message_text, reply_markup=markup)
 
+        @logger.catch
         @self.sup_bot.message_handler(commands=["ban_lst"])
         @filter_chats
         async def ban_lst(message: Message):
@@ -154,6 +179,7 @@ class SubBot:
                     answer += f"`{user_info.id}` `{user_info.username}`\n"
             await self.sup_bot.send_message(chat_id=message.chat.id, text=answer, parse_mode='Markdown')
 
+        @logger.catch
         @self.sup_bot.message_handler(commands=["unban"])
         @filter_chats
         async def unban_user(message: Message):
@@ -165,6 +191,7 @@ class SubBot:
             else:
                 await self.sup_bot.send_message(message.chat.id, "пользователь не забанен")
 
+        @logger.catch
         @self.sup_bot.message_handler(commands=["update_hello"])
         @filter_chats
         async def update_hello(message: Message):
@@ -178,6 +205,7 @@ class SubBot:
             })
             await self.sup_bot.send_message(message.chat.id, "👍")
 
+        @logger.catch
         @self.sup_bot.message_handler(commands=["update_ban_user"])
         @filter_chats
         async def update_ban_user(message: Message):
@@ -191,6 +219,7 @@ class SubBot:
             })
             await self.sup_bot.send_message(message.chat.id, "👍")
 
+        @logger.catch
         @self.sup_bot.message_handler(commands=["update_send_post"])
         async def update_send_post(message: Message):
             msg_send = message.text[17:]
@@ -203,6 +232,7 @@ class SubBot:
             })
             await self.sup_bot.send_message(message.chat.id, "👍")
 
+        @logger.catch
         @self.sup_bot.message_handler(commands=["get_msg"])
         @filter_chats
         async def get_msg(message: Message):
@@ -214,6 +244,7 @@ class SubBot:
                       f"{self.send_post_msg}\n\n")
             await self.sup_bot.send_message(message.chat.id, answer, parse_mode="Markdown")
 
+        @logger.catch
         @self.sup_bot.my_chat_member_handler()
         async def add_chat_member(chat_member_info: ChatMemberUpdated):
             if chat_member_info.chat.type == "channel":
@@ -248,6 +279,7 @@ class SubBot:
                     })
                 self.chat_suggest = None
 
+        @logger.catch
         @self.sup_bot.message_handler(
             func=lambda message: message.reply_to_message is not None
         )
@@ -263,6 +295,7 @@ class SubBot:
                 text=message.text
             )
 
+        @logger.catch
         @self.sup_bot.message_handler(content_types=["text", "photo", "video", "animation"])
         async def get_suggest(message: Message):
             print(self.chat_suggest)
@@ -271,7 +304,7 @@ class SubBot:
             await __check_exist_user(message)
             info_subscribe = await self.sup_bot.get_chat_member(user_id=message.chat.id, chat_id=self.channel_id)
             await start(message, is_command=False)
-            print(1)
+            logger.info("123")
             if info_subscribe.status == "left":
                 return
 
@@ -282,34 +315,6 @@ class SubBot:
                 await answer_for_ban_user(message)
                 return
 
-            markup = InlineKeyboardMarkup(row_width=2)
-
-            banned_user = InlineKeyboardButton(
-                text="👮‍♂️бан",
-                callback_data=f"banned_user;{message.chat.id};0"
-            )
-            addition_info = InlineKeyboardButton(
-                text=f"@{message.chat.username}",
-                callback_data=f"add_info;{message.chat.id};0"
-            )
-            send_button = InlineKeyboardButton(
-                text="✅Одобрить",
-                callback_data=f"send_suggest;{message.chat.id};0"
-            )
-            reject_button = InlineKeyboardButton(
-                text="❌Отклонить",
-                callback_data=f"reject;{message.chat.id};0"
-            )
-
-            delayed_button = InlineKeyboardButton(
-                text="Не откладывать",
-                callback_data=f"delayed_button;{message.chat.id};0"
-            )
-
-            markup.add(banned_user, addition_info)
-            markup.add(send_button, reject_button)
-            markup.add(delayed_button)
-
             if self.chat_suggest is None:
                 await self.sup_bot.send_message(
                     chat_id=settings.general_admin,
@@ -317,72 +322,10 @@ class SubBot:
                 )
                 return
 
-            if self.bot_info.username == "spletni_love_bot":
-                if message.content_type == "text":
-                    await self.sup_bot.send_message(
-                        chat_id=self.chat_suggest,
-                        text=message.text + "\n💌",
-                        reply_markup=markup
-                    )
-                elif message.content_type == "photo":
-                    if message.caption is None:
-                        await self.sup_bot.send_photo(
-                            chat_id=self.chat_suggest,
-                            caption="💌",
-                            photo=message.photo,
-                            reply_markup=markup
-                        )
-                    else:
-                        await self.sup_bot.send_photo(
-                            chat_id=self.chat_suggest,
-                            caption=message.caption + "\n💌",
-                            photo=message.photo,
-                            reply_markup=markup
-                        )
-                elif message.content_type == "video":
-                    if message.caption is None:
-                        await self.sup_bot.send_video(
-                            chat_id=self.chat_suggest,
-                            caption="💌",
-                            video=message.video,
-                            reply_markup=markup
-                        )
-                    else:
-                        await self.sup_bot.send_video(
-                            chat_id=self.chat_suggest,
-                            caption=message.caption + "\n💌",
-                            video=message.video,
-                            reply_markup=markup
-                        )
-                else:
-                    await self.sup_bot.copy_message(
-                        chat_id=self.chat_suggest,
-                        from_chat_id=message.chat.id,
-                        message_id=message.message_id,
-                        reply_markup=markup,
-                    )
-                return
-            print(self.chat_suggest)
-            await self.sup_bot.copy_message(
-                chat_id=self.chat_suggest,
-                from_chat_id=message.chat.id,
-                message_id=message.message_id,
-                reply_markup=markup,
-            )
+            await MarkupButton(self.sup_bot).main_menu(message, self.chat_suggest)
 
-        async def add_info(call: CallbackQuery):
-            info = await self.sup_bot.get_chat(call.data.split(";")[1])
-            user = formatting.escape_markdown(info.username)
-            msg = "информация: \n" + f"id: `{info.id}`\n" + f"username @{user}\n" + f"name: `{info.first_name}`"
-            if info.last_name is not None:
-                msg += f" last_name: `{info.last_name}`"
-            await self.sup_bot.send_message(
-                chat_id=call.message.chat.id,
-                text=msg,
-                parse_mode="Markdown",
-            )
-
-        async def __send_suggest(call: CallbackQuery):
+        @logger.catch
+        async def send_suggest(call: CallbackQuery):
             try:
                 await save_post(call)
                 user_info = await self.sup_bot.get_chat(call.data.split(";")[1])
@@ -405,53 +348,7 @@ class SubBot:
             except Exception as ex:
                 await self.sup_bot.send_message(chat_id=call.message.chat.id, text=f"Произошла ошибка при обработки: {ex}")
 
-        async def delayed_task(delay, coro):
-            print(12)
-            await asyncio.sleep(delay)
-            await coro
-
-        async def send_suggest(call: CallbackQuery):
-            command, chat_id, time = call.data.split(";")
-            if int(time) == 0:
-                await __send_suggest(call)
-                return
-
-            seconds_time = self.delayed_messages_minutes[int(time)]
-            time = int(time)
-            if time <= 3:
-                text_btn = f"Отложено на {seconds_time} минут"
-                seconds_time *= 60
-            else:
-                if seconds_time == 1:
-                    text_btn = f"Отложено на {seconds_time} час"
-                elif 2 <= seconds_time <= 4:
-                    text_btn = f"Отложено на {seconds_time} часа"
-                else:
-                    text_btn = f"Отложено на {seconds_time} часов"
-                seconds_time *= 60 * 60
-
-            print(seconds_time)
-            markup = InlineKeyboardMarkup()
-            btn_info = InlineKeyboardButton(
-                text=text_btn,
-                callback_data=f"info_delayed;{time}"
-            )
-            markup.add(btn_info)
-            await self.sup_bot.edit_message_reply_markup(
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                reply_markup=markup,
-            )
-            print(12)
-            await delayed_task(15, __send_suggest(call))
-
-        async def reject_post(call: CallbackQuery):
-            message_id = call.message.message_id
-            await self.sup_bot.delete_message(
-                chat_id=call.message.chat.id,
-                message_id=message_id,
-            )
-
+        @logger.catch
         async def add_ban_user(call: CallbackQuery):
             user_info = await self.sup_bot.get_chat(call.data.split(";")[1])
 
@@ -478,74 +375,82 @@ class SubBot:
                 chat_id=self.chat_suggest,
             )
 
-        async def delayed_post(call: CallbackQuery):
-            command, message_chat_id, time = call.data.split(";")
-            next_time = (int(time) + 1) % len(self.delayed_messages_minutes)
-            user_info = await self.sup_bot.get_chat(message_chat_id)
-            message_btn = "Не откладывать"
-            info = self.delayed_messages_minutes[next_time]
-            if 0 < next_time <= 2:
-                message_btn = f"Отложить на {info} минут"
-            elif next_time != 0:
-                if next_time == 3:
-                    message_btn = f"Отложить на {info} час"
-                elif 1 < next_time <= 6:
-                    message_btn = f"Отложить на {info} часа"
-                else:
-                    message_btn = f"Отложить на {info} часов"
+        async def get_timestamp_public(time) -> float:
+            tz = timezone(timedelta(hours=3))
+            hour, minute = map(int, time.split(':'))
+            now = datetime.now(tz)
+            target = now.replace(hour=hour, minute=minute)
+            if now >= target:
+                target += timedelta(days=1)
 
-            markup = InlineKeyboardMarkup()
+            time_public = target.timestamp()
+            return time_public
 
-            banned_user = InlineKeyboardButton(
-                text="👮‍♂️бан",
-                callback_data=f"banned_user;{message_chat_id};{next_time}"
-            )
-            addition_info = InlineKeyboardButton(
-                text=f"@{user_info.username}",
-                callback_data=f"add_info;{message_chat_id};{next_time}"
-            )
-            send_button = InlineKeyboardButton(
-                text="✅Одобрить",
-                callback_data=f"send_suggest;{message_chat_id};{next_time}"
-            )
-            reject_button = InlineKeyboardButton(
-                text="❌Отклонить",
-                callback_data=f"reject;{message_chat_id};{next_time}"
-            )
+        @logger.catch
+        async def save_delayed_post(call: CallbackQuery):
+            command, day_div, time, message_id, sender_id = call.data.split(";")
+            time_public = await get_timestamp_public(time)
 
-            delayed_button = InlineKeyboardButton(
-                text=message_btn,
-                callback_data=f"delayed_button;{message_chat_id};{next_time}"
-            )
+            message_id = int(message_id)
+            print(self.delayed_message)
+            print(message_id)
+            if message_id in self.delayed_message:
+                self.delayed_message[message_id] = (int(time_public), sender_id)
+                await self.delayed_database.setter_post(
+                    bot_id=self.bot_info.id,
+                    message_id=message_id,
+                    new_time_seconds=int(time_public),
+                )
+                return
+            await self.delayed_database.add_delayed_posts({
+                "bot_id": self.bot_info.id,
+                "time_seconds": int(time_public),
+                "message_id": message_id,
+                "sender_id": sender_id
+            })
+            self.delayed_message[message_id] = (int(time_public), sender_id)
 
-            markup.add(banned_user, addition_info)
-            markup.add(send_button, reject_button)
-            markup.add(delayed_button)
-
-            await self.sup_bot.edit_message_reply_markup(
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                reply_markup=markup,
-            )
-
+        @logger.catch
         @self.sup_bot.callback_query_handler(func=lambda call: True)
         async def callback(call: CallbackQuery):
+            buttons_func = MarkupButton(self.sup_bot)
             match call.data.split(";")[0]:
                 case "banned_user":
                     await add_ban_user(call)
                 case "add_info":
-                    await add_info(call)
+                    await buttons_func.add_info(call)
                 case "send_suggest":
                     await send_suggest(call)
                 case "reject":
-                    await reject_post(call)
+                    await buttons_func.reject_post(call)
                 case "delayed_button":
-                    await delayed_post(call)
+                    if "Отложено" in call.message.text:
+                        del self.delayed_message[call.message.id]
+                        await self.delayed_database.delete_delayed_posts({
+                            "bot_id": self.bot_info.id,
+                            "message_id": call.message.id,
+                        })
+                    logger.info("delayed_button")
+                    await buttons_func.delayed_post(call)
+                case "morning" | "dinner" | "evening" | "night":
+                    await buttons_func.delayed_day(call, call.data.split(";")[0], int(call.data.split(";")[-1]))
+                case "back_to_main_menu":
+                    await buttons_func.main_menu(call.message, self.chat_suggest, is_send=False)
+                case "day_choice":
+                    await save_delayed_post(call)
+                    await buttons_func.delayed_buttons_times(call, int(call.data.split(";")[-1]))
+                case "reject_delayed":
+                    await self.delayed_database.delete_delayed_posts({
+                        "bot_id": self.bot_info.id,
+                        "message_id": call.message.id,
+                    })
+                    del self.delayed_message[call.message.id]
+                    await buttons_func.reject_post(call)
 
+    @logger.catch
     async def check_admin(self, channel_id) -> bool:
         try:
             info = await self.sup_bot.get_chat_member(channel_id, self.bot_info.id)
-            print(13)
             return True
         except ApiTelegramException:
             return False
@@ -575,6 +480,18 @@ class SubBot:
 
     async def getter_name(self):
         return self.bot_info.username
+
+    async def getter_delayed_info(self) -> dict:
+        return self.delayed_message
+
+    async def send_delayed_message(self, message_id, sender_id):
+        del self.delayed_message[message_id]
+        await self.sup_bot.copy_message(
+            from_chat_id=self.chat_suggest,
+            chat_id=self.channel_id,
+            message_id=message_id,
+        )
+        await MarkupButton(self.sup_bot).push_post_button(self.chat_suggest, message_id, sender_id)
 
     async def run_bot(self):
         self.bot_info = await self.sup_bot.get_me()

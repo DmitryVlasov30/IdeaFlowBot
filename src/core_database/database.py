@@ -1,3 +1,5 @@
+import asyncio
+
 from sqlalchemy import insert, select, and_, delete, update
 
 from src.core_database.models.base import Base
@@ -7,17 +9,18 @@ from src.core_database.models.chat_admins import ChatAdmins
 from src.core_database.models.public_posts import PublicPosts
 from src.core_database.models.service_message import ServiceMessage
 from src.core_database.models.users import UserData
+from src.core_database.models.delayed_posts import DelayedPost
 from src.core_database.models.db_helper import db_helper
 
 
 async def create_table():
     async with db_helper.engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all(db_helper.engine))
+        await conn.run_sync(Base.metadata.create_all)
 
 
 async def drop_table():
     async with db_helper.engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all(db_helper.engine))
+        await conn.run_sync(Base.metadata.drop_all)
 
 
 class CrudUserData:
@@ -207,6 +210,45 @@ class CrudPublicPosts:
             await conn.commit()
 
 
+class CrudDelayedPosts:
+    @staticmethod
+    async def get_delayed_posts(bot_id=None):
+        async with db_helper.engine.connect() as conn:
+            if bot_id is None:
+                return (await conn.execute(select(DelayedPost))).fetchall()
+            else:
+                return (await conn.execute(select(DelayedPost).filter(DelayedPost.bot_id == bot_id))).fetchall()
+
+    @staticmethod
+    async def add_delayed_posts(data: dict):
+        async with db_helper.engine.connect() as conn:
+            await conn.execute(insert(DelayedPost).values(data))
+            await conn.commit()
+
+    @staticmethod
+    async def setter_post(bot_id: int, new_time_seconds: int, message_id: int):
+        async with db_helper.engine.connect() as conn:
+            await conn.execute(
+                update(DelayedPost)
+                .filter(and_(DelayedPost.bot_id == bot_id, DelayedPost.message_id == message_id))
+                .values(
+                    time_seconds=new_time_seconds,
+                )
+            )
+            await conn.commit()
+
+    @staticmethod
+    async def delete_delayed_posts(data: dict):
+        async with db_helper.engine.connect() as conn:
+            await conn.execute(
+                delete(DelayedPost)
+                .filter(and_(DelayedPost.bot_id == data['bot_id'], DelayedPost.message_id == data['message_id']))
+            )
+            await conn.commit()
+
+
+async def main():
+    pass
+
 if __name__ == '__main__':
-    drop_table()
-    create_table()
+    asyncio.run(create_table())
