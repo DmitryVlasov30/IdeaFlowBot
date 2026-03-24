@@ -2,6 +2,7 @@ from telebot import formatting
 from telebot.async_telebot import AsyncTeleBot
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, Message
 from loguru import logger
+from config import settings
 
 
 class MarkupButton:
@@ -115,7 +116,7 @@ class MarkupButton:
     @logger.catch
     async def delayed_day(self, call: CallbackQuery, day_div, sender_id):
         data_button = None
-        print(call.message)
+        logger.info(f"args: {day_div}, {sender_id}")
         if day_div == "morning":
             data_button = self.morning_time
             row_width = 4
@@ -216,7 +217,7 @@ class MarkupButton:
     async def delayed_buttons_times(self, call: CallbackQuery, sender_id):
         markup = InlineKeyboardMarkup(row_width=2)
         time = call.data.split(";")[2]
-        print(call.message)
+        logger.info(f"{call.message.chat.id, call.message.text}")
         button_reject = InlineKeyboardButton(
             text="удалить",
             callback_data=f"reject_delayed;{call.message.chat.id}"
@@ -226,7 +227,7 @@ class MarkupButton:
             text=f"@{info_sender.username}",
             callback_data=f"add_info;{sender_id}"
         )
-        print(call.data)
+        logger.info(call.data)
         button_time = InlineKeyboardButton(
             text=f"Отложено до {time}",
             callback_data=f"delayed_button;{sender_id}"
@@ -253,3 +254,61 @@ class MarkupButton:
             message_id=message_id,
             reply_markup=markup
         )
+
+    @logger.catch
+    async def send_suggest(self, call, channel_username, channel_id):
+        try:
+            user_info = await self.bot.get_chat(call.data.split(";")[1])
+            logger.info(f"send post: {channel_username}, {user_info.id, user_info.username}")
+
+            markup = InlineKeyboardMarkup()
+            addition_info = InlineKeyboardButton(
+                text=f"@{user_info.username}",
+                callback_data=f"add_info;{user_info.id}"
+            )
+            markup.add(addition_info)
+            await self.bot.copy_message(
+                chat_id=channel_id,
+                from_chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+            )
+            await self.bot.edit_message_reply_markup(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                reply_markup=markup,
+            )
+            logger.info("send post success")
+        except Exception as ex:
+            logger.error(ex)
+            await self.bot.send_message(chat_id=call.message.chat.id, text=f"Произошла ошибка при обработки: {ex}")
+
+    @logger.catch
+    async def add_ban_user(self, call: CallbackQuery, ban_database, channel_id, bot_info, chat_suggest):
+        try:
+            user_info = await self.bot.get_chat(call.data.split(";")[1])
+
+            logger.info(f"get banned user: {user_info.username, user_info.id}")
+            markup = InlineKeyboardMarkup()
+            addition_info = InlineKeyboardButton(
+                text=f"@{user_info.username}",
+                callback_data=f"add_info;{user_info.id}"
+            )
+            markup.add(addition_info)
+
+            await ban_database.add_banned_user({
+                "id_user": user_info.id,
+                "id_channel": channel_id,
+                "bot_id": bot_info.id
+            })
+
+            await self.bot.edit_message_reply_markup(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                reply_markup=markup,
+            )
+            await self.bot.send_message(
+                text=f"@{user_info.username}, id: {user_info.id} забанен",
+                chat_id=chat_suggest,
+            )
+        except Exception as ex:
+            logger.error(ex)
