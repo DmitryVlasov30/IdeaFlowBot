@@ -25,7 +25,7 @@ async def drop_table():
 
 class CrudUserData:
     @staticmethod
-    async def get_user_data(user_id: int = None, bot_username: str = None):
+    async def get_user_data(user_id: int = None, bot_username: str = None) -> list:
         async with db_helper.engine.connect() as conn:
             if user_id is None and bot_username is None:
                 return (await conn.execute(select(UserData))).fetchall()
@@ -40,7 +40,7 @@ class CrudUserData:
                 )).fetchall()
 
     @staticmethod
-    async def insert_user(data: dict):
+    async def insert_user(data: dict) -> None:
         async with db_helper.engine.connect() as conn:
             stmt = (
                 insert(UserData).values(data)
@@ -49,7 +49,7 @@ class CrudUserData:
             await conn.commit()
 
     @staticmethod
-    async def delete_user_data(user_id: int, bot_username: str):
+    async def delete_user_data(user_id: int, bot_username: str) -> None:
         async with db_helper.engine.connect() as conn:
             stmt = (
                 delete(UserData)
@@ -64,7 +64,7 @@ class CrudUserData:
 
 class CrudBannedUser:
     @staticmethod
-    async def get_banned_users(id_user: int = None, id_channel: int = None):
+    async def get_banned_users(id_user: int = None, id_channel: int = None) -> list:
         async with db_helper.engine.connect() as conn:
             if id_user is None and id_channel is None:
                 return (await conn.execute(select(BannedUser))).fetchall()
@@ -82,7 +82,7 @@ class CrudBannedUser:
                 )).fetchall()
 
     @staticmethod
-    async def add_banned_user(user: dict):
+    async def add_banned_user(user: dict) -> None:
         async with db_helper.engine.connect() as conn:
             stmt = (
                 insert(BannedUser).values(user)
@@ -91,7 +91,7 @@ class CrudBannedUser:
             await conn.commit()
 
     @staticmethod
-    async def delete_banned_user(user: dict):
+    async def delete_banned_user(user: dict) -> None:
         async with db_helper.engine.connect() as conn:
             stmt = (
                 delete(BannedUser)
@@ -106,18 +106,18 @@ class CrudBannedUser:
 
 class CrudBotsData:
     @staticmethod
-    async def get_bots_info():
+    async def get_bots_info() -> list:
         async with db_helper.engine.connect() as conn:
             return (await conn.execute(select(BotsData))).fetchall()
 
     @staticmethod
-    async def add_bots_info(data: dict):
+    async def add_bots_info(data: dict) -> None:
         async with db_helper.engine.connect() as conn:
             await conn.execute(insert(BotsData).values(data))
             await conn.commit()
 
     @staticmethod
-    async def delete_bots_info(data: dict):
+    async def delete_bots_info(data: dict) -> None:
         async with db_helper.engine.connect() as conn:
             await conn.execute(
                 delete(BotsData)
@@ -131,7 +131,7 @@ class CrudBotsData:
 
 class CrudChatAdmins:
     @staticmethod
-    async def get_chat_admins(bot: int = None, chat: int = None):
+    async def get_chat_admins(bot: int = None, chat: int = None) -> list:
         async with db_helper.engine.connect() as conn:
             if bot is not None and chat is None:
                 result = (await conn.execute(select(ChatAdmins).filter(ChatAdmins.bot_id == bot))).fetchall()
@@ -152,13 +152,13 @@ class CrudChatAdmins:
                 )).fetchall()
 
     @staticmethod
-    async def add_chat_admins(data: dict):
+    async def add_chat_admins(data: dict) -> None:
         async with db_helper.engine.connect() as conn:
             await conn.execute(insert(ChatAdmins).values(data))
             await conn.commit()
 
     @staticmethod
-    async def delete_chat_admins(data: dict):
+    async def delete_chat_admins(data: dict) -> None:
         async with db_helper.engine.connect() as conn:
             await conn.execute(
                 delete(ChatAdmins)
@@ -172,18 +172,23 @@ class CrudChatAdmins:
 
 class CrudServiceMessage:
     @staticmethod
-    async def get_service_message(bot_id: int):
+    async def get_service_message(bot_id: int) -> list:
         async with db_helper.engine.connect() as conn:
             return (await conn.execute(select(ServiceMessage).filter(ServiceMessage.bot_id == bot_id))).fetchall()
 
     @staticmethod
-    async def add_service_message(data: dict):
+    async def add_service_message(data: dict) -> None:
         async with db_helper.engine.connect() as conn:
             await conn.execute(insert(ServiceMessage).values(data))
             await conn.commit()
 
     @staticmethod
-    async def update_service_message(bot_id: int, hello_message: str, ban_user_message: str, send_post_message: str):
+    async def update_service_message(
+            bot_id: int,
+            hello_message: str,
+            ban_user_message: str,
+            send_post_message: str
+    ) -> None:
         async with db_helper.engine.connect() as conn:
             await conn.execute(
                 update(ServiceMessage)
@@ -199,12 +204,12 @@ class CrudServiceMessage:
 
 class CrudPublicPosts:
     @staticmethod
-    async def get_public_posts():
+    async def get_public_posts() -> list:
         async with db_helper.engine.connect() as conn:
             return (await conn.execute(select(PublicPosts))).fetchall()
 
     @staticmethod
-    async def add_public_posts(data: dict):
+    async def add_public_posts(data: dict) -> None:
         async with db_helper.engine.connect() as conn:
             await conn.execute(insert(PublicPosts).values(data))
             await conn.commit()
@@ -212,7 +217,7 @@ class CrudPublicPosts:
 
 class CrudDelayedPosts:
     @staticmethod
-    async def get_delayed_posts(bot_id=None):
+    async def get_delayed_posts(bot_id=None) -> list:
         async with db_helper.engine.connect() as conn:
             if bot_id is None:
                 return (await conn.execute(select(DelayedPost))).fetchall()
@@ -220,13 +225,13 @@ class CrudDelayedPosts:
                 return (await conn.execute(select(DelayedPost).filter(DelayedPost.bot_id == bot_id))).fetchall()
 
     @staticmethod
-    async def add_delayed_posts(data: dict):
+    async def add_delayed_posts(data: dict) -> None:
         async with db_helper.engine.connect() as conn:
             await conn.execute(insert(DelayedPost).values(data))
             await conn.commit()
 
     @staticmethod
-    async def setter_post(bot_id: int, new_time_seconds: int, message_id: int):
+    async def setter_post(bot_id: int, new_time_seconds: int, message_id: int) -> None:
         async with db_helper.engine.connect() as conn:
             await conn.execute(
                 update(DelayedPost)
@@ -238,7 +243,7 @@ class CrudDelayedPosts:
             await conn.commit()
 
     @staticmethod
-    async def delete_delayed_posts(data: dict):
+    async def delete_delayed_posts(data: dict) -> None:
         async with db_helper.engine.connect() as conn:
             await conn.execute(
                 delete(DelayedPost)

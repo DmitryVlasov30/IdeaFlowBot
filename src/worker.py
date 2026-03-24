@@ -4,7 +4,6 @@ from loguru import logger
 
 from sqlalchemy.exc import IntegrityError
 from telebot.async_telebot import AsyncTeleBot
-from telebot import asyncio_helper
 from telebot.asyncio_helper import ApiTelegramException
 from telebot.types import (Message, InlineKeyboardMarkup,
                            InlineKeyboardButton, CallbackQuery,
@@ -107,7 +106,7 @@ class SubBot:
             self.delayed_message[message_id] = (time_seconds, sender_id)
 
     @logger.catch
-    async def __setup_service_msg(self):
+    async def __setup_service_msg(self) -> None:
         message_info = await self.service_msg_database.get_service_message(self.bot_info.id)
         if message_info:
             self.hello_msg = message_info[0][1]
@@ -122,12 +121,9 @@ class SubBot:
             })
 
     @logger.catch
-    async def __setup_handlers(self):
-        async def answer_for_ban_user(message: Message):
-            await self.sup_bot.send_message(chat_id=message.chat.id, text=self.ban_usr_msg)
-
+    async def __setup_handlers(self) -> None:
         @logger.catch
-        async def __check_exist_user(message: Message):
+        async def __check_exist_user(message: Message) -> None:
             try:
                 if message.chat.id not in self.users_data:
                     await self.user_database.insert_user(
@@ -138,11 +134,11 @@ class SubBot:
                     )
                     self.users_data.add(message.chat.id)
             except IntegrityError:
-                pass
+                logger.error("IntegrityError")
 
         @logger.catch
         @self.sup_bot.message_handler(commands=['start'])
-        async def start(message: Message, is_command=True):
+        async def start(message: Message, is_command=True) -> None:
             if message.chat.id < 0:
                 return
             await __check_exist_user(message)
@@ -167,7 +163,7 @@ class SubBot:
         @logger.catch
         @self.sup_bot.message_handler(commands=["ban_lst"])
         @filter_chats
-        async def ban_lst(message: Message):
+        async def ban_lst(message: Message) -> None:
             all_info = await self.ban_database.get_banned_users()
             if len(all_info) == 0:
                 await self.sup_bot.send_message(message.chat.id, "нет забанeных пользователей")
@@ -182,7 +178,7 @@ class SubBot:
         @logger.catch
         @self.sup_bot.message_handler(commands=["unban"])
         @filter_chats
-        async def unban_user(message: Message):
+        async def unban_user(message: Message) -> None:
             user_id = message.text.split()[1]
             logger.info("unban user: %s", user_id)
             all_ban_user = await self.ban_database.get_banned_users(id_user=int(user_id), id_channel=self.channel_id)
@@ -197,7 +193,7 @@ class SubBot:
         @logger.catch
         @self.sup_bot.message_handler(commands=["update_hello"])
         @filter_chats
-        async def update_hello(message: Message):
+        async def update_hello(message: Message) -> None:
             hello_msg = message.text[13:]
             self.hello_msg = hello_msg
             logger.info(f"update hello msg: {hello_msg}")
@@ -212,7 +208,7 @@ class SubBot:
         @logger.catch
         @self.sup_bot.message_handler(commands=["update_ban_user"])
         @filter_chats
-        async def update_ban_user(message: Message):
+        async def update_ban_user(message: Message) -> None:
             ban_usr_msg = message.text[16:]
             self.ban_usr_msg = ban_usr_msg
             logger.info(f"update ban msg: {ban_usr_msg}")
@@ -227,7 +223,7 @@ class SubBot:
 
         @logger.catch
         @self.sup_bot.message_handler(commands=["update_send_post"])
-        async def update_send_post(message: Message):
+        async def update_send_post(message: Message) -> None:
             msg_send = message.text[17:]
             self.send_post_msg = msg_send
             logger.info(f"new send post msg: {msg_send}")
@@ -243,7 +239,7 @@ class SubBot:
         @logger.catch
         @self.sup_bot.message_handler(commands=["get_msg"])
         @filter_chats
-        async def get_msg(message: Message):
+        async def get_msg(message: Message) -> None:
             answer = (f"*Приветствие*:\n\n"
                       f"{self.hello_msg}\n\n"
                       f"*Сообщение при бане*\n\n"
@@ -254,7 +250,7 @@ class SubBot:
 
         @logger.catch
         @self.sup_bot.my_chat_member_handler()
-        async def add_chat_member(chat_member_info: ChatMemberUpdated):
+        async def add_chat_member(chat_member_info: ChatMemberUpdated) -> None:
             if chat_member_info.chat.type == "channel":
                 return
 
@@ -290,7 +286,7 @@ class SubBot:
         @self.sup_bot.message_handler(
             func=lambda message: message.reply_to_message is not None
         )
-        async def reply_to_message(message: Message):
+        async def reply_to_message(message: Message) -> None:
             info = message.json
             try:
                 if not info["reply_to_message"]["from"]["is_bot"]:
@@ -308,7 +304,7 @@ class SubBot:
 
         @logger.catch
         @self.sup_bot.message_handler(content_types=["text", "photo", "video", "animation"])
-        async def get_suggest(message: Message):
+        async def get_suggest(message: Message) -> None:
             logger.info(f"channel: {self.channel_username}, sender: {message.chat.id, message.chat.username}")
             info_subscribe = await self.sup_bot.get_chat_member(user_id=message.chat.id, chat_id=self.channel_id)
             await start(message, is_command=False)
@@ -320,7 +316,7 @@ class SubBot:
                 return
 
             if await Utils.check_banned_user(message.chat.id, self.channel_id):
-                await answer_for_ban_user(message)
+                await self.sup_bot.send_message(chat_id=message.chat.id, text=self.ban_usr_msg)
                 logger.info("user banned")
                 return
 
@@ -335,7 +331,7 @@ class SubBot:
             await MarkupButton(self.sup_bot).main_menu(message, self.chat_suggest)
 
         @logger.catch
-        async def save_delayed_post(call: CallbackQuery):
+        async def save_delayed_post(call: CallbackQuery) -> None:
             command, day_div, time, message_id, sender_id = call.data.split(";")
             time_public = await Utils.get_timestamp_public(time)
             logger.info(f"command: {command}, time: {time}, sender_id: {sender_id}")
@@ -363,7 +359,7 @@ class SubBot:
 
         @logger.catch
         @self.sup_bot.callback_query_handler(func=lambda call: True)
-        async def callback(call: CallbackQuery):
+        async def callback(call: CallbackQuery) -> None:
             buttons_func = MarkupButton(self.sup_bot)
             match call.data.split(";")[0]:
                 case "banned_user":
@@ -407,7 +403,7 @@ class SubBot:
         except ApiTelegramException:
             return False
 
-    async def stop_bot(self):
+    async def stop_bot(self) -> None:
         if self.polling_task:
             self.polling_task.cancel()
             try:
@@ -421,7 +417,7 @@ class SubBot:
     async def getter_delayed_info(self) -> dict:
         return self.delayed_message
 
-    async def send_delayed_message(self, message_id, sender_id):
+    async def send_delayed_message(self, message_id, sender_id) -> None:
         del self.delayed_message[message_id]
         await self.sup_bot.copy_message(
             from_chat_id=self.chat_suggest,
@@ -431,7 +427,7 @@ class SubBot:
         logger.info(f"send delayed message: {message_id}, username_channel: {self.channel_username}")
         await MarkupButton(self.sup_bot).push_post_button(self.chat_suggest, message_id, sender_id)
 
-    async def run_bot(self):
+    async def run_bot(self) -> None:
         self.bot_info = await self.sup_bot.get_me()
         try:
             logger.info(f"[OK] bot @{self.bot_info.username} working")

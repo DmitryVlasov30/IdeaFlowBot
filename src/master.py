@@ -45,7 +45,7 @@ class MasterBot:
         logger.info("init bot")
 
     @logger.catch
-    async def __send_post(self, delayed_post):
+    async def __send_post(self, delayed_post) -> None:
         tz = timezone(timedelta(hours=3))
         now = datetime.now(tz)
         bots_data = {}
@@ -68,7 +68,7 @@ class MasterBot:
             await bots_data[bot].send_delayed_message(message_id, sender_id)
 
     @logger.catch
-    async def __delayed_posts_checker(self):
+    async def __delayed_posts_checker(self) -> None:
         while True:
             delayed_posts = {}
             for bot in self.bots_work:
@@ -81,7 +81,7 @@ class MasterBot:
             await self.__send_post(delayed_posts)
             await asyncio.sleep(settings.const_time_sleep)
 
-    async def __setup_bot_info(self):
+    async def __setup_bot_info(self) -> None:
         await self.main_bot.set_my_commands(
             commands=self.commands,
             scope=BotCommandScopeChat(*self.chats),
@@ -91,13 +91,13 @@ class MasterBot:
     def __setup_handlers(self):
         @self.main_bot.message_handler(commands=["push"])
         @filter_admin
-        async def register_push_message(message: Message):
+        async def register_push_message(message: Message) -> None:
             await self.main_bot.send_message(settings.general_admin, "напишите пост, который хотите разослать")
             self.flag_register_push_message = True
 
         @self.main_bot.message_handler(commands=["bots"])
         @filter_admin
-        async def get_all_subbot(message: Message):
+        async def get_all_subbot(message: Message) -> None:
             all_info = await self.bots_database.get_bots_info()
 
             logger.info("command Bots")
@@ -132,7 +132,7 @@ class MasterBot:
         @self.main_bot.message_handler(commands=["add"])
         @filter_admin
         @logger.catch
-        async def add_bot(message: Message):
+        async def add_bot(message: Message) -> None:
             try:
                 command, api_token, channel_username = message.text.split(" ")
                 logger.info(
@@ -195,7 +195,7 @@ class MasterBot:
 
         @self.main_bot.message_handler(commands=["start"])
         @logger.catch
-        async def start(message: Message):
+        async def start(message: Message) -> None:
             logger.info(f"id: {message.chat.id}, username: {message.chat.username}")
             await self.main_bot.send_message(
                 settings.general_admin,
@@ -204,7 +204,7 @@ class MasterBot:
 
         @self.main_bot.message_handler(commands=["delete"])
         @filter_admin
-        async def remove_bot(message: Message):
+        async def remove_bot(message: Message) -> None:
             command, username_bot, channel_username = message.text.split(" ")
             logger.info(f"args: {username_bot}, {channel_username}")
             # noinspection PyBroadException
@@ -243,7 +243,7 @@ class MasterBot:
 
         @self.main_bot.message_handler(content_types=["text", "video", "photo"])
         @filter_admin
-        async def push_msg(message: Message):
+        async def push_msg(message: Message) -> None:
             logger.info("push msg")
             if self.flag_register_push_message:
                 markup = InlineKeyboardMarkup()
@@ -268,7 +268,7 @@ class MasterBot:
 
         @logger.catch
         @self.main_bot.callback_query_handler(func=lambda call: True)
-        async def callback(call: CallbackQuery):
+        async def callback(call: CallbackQuery) -> None:
             match call.data.split(";")[0]:
                 case "push":
                     pass
@@ -279,7 +279,7 @@ class MasterBot:
                     )
 
     @logger.catch
-    async def run_bot(self):
+    async def run_bot(self) -> None:
         logger.info("run_bot")
         self.bot_info: User = (await self.main_bot.get_me())
         logger.info(self.bot_info.username)

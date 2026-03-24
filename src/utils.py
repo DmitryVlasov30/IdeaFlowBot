@@ -27,7 +27,7 @@ class Utils:
 
     @staticmethod
     @logger.catch
-    async def save_post(call: CallbackQuery, public_posts, channel_id):
+    async def save_post(call: CallbackQuery, public_posts, channel_id) -> None:
         if call.message.content_type == "text":
             await public_posts.add_public_posts({
                 "channel_id": channel_id,
