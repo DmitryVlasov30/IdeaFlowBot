@@ -10,7 +10,9 @@ from telebot.types import (Message, InlineKeyboardMarkup,
                            ChatMemberUpdated, BotCommand, BotCommandScopeAllGroupChats)
 
 from src.core_database.database import (CrudChatAdmins, CrudBannedUser,
-                                        CrudServiceMessage, CrudPublicPosts, CrudUserData, CrudDelayedPosts)
+                                        CrudServiceMessage, CrudSenderData,
+                                        CrudUserData, CrudDelayedPosts,
+                                        CrudAnonymMessage, CrudAdvertising)
 from src.utils import Utils, filter_chats
 from config import settings
 from src.markups import MarkupButton
@@ -49,16 +51,20 @@ class SubBot:
         self.admins_database = CrudChatAdmins()
         self.ban_database = CrudBannedUser()
         self.service_msg_database = CrudServiceMessage()
-        self.public_posts = CrudPublicPosts()
+        self.public_posts = CrudSenderData()
         self.user_database = CrudUserData()
         self.delayed_database = CrudDelayedPosts()
+        self.anonym_message_database = CrudAnonymMessage()
+        self.advertising_database = CrudAdvertising()
 
         self.token = api_token_bot
         self.channel_username = channel_username
         self.sup_bot = AsyncTeleBot(self.token)
         self.users_data = set()
 
+        self.advertising_data = set()
         self.delayed_message = {}
+        self.anonym_send = set()
 
         self.chat_suggests = None
 
