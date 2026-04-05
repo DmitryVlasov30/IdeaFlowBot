@@ -26,6 +26,18 @@ class Utils:
         return time_public
 
     @staticmethod
+    async def get_timestamp_to_time(timestamp) -> str:
+        tz = timezone(timedelta(hours=3))
+        return datetime.fromtimestamp(timestamp, tz=tz).strftime('%H:%M')
+
+    @staticmethod
+    async def conversion_to_moscow_time(timestamp):
+        utc_date = datetime.fromtimestamp(timestamp, tz=pytz.utc)
+        local_tz = pytz.timezone('Europe/Moscow')
+        local_date = utc_date.astimezone(local_tz)
+        return local_date.timestamp()
+
+    @staticmethod
     @logger.catch
     async def save_post(call: CallbackQuery, public_posts, channel_id) -> None:
         if call.message.content_type == "text":
