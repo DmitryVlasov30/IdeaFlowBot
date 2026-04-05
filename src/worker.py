@@ -387,7 +387,12 @@ class SubBot:
                     # logger.info("delayed_button")
                     await buttons_func.delayed_post(call)
                 case "morning" | "dinner" | "evening" | "night":
-                    await buttons_func.delayed_day(call, call.data.split(";")[0], int(call.data.split(";")[-1]))
+                    await buttons_func.delayed_day(
+                        call,
+                        call.data.split(";")[0],
+                        int(call.data.split(";")[1]),
+                        self.advertising_data
+                    )
                 case "back_to_main_menu":
                     chat_id = call.data.split(";")[-1]
                     await buttons_func.main_menu(
