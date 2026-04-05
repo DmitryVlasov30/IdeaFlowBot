@@ -365,3 +365,25 @@ class MarkupButton:
             )
         except Exception as ex:
             logger.error(ex)
+
+    @logger.catch
+    async def get_markup(self, timestamp, sender_id) -> InlineKeyboardMarkup:
+        sender_info = await self.bot.get_chat(sender_id)
+        markup = InlineKeyboardMarkup(row_width=2)
+        button_reject = InlineKeyboardButton(
+            text="удалить",
+            callback_data=f"reject_delayed;{sender_id}"
+        )
+        button_info = InlineKeyboardButton(
+            text=f"@{sender_info.username}",
+            callback_data=f"add_info;{sender_id}"
+        )
+        time = await Utils.get_timestamp_to_time(timestamp)
+        logger.debug(f"time: {time}")
+        button_time = InlineKeyboardButton(
+            text=f"Отложено до {time}",
+            callback_data=f"delayed_button;{sender_id}"
+        )
+        markup.add(button_reject, button_info)
+        markup.add(button_time)
+        return markup
