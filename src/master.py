@@ -1,7 +1,6 @@
 from datetime import timezone, timedelta, datetime
 
 from requests import HTTPError
-from telebot.asyncio_helper import send_message, send_photo
 
 from config import settings
 from src.core_database.database import CrudBotsData, CrudDelayedPosts
@@ -33,7 +32,7 @@ class MasterBot:
 
         self.api_token_bot = api_token_bot
         asyncio_helper.proxy = settings.proxies["http"]
-        asyncio_helper.REQUEST_LIMIT = 500
+        asyncio_helper.REQUEST_LIMIT = settings.sup_bot_limit
         self.main_bot = AsyncTeleBot(self.api_token_bot)
         self.bots_work = []
 
@@ -77,7 +76,8 @@ class MasterBot:
                 delayed_posts[bot.bot_info.id] = info_lst
 
             info_delayed_posts = list(filter(lambda el: el[1], delayed_posts.items()))
-            logger.info(f"delayed posts checker: {info_delayed_posts}")
+            if info_delayed_posts:
+                logger.info(f"delayed posts checker: {info_delayed_posts}")
             await self.__send_post(delayed_posts)
             await asyncio.sleep(settings.const_time_sleep)
 
@@ -302,6 +302,7 @@ class MasterBot:
                         channel_username = "@" + channel_username
                         logger.info(f"connected: {channel_username}")
                         bot = await SubBot.create(
+                            main_bot_username=self.bot_info.username,
                             api_token_bot=api_token,
                             channel_username=channel_username,
                             hello_msg=settings.hello_msg,
