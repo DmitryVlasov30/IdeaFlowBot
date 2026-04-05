@@ -103,7 +103,13 @@ class SubBot:
         delayed_message = await self.delayed_database.get_delayed_posts(bot_id=self.bot_info.id)
         self.delayed_message = {}
         for bot_id, time_seconds, message_id, sender_id, id_item in delayed_message:
-            self.delayed_message[message_id] = (time_seconds, sender_id)
+            self.delayed_message[message_id] = [time_seconds, sender_id]
+
+        anonym_data = await self.anonym_message_database.get_posts(chat_id=self.chat_suggest)
+        self.anonym_send = set(map(lambda el: el[0], anonym_data))
+
+        advertising_data = await self.advertising_database.get_advertising(channel_id=self.channel_id)
+        self.advertising_data = set(map(lambda el: (el[1], el[2]), advertising_data))
 
     @logger.catch
     async def __setup_service_msg(self) -> None:
