@@ -58,6 +58,15 @@ class Utils:
 
         await public_posts.add_public_posts(data)
 
+    @logger.catch
+    async def check_link(message: Message) -> bool:
+        if message.content_type == "text":
+            return "http" in message.text or "https" in message.text
+        elif message.caption is not None:
+            return "http" in message.caption or "https" in message.caption
+        else:
+            return False
+
 
 def filter_chats(func):
     def wrapper(message: Message):
