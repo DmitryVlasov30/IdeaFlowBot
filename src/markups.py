@@ -297,8 +297,10 @@ class MarkupButton:
         )
 
     @logger.catch
-    async def send_suggest(self, call, channel_username, channel_id):
+    async def send_suggest(self, call, channel_username, channel_id, is_anon):
         try:
+            markup_post = None
+
             user_info = await self.bot.get_chat(call.data.split(";")[1])
             logger.info(f"send post: {channel_username}, {user_info.id, user_info.username}")
 
@@ -308,10 +310,20 @@ class MarkupButton:
                 callback_data=f"add_info;{user_info.id}"
             )
             markup.add(addition_info)
+
+            if is_anon:
+                markup_post = InlineKeyboardMarkup()
+                info_post_sender = InlineKeyboardButton(
+                    text=f"@{user_info.username}",
+                    url=f"https://t.me/{user_info.username}"
+                )
+                markup_post.add(info_post_sender)
+
             await self.bot.copy_message(
                 chat_id=channel_id,
                 from_chat_id=call.message.chat.id,
                 message_id=call.message.message_id,
+                reply_markup=markup_post,
             )
             await self.bot.edit_message_reply_markup(
                 chat_id=call.message.chat.id,
