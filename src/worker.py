@@ -373,8 +373,30 @@ class SubBot:
                 case "add_info":
                     await buttons_func.add_info(call)
                 case "send_suggest":
-                    await Utils.save_post(call, self.public_posts, self.channel_id)
-                    await buttons_func.send_suggest(call, self.channel_username, self.channel_id)
+                    is_anon = call.message.message_id in self.anonym_send
+                    sender_id = int(call.data.split(";")[1])
+                    info_sender = await self.sup_bot.get_chat(sender_id)
+                    if info_sender.username is None:
+                        is_anon = False
+                    self.anonym_send.remove(call.message.message_id)
+                    await self.anonym_message_database.delete_posts({
+                        "message_id": call.message.message_id,
+                        "chat_id": call.message.chat.id,
+                    })
+                    await Utils.save_post(
+                        call,
+                        self.public_posts,
+                        self.channel_id,
+                        info_sender,
+                        self.bot_info.username,
+
+                    )
+                    await buttons_func.send_suggest(
+                        call,
+                        self.channel_username,
+                        self.channel_id, is_anon,
+                        self.anonym_message_database
+                    )
                 case "reject":
                     await buttons_func.reject_post(call)
                 case "delayed_button":
