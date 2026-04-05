@@ -409,7 +409,10 @@ class SubBot:
             logger.info(self.delayed_message)
             logger.info(message_id)
             if message_id in self.delayed_message:
-                self.delayed_message[message_id] = (int(time_public), sender_id)
+                self.delayed_message[message_id] = [int(time_public), sender_id]
+                old_time = await Utils.get_timestamp_to_time(self.delayed_message[message_id][0])
+
+                logger.debug(old_time)
                 await self.delayed_database.setter_post(
                     bot_id=self.bot_info.id,
                     message_id=message_id,
@@ -423,7 +426,10 @@ class SubBot:
                 "message_id": message_id,
                 "sender_id": sender_id
             })
-            self.delayed_message[message_id] = (int(time_public), sender_id)
+            self.delayed_message[message_id] = [int(time_public), sender_id]
+            old_time = await Utils.get_timestamp_to_time(self.delayed_message[message_id][0])
+
+            logger.debug(old_time)
             logger.info("post delayed")
 
         @logger.catch
