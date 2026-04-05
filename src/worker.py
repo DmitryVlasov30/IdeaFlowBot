@@ -493,8 +493,20 @@ class SubBot:
                         is_send=False
                     )
                 case "day_choice":
+                    sender_info = await self.sup_bot.get_chat(int(call.data.split(";")[4]))
+                    await Utils.save_post(
+                        call,
+                        self.public_posts,
+                        self.channel_id,
+                        sender_info,
+                        self.bot_info,
+                    )
                     await save_delayed_post(call)
-                    await buttons_func.delayed_buttons_times(call, int(call.data.split(";")[-1]))
+                    logger.debug(call.data)
+                    await buttons_func.delayed_buttons_times(
+                        call,
+                        int(call.data.split(";")[4])
+                    )
                 case "reject_delayed":
                     await self.delayed_database.delete_delayed_posts({
                         "bot_id": self.bot_info.id,
