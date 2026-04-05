@@ -58,6 +58,16 @@ class Utils:
 
         await public_posts.add_public_posts(data)
 
+    @staticmethod
+    @logger.catch
+    async def get_anon(message: Message):
+        reply_markup = message.reply_markup.keyboard
+        logger.debug(reply_markup)
+        anon_markup: InlineKeyboardButton = reply_markup[2][1]
+        is_anon = anon_markup.callback_data.split(";")[-1]
+        return True if is_anon == "True" else False
+
+    @staticmethod
     @logger.catch
     async def check_link(message: Message) -> bool:
         if message.content_type == "text":
