@@ -1,4 +1,5 @@
-from telebot.types import Message, CallbackQuery
+import pytz
+from telebot.types import Message, CallbackQuery, InlineKeyboardButton
 from datetime import datetime, timedelta, timezone
 from loguru import logger
 
@@ -39,12 +40,23 @@ class Utils:
 
     @staticmethod
     @logger.catch
-    async def save_post(call: CallbackQuery, public_posts, channel_id) -> None:
+    async def save_post(call: CallbackQuery, public_posts, channel_id, info_sender, bot_info) -> None:
+        data = {
+            "user_id":  info_sender.id,
+            "channel_id": channel_id,
+            "bot_username": bot_info.username,
+            "username": info_sender.username,
+            "first_name": info_sender.first_name,
+            "message_id": call.message.id,
+            "chat_id": call.message.chat.id,
+            "text_post": None
+            }
         if call.message.content_type == "text":
-            await public_posts.add_public_posts({
-                "channel_id": channel_id,
-                "posts_title": call.message.text,
-            })
+            data["text_post"] = call.message.text
+        elif call.message.caption is not None:
+            data["text_post"] = call.message.caption
+
+        await public_posts.add_public_posts(data)
 
 
 def filter_chats(func):
