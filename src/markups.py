@@ -1,7 +1,10 @@
 from telebot import formatting
 from telebot.async_telebot import AsyncTeleBot
-from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, Message
+from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 from loguru import logger
+
+from src.core_database.config import settings
+from src.utils import Utils
 from config import settings
 
 
