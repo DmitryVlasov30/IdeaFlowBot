@@ -198,45 +198,59 @@ class MarkupButton:
         )
 
     @logger.catch
-    async def main_menu(self, message: Message, chat_suggest, is_send: bool = True):
-        markup = InlineKeyboardMarkup(row_width=2)
+    async def main_menu(self,
+                        sender_id,
+                        chat_id,
+                        message_id,
+                        chat_suggest,
+                        is_send: bool = True,
+                        is_anon: bool = False
+                        ):
+        markup = InlineKeyboardMarkup(row_width=3)
 
+        logger.debug(chat_id)
+        info_user = await self.bot.get_chat(chat_id)
         banned_user = InlineKeyboardButton(
             text="👮‍♂️бан",
-            callback_data=f"banned_user;{message.chat.id}"
+            callback_data=f"banned_user;{chat_id}"
         )
         addition_info = InlineKeyboardButton(
-            text=f"@{message.chat.username}",
-            callback_data=f"add_info;{message.chat.id}"
+            text=f"@{info_user.username}",
+            callback_data=f"add_info;{chat_id}"
         )
         send_button = InlineKeyboardButton(
             text="✅Одобрить",
-            callback_data=f"send_suggest;{message.chat.id}"
+            callback_data=f"send_suggest;{chat_id}"
         )
         reject_button = InlineKeyboardButton(
             text="❌Отклонить",
-            callback_data=f"reject;{message.chat.id}"
+            callback_data=f"reject;{chat_id}"
         )
 
         delayed_button = InlineKeyboardButton(
-            text="Отложка",
-            callback_data=f"delayed_button;{message.chat.id}"
+            text="⌛️Отложка",
+            callback_data=f"delayed_button;{chat_id}"
         )
 
-        markup.add(banned_user, addition_info)
+        anon_button = InlineKeyboardButton(
+            text=f"🥷АНОН" if not is_anon else "🤵НЕ АНОН",
+            callback_data=f"anonym_button;{chat_id}"
+        )
+
+        markup.add(banned_user, addition_info, anon_button)
         markup.add(send_button, reject_button)
         markup.add(delayed_button)
         if is_send:
             await self.bot.copy_message(
                 chat_id=chat_suggest,
-                from_chat_id=message.chat.id,
-                message_id=message.message_id,
+                from_chat_id=sender_id,
+                message_id=message_id,
                 reply_markup=markup,
             )
         else:
             await self.bot.edit_message_reply_markup(
-                chat_id=message.chat.id,
-                message_id=message.message_id,
+                chat_id=sender_id,
+                message_id=message_id,
                 reply_markup=markup,
             )
 
@@ -247,7 +261,7 @@ class MarkupButton:
         logger.info(f"{call.message.chat.id, call.message.text}")
         button_reject = InlineKeyboardButton(
             text="удалить",
-            callback_data=f"reject_delayed;{call.message.chat.id}"
+            callback_data=f"reject_delayed;{sender_id}"
         )
         info_sender = await self.bot.get_chat(sender_id)
         button_info = InlineKeyboardButton(
