@@ -561,10 +561,21 @@ class SubBot:
 
     async def send_delayed_message(self, message_id, sender_id) -> None:
         del self.delayed_message[message_id]
+        markup = None
+
+        if message_id in self.anonym_send:
+            self.anonym_send.remove(message_id)
+            info_user = await self.sup_bot.get_chat(sender_id)
+            if info_user.username is not None:
+                button = InlineKeyboardButton(text=f"@{info_user.username}", url=f"https://t.me/{info_user.username}")
+                markup = InlineKeyboardMarkup()
+                markup.add(button)
+
         await self.sup_bot.copy_message(
             from_chat_id=self.chat_suggest,
             chat_id=self.channel_id,
             message_id=message_id,
+            reply_markup=markup,
         )
         logger.info(f"send delayed message: {message_id}, username_channel: {self.channel_username}")
         await MarkupButton(self.sup_bot).push_post_button(self.chat_suggest, message_id, sender_id)
