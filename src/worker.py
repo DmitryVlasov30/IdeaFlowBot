@@ -389,7 +389,13 @@ class SubBot:
                 case "morning" | "dinner" | "evening" | "night":
                     await buttons_func.delayed_day(call, call.data.split(";")[0], int(call.data.split(";")[-1]))
                 case "back_to_main_menu":
-                    await buttons_func.main_menu(call.message, self.chat_suggest, is_send=False)
+                    chat_id = call.data.split(";")[-1]
+                    await buttons_func.main_menu(
+                        call.message.chat.id, chat_id,
+                        call.message.message_id,
+                        self.chat_suggest,
+                        is_send=False
+                    )
                 case "day_choice":
                     await save_delayed_post(call)
                     await buttons_func.delayed_buttons_times(call, int(call.data.split(";")[-1]))
