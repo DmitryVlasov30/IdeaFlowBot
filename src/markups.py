@@ -85,21 +85,32 @@ class MarkupButton:
             "23:30": {"hour": 23, "minute": 30},
             "23:45": {"hour": 23, "minute": 45},
             "00:00": {"hour": 0, "minute": 0},
+            "00:15": {"hour": 0, "minute": 15},
+            "00:30": {"hour": 0, "minute": 30},
+            "00:45": {"hour": 0, "minute": 45},
             "1:00": {"hour": 1, "minute": 0},
+            "1:15": {"hour": 1, "minute": 15},
+            "1:30": {"hour": 1, "minute": 30},
+            "1:45": {"hour": 1, "minute": 45},
             "2:00": {"hour": 2, "minute": 0},
+            "2:15": {"hour": 2, "minute": 15},
             "2:30": {"hour": 2, "minute": 30},
+            "2:45": {"hour": 2, "minute": 45},
             "3:00": {"hour": 3, "minute": 0},
+            "3:15": {"hour": 3, "minute": 15},
             "3:30": {"hour": 3, "minute": 30},
+            "3:45": {"hour": 3, "minute": 45},
         }
 
     @logger.catch
     async def delayed_post(self, call: CallbackQuery):
         markup = InlineKeyboardMarkup(row_width=4)
+
+        chat_id = call.data.split(";")[-1]
         back_button = InlineKeyboardButton(
             text="Назад",
-            callback_data="back_to_main_menu"
+            callback_data=f"back_to_main_menu;{chat_id}",
         )
-        chat_id = call.data.split(";")[-1]
         morning_button = InlineKeyboardButton(
             text="утро",
             callback_data=f"morning;{chat_id}"
@@ -117,27 +128,32 @@ class MarkupButton:
         )
 
     @logger.catch
-    async def delayed_day(self, call: CallbackQuery, day_div, sender_id):
-        data_button = None
+    async def delayed_day(self, call: CallbackQuery, day_div, sender_id, advertising_data):
         logger.info(f"args: {day_div}, {sender_id}")
         if day_div == "morning":
             data_button = self.morning_time
-            row_width = 4
         elif day_div == "dinner":
             data_button = self.dinner_time
-            row_width = 5
         elif day_div == "evening":
             data_button = self.evening_time
-            row_width = 5
         else:
             data_button = self.night_time
-            row_width = 3
-        markup = InlineKeyboardMarkup(row_width=row_width)
+        markup = InlineKeyboardMarkup(row_width=5)
         button_lst = []
+        interval_lst = list(map(lambda x: (x[1], x[1] + settings.shift_time_seconds), advertising_data))
         for item, el in data_button.items():
+            time_public = await Utils.get_timestamp_public(item)
+            flag_skip = False
+            for interval_down, interval_up in interval_lst:
+                if interval_down <= time_public <= interval_up:
+                    flag_skip = True
+
+            if flag_skip:
+                logger.debug(f"time: {interval_lst}, time_public: {time_public}")
+                continue
             button = InlineKeyboardButton(
                 text=item,
-                callback_data=f"day_choice;{day_div};{item};{call.message.message_id};{sender_id}"
+                callback_data=f"day_choice;{day_div};{item};{call.message.message_id};{sender_id}",
             )
             button_lst.append(button)
         back_button = InlineKeyboardButton(
@@ -155,9 +171,17 @@ class MarkupButton:
     @logger.catch
     async def reject_post(self, call: CallbackQuery):
         message_id = call.message.message_id
-        await self.bot.delete_message(
+        user_info = await self.bot.get_chat(call.data.split(";")[1])
+        markup = InlineKeyboardMarkup(row_width=2)
+        button_info = InlineKeyboardButton(
+            text=f"@{user_info.username} (Отклонено)",
+            callback_data=f"add_info;{user_info.id}"
+        )
+        markup.add(button_info)
+        await self.bot.edit_message_reply_markup(
             chat_id=call.message.chat.id,
             message_id=message_id,
+            reply_markup=markup,
         )
 
     @logger.catch
