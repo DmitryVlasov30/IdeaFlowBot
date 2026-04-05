@@ -400,6 +400,28 @@ class SubBot:
                     })
                     del self.delayed_message[call.message.id]
                     await buttons_func.reject_post(call)
+                case "anonym_button":
+                    data = {
+                        "message_id": call.message.message_id,
+                        "chat_id": self.chat_suggest,
+                    }
+                    logger.debug(call.message.message_id in self.anonym_send)
+                    if call.message.message_id in self.anonym_send:
+                        self.anonym_send.remove(call.message.message_id)
+                        await self.anonym_message_database.delete_posts(data)
+                    else:
+                        self.anonym_send.add(call.message.message_id)
+                        await self.anonym_message_database.add_posts(data)
+
+                    logger.debug(call.message.message_id in self.anonym_send)
+                    await buttons_func.main_menu(
+                        sender_id=call.message.chat.id,
+                        chat_id=call.data.split(";")[-1],
+                        message_id=call.message.message_id,
+                        chat_suggest=self.chat_suggest,
+                        is_anon=(call.message.id in self.anonym_send),
+                        is_send=False,
+                    )
 
     @logger.catch
     async def check_admin(self, channel_id) -> bool:
