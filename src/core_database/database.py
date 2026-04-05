@@ -1,6 +1,6 @@
 import asyncio
 
-from sqlalchemy import insert, select, and_, delete, update
+from sqlalchemy import insert, select, and_, delete, update, Delete
 
 from src.core_database.models.base import Base
 from src.core_database.models.banned_user import BannedUser
@@ -10,7 +10,9 @@ from src.core_database.models.public_posts import PublicPosts
 from src.core_database.models.service_message import ServiceMessage
 from src.core_database.models.users import UserData
 from src.core_database.models.delayed_posts import DelayedPost
+from src.core_database.models.anonym_message import AnonymMessage
 from src.core_database.models.db_helper import db_helper
+from src.core_database.models.advertising import Advertising
 
 
 async def create_table():
@@ -131,7 +133,7 @@ class CrudBotsData:
 
 class CrudChatAdmins:
     @staticmethod
-    async def get_chat_admins(bot: int = None, chat: int = None) -> list:
+    async def get_chat_admins(bot: int = None, chat: int = None) -> list | int:
         async with db_helper.engine.connect() as conn:
             if bot is not None and chat is None:
                 result = (await conn.execute(select(ChatAdmins).filter(ChatAdmins.bot_id == bot))).fetchall()
@@ -202,19 +204,6 @@ class CrudServiceMessage:
             await conn.commit()
 
 
-class CrudPublicPosts:
-    @staticmethod
-    async def get_public_posts() -> list:
-        async with db_helper.engine.connect() as conn:
-            return (await conn.execute(select(PublicPosts))).fetchall()
-
-    @staticmethod
-    async def add_public_posts(data: dict) -> None:
-        async with db_helper.engine.connect() as conn:
-            await conn.execute(insert(PublicPosts).values(data))
-            await conn.commit()
-
-
 class CrudDelayedPosts:
     @staticmethod
     async def get_delayed_posts(bot_id=None) -> list:
@@ -252,8 +241,113 @@ class CrudDelayedPosts:
             await conn.commit()
 
 
+class CrudAnonymMessage:
+    @staticmethod
+    async def get_posts(chat_id=None, message_id=None) -> list | tuple:
+        async with (db_helper.engine.connect() as conn):
+            if chat_id is None and message_id is None:
+                return (await conn.execute(select(AnonymMessage))).fetchall()
+            if chat_id is None:
+                return (await conn.execute(
+                    select(AnonymMessage).filter(AnonymMessage.message_id == message_id)
+                )).fetchall()
+            if message_id is None:
+                return (await conn.execute(
+                    select(AnonymMessage).filter(AnonymMessage.chat_id == chat_id)
+                ))
+            else:
+                return (await conn.execute(
+                    select(AnonymMessage)
+                    .filter(and_(AnonymMessage.message_id == message_id, AnonymMessage.chat_id == chat_id))
+                )).fetchall()[0]
+
+    @staticmethod
+    async def delete_posts(data: dict) -> None:
+        async with db_helper.engine.connect() as conn:
+            await conn.execute(
+                Delete(AnonymMessage)
+                .filter(and_(
+                    data["message_id"] == AnonymMessage.message_id,
+                    data["chat_id"] == AnonymMessage.chat_id,
+                ))
+            )
+            await conn.commit()
+
+    @staticmethod
+    async def add_posts(data: dict) -> None:
+        async with db_helper.engine.connect() as conn:
+            await conn.execute(insert(AnonymMessage).values(data))
+            await conn.commit()
+
+    @staticmethod
+    async def check_item(message_id, chat_id) -> bool:
+        async with db_helper.engine.connect() as conn:
+            items = await conn.execute(
+                select(AnonymMessage)
+                .filter(and_(AnonymMessage.message_id == message_id, AnonymMessage.chat_id == chat_id))
+            )
+            return bool(items.fetchall())
+
+
+class CrudAdvertising:
+    @staticmethod
+    async def get_advertising(channel_id=None, post_id=None) -> list | tuple:
+        async with db_helper.engine.connect() as conn:
+            if channel_id is None and post_id is None:
+                return (await conn.execute(select(Advertising))).fetchall()
+            if channel_id is None:
+                return (await conn.execute(
+                    select(Advertising).filter(Advertising.post_id == post_id)
+                )).fetchall()
+            if post_id is None:
+                return (await conn.execute(
+                    select(Advertising).filter(Advertising.channel_id == channel_id)
+                )).fetchall()
+            else:
+                return (await conn.execute(
+                    select(Advertising)
+                    .filter(and_(Advertising.post_id == post_id, Advertising.channel_id == channel_id))
+                )).fetchall()
+
+    @staticmethod
+    async def add_advertising(channel_id: int, post_id: int, time: int) -> None:
+        async with db_helper.engine.connect() as conn:
+            await conn.execute(insert(Advertising).values(
+                post_id=post_id,
+                channel_id=channel_id,
+                time=time,
+            ))
+            await conn.commit()
+
+    @staticmethod
+    async def delete_advertising(channel_id: int, post_id: int) -> None:
+        async with db_helper.engine.connect() as conn:
+            await conn.execute(
+                delete(Advertising)
+                .filter(and_(Advertising.post_id == post_id, Advertising.channel_id == channel_id))
+            )
+            await conn.commit()
+
+
+class CrudSenderData:
+    @staticmethod
+    async def get_public_posts() -> list:
+        async with db_helper.engine.connect() as conn:
+            return (await conn.execute(select(PublicPosts))).fetchall()
+
+    @staticmethod
+    async def add_public_posts(data: dict) -> None:
+        async with db_helper.engine.connect() as conn:
+            await conn.execute(insert(PublicPosts).values(data))
+            await conn.commit()
+
+
 async def main():
-    pass
+    db = CrudAdvertising()
+    await db.delete_advertising(
+        channel_id=-1003091383282,
+        post_id=373,
+    )
 
 if __name__ == '__main__':
     asyncio.run(create_table())
