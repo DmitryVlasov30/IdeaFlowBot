@@ -340,7 +340,64 @@ class SubBot:
                 logger.info("bot not chat")
                 return
 
-            await MarkupButton(self.sup_bot).main_menu(message, self.chat_suggest)
+            await (MarkupButton(self.sup_bot)
+                   .main_menu(message.chat.id, message.chat.id, message.message_id, self.chat_suggest))
+
+        async def shift_timer():
+            interval_lst = list(map(
+                lambda x: (x[1], x[1] + settings.shift_time_seconds),
+                self.advertising_data
+            ))
+            flag_interval = False
+            for message_id in self.delayed_message.keys():
+                for interval_down, interval_up in interval_lst:
+                    if interval_down <= self.delayed_message[message_id][0] <= interval_up:
+                        flag_interval = True
+                        break
+                if flag_interval:
+                    break
+            if not flag_interval:
+                return
+            for message_id in self.delayed_message.keys():
+                try:
+                    old_time = await Utils.get_timestamp_to_time(self.delayed_message[message_id][0])
+                    logger.debug(old_time)
+                    self.delayed_message[message_id][0] += settings.shift_time_seconds
+                    await self.delayed_database.setter_post(
+                        bot_id=self.bot_info.id,
+                        new_time_seconds=self.delayed_message[message_id][0],
+                        message_id=message_id
+                    )
+                    new_time = await Utils.get_timestamp_to_time(self.delayed_message[message_id][0])
+                    logger.debug(new_time)
+                    logger.info(f"shift timer success")
+                    markup = await MarkupButton(self.sup_bot).get_markup(*self.delayed_message[message_id])
+                    await self.sup_bot.edit_message_reply_markup(
+                        chat_id=self.chat_suggest,
+                        message_id=message_id,
+                        reply_markup=markup
+                    )
+                    logger.info(f"shift timer {message_id}, bot: {self.bot_info.username}")
+                except Exception as ex:
+                    logger.error(ex)
+
+        async def save_advertising(message: Message) -> None:
+            time = await Utils.conversion_to_moscow_time(message.date)
+            self.advertising_data.add((message.message_id, time))
+            await self.advertising_database.add_advertising(
+                channel_id=self.channel_id,
+                post_id=message.message_id,
+                time=time
+            )
+            logger.info(f"advertising data: {self.advertising_data}, time: {time}")
+
+        @logger.catch
+        @self.sup_bot.channel_post_handler(content_types=['text', 'photo', 'video'])
+        async def snipe_post(message: Message) -> None:
+            check_link = await Utils.check_link(message)
+            if check_link:
+                await save_advertising(message)
+                await shift_timer()
 
         @logger.catch
         async def save_delayed_post(call: CallbackQuery) -> None:
