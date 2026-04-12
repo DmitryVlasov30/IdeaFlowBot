@@ -3,15 +3,20 @@ from telebot.types import Message, CallbackQuery, InlineKeyboardButton
 from datetime import datetime, timedelta, timezone
 from loguru import logger
 
-from src.core_database.database import CrudBannedUser
+from src.core_database.database import CrudBannedUser, CrudPostData
+from src.core_database.models.sender_info import SenderData
+from src.core_database.models.admin_actions import AdminActionData
 from config import settings
 
 
 class Utils:
-    @staticmethod
-    async def check_banned_user(id_user: int, id_channel: int) -> bool:
-        db_session = CrudBannedUser()
-        all_info = await db_session.get_banned_users(id_user=id_user, id_channel=id_channel)
+    def __init__(self):
+        self.db_banned = CrudBannedUser()
+        self.sender_data = CrudPostData(SenderData)
+        self.action_admin = CrudPostData(AdminActionData)
+
+    async def check_banned_user(self, id_user: int, id_channel: int) -> bool:
+        all_info = await self.db_banned.get_banned_users(id_user=id_user, id_channel=id_channel)
         return bool(all_info)
 
     @staticmethod
@@ -38,25 +43,39 @@ class Utils:
         local_date = utc_date.astimezone(local_tz)
         return local_date.timestamp()
 
-    @staticmethod
     @logger.catch
-    async def save_post(call: CallbackQuery, public_posts, channel_id, info_sender, bot_info) -> None:
+    async def save_post(self, call: CallbackQuery, channel_id, info_sender, bot_info) -> None:
+        timestamp = datetime.now(pytz.timezone('Europe/Moscow')).timestamp()
+        logger.debug(timestamp)
         data = {
             "user_id":  info_sender.id,
             "channel_id": channel_id,
-            "bot_username": bot_info.username,
-            "username": info_sender.username,
+            "bot_username": bot_info,
+            "username": info_sender.username if info_sender.username is not None else "",
             "first_name": info_sender.first_name,
             "message_id": call.message.id,
             "chat_id": call.message.chat.id,
-            "text_post": None
+            "text_post": None,
+            "timestamp": int(timestamp),
             }
         if call.message.content_type == "text":
             data["text_post"] = call.message.text
         elif call.message.caption is not None:
             data["text_post"] = call.message.caption
 
-        await public_posts.add_public_posts(data)
+        await self.sender_data.add_public_posts(data)
+
+    @logger.catch
+    async def save_admin_action(self, call):
+        timestamp = datetime.now(pytz.timezone('Europe/Moscow')).timestamp()
+        data = {
+            "message_id": call.message.id,
+            "chat_id": call.message.chat.id,
+            "admin_id": call.message.from_user.id,
+            "timestamp": int(timestamp),
+            "button": call.data.split(";")[0],
+        }
+        await self.action_admin.add_public_posts(data)
 
     @staticmethod
     @logger.catch
@@ -70,12 +89,22 @@ class Utils:
     @staticmethod
     @logger.catch
     async def check_link(message: Message) -> bool:
-        if message.content_type == "text":
-            return "http" in message.text or "https" in message.text
-        elif message.caption is not None:
-            return "http" in message.caption or "https" in message.caption
+        if message.entities is None and message.caption_entities is None:
+            if message.text is None and message.caption is None:
+                return False
+            if message.text is None:
+                text = message.caption
+            else:
+                text = message.text
+            return "http" in text or "https" in text
+        if message.entities is None:
+            check_lst = message.caption_entities
         else:
-            return False
+            check_lst = message.entities
+        for el in check_lst:
+            if el.type == "text_link":
+                return True
+        return False
 
 
 def filter_chats(func):

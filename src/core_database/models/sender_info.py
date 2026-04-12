@@ -3,7 +3,7 @@ from src.core_database.models.base import Base
 
 
 class SenderData(Base):
-    __tablename__ = "users"
+    __tablename__ = "sender_info"
 
     user_id: Mapped[int]
     channel_id: Mapped[str]
@@ -13,3 +13,5 @@ class SenderData(Base):
     message_id: Mapped[int]
     chat_id: Mapped[int]
     text_post: Mapped[str]
+    timestamp: Mapped[int]
+

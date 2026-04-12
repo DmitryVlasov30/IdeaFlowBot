@@ -10,7 +10,7 @@ from telebot.types import (Message, InlineKeyboardMarkup,
                            ChatMemberUpdated, BotCommand, BotCommandScopeAllGroupChats)
 
 from src.core_database.database import (CrudChatAdmins, CrudBannedUser,
-                                        CrudServiceMessage, CrudSenderData,
+                                        CrudServiceMessage,
                                         CrudUserData, CrudDelayedPosts,
                                         CrudAnonymMessage, CrudAdvertising)
 from src.utils import Utils, filter_chats
@@ -26,7 +26,8 @@ class SubBot:
             channel_username: str,
             hello_msg: str,
             ban_usr_msg: str,
-            send_post_msg: str
+            send_post_msg: str,
+            callback_adv_action
     ):
         self.polling_task = None
         self.bot_info = None
@@ -34,6 +35,8 @@ class SubBot:
         self.hello_msg = hello_msg
         self.ban_usr_msg = ban_usr_msg
         self.send_post_msg = send_post_msg
+
+        self.callback_adv_action = callback_adv_action
 
         self.main_bot_username = main_bot_username
 
@@ -51,7 +54,6 @@ class SubBot:
         self.admins_database = CrudChatAdmins()
         self.ban_database = CrudBannedUser()
         self.service_msg_database = CrudServiceMessage()
-        self.public_posts = CrudSenderData()
         self.user_database = CrudUserData()
         self.delayed_database = CrudDelayedPosts()
         self.anonym_message_database = CrudAnonymMessage()
@@ -76,9 +78,19 @@ class SubBot:
                      hello_msg: str,
                      ban_usr_msg: str,
                      send_post_msg: str,
-                     main_bot_username: str
+                     main_bot_username: str,
+                     callback_adv_action
                      ):
-        self = cls(main_bot_username, api_token_bot, channel_username, hello_msg, ban_usr_msg, send_post_msg)
+        self = cls(
+            main_bot_username,
+            api_token_bot,
+            channel_username,
+            hello_msg,
+            ban_usr_msg,
+            send_post_msg,
+            callback_adv_action
+        )
+
         logger.info("init")
         await self.__setup_bot_info()
         logger.info("setup bot info")
@@ -327,7 +339,7 @@ class SubBot:
             if message.chat.id == self.chat_suggest or message.chat.id < 0:
                 return
 
-            if await Utils.check_banned_user(message.chat.id, self.channel_id):
+            if await Utils().check_banned_user(message.chat.id, self.channel_id):
                 await self.sup_bot.send_message(chat_id=message.chat.id, text=self.ban_usr_msg)
                 logger.info("user banned")
                 return
@@ -436,40 +448,45 @@ class SubBot:
         @self.sup_bot.callback_query_handler(func=lambda call: True)
         async def callback(call: CallbackQuery) -> None:
             buttons_func = MarkupButton(self.sup_bot)
+            utils_func = Utils()
+            await utils_func.save_admin_action(call)
             match call.data.split(";")[0]:
                 case "banned_user":
                     await buttons_func.add_ban_user(call, self.channel_id, self.bot_info, self.chat_suggest)
                 case "add_info":
+                    await utils_func.save_admin_action(call)
                     await buttons_func.add_info(call)
                 case "send_suggest":
                     is_anon = call.message.message_id in self.anonym_send
                     sender_id = int(call.data.split(";")[1])
+                    logger.debug(sender_id)
                     info_sender = await self.sup_bot.get_chat(sender_id)
+                    logger.debug(info_sender)
                     if info_sender.username is None:
                         is_anon = False
-                    self.anonym_send.remove(call.message.message_id)
+                    if call.message.message_id in self.anonym_send:
+                        self.anonym_send.remove(call.message.message_id)
+                    logger.debug(self.bot_info)
                     await self.anonym_message_database.delete_posts({
                         "message_id": call.message.message_id,
                         "chat_id": call.message.chat.id,
                     })
-                    await Utils.save_post(
+                    await utils_func.save_post(
                         call,
-                        self.public_posts,
                         self.channel_id,
                         info_sender,
                         self.bot_info.username,
-
                     )
                     await buttons_func.send_suggest(
                         call,
                         self.channel_username,
-                        self.channel_id, is_anon,
-                        self.anonym_message_database
+                        self.channel_id,
+                        is_anon,
                     )
                 case "reject":
                     await buttons_func.reject_post(call)
                 case "delayed_button":
-                    if "Отложено" in call.message.text:
+                    if (call.message.text is not None and "Отложено" in call.message.text) or (call.message.caption is not None and "Отложено" in call.message.caption):
                         del self.delayed_message[call.message.id]
                         await self.delayed_database.delete_delayed_posts({
                             "bot_id": self.bot_info.id,
@@ -494,12 +511,11 @@ class SubBot:
                     )
                 case "day_choice":
                     sender_info = await self.sup_bot.get_chat(int(call.data.split(";")[4]))
-                    await Utils.save_post(
+                    await utils_func.save_post(
                         call,
-                        self.public_posts,
                         self.channel_id,
                         sender_info,
-                        self.bot_info,
+                        self.bot_info.username,
                     )
                     await save_delayed_post(call)
                     logger.debug(call.data)
@@ -536,6 +552,11 @@ class SubBot:
                         is_anon=(call.message.id in self.anonym_send),
                         is_send=False,
                     )
+                case "advertising_button":
+                    sender_id = call.data.split(";")[1]
+                    info_sender = await self.sup_bot.get_chat(sender_id)
+                    await buttons_func.advertising_button(call)
+                    await self.callback_adv_action(call, self.channel_username, info_sender)
 
     @logger.catch
     async def check_admin(self, channel_id) -> bool:

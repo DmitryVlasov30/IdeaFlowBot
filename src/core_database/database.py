@@ -6,13 +6,14 @@ from src.core_database.models.base import Base
 from src.core_database.models.banned_user import BannedUser
 from src.core_database.models.bots_data import BotsData
 from src.core_database.models.chat_admins import ChatAdmins
-from src.core_database.models.public_posts import PublicPosts
 from src.core_database.models.service_message import ServiceMessage
 from src.core_database.models.users import UserData
 from src.core_database.models.delayed_posts import DelayedPost
 from src.core_database.models.anonym_message import AnonymMessage
 from src.core_database.models.db_helper import db_helper
 from src.core_database.models.advertising import Advertising
+from src.core_database.models.sender_info import SenderData
+from src.core_database.models.admin_actions import AdminActionData
 
 
 async def create_table():
@@ -329,16 +330,17 @@ class CrudAdvertising:
             await conn.commit()
 
 
-class CrudSenderData:
-    @staticmethod
-    async def get_public_posts() -> list:
-        async with db_helper.engine.connect() as conn:
-            return (await conn.execute(select(PublicPosts))).fetchall()
+class CrudPostData:
+    def __init__(self, table):
+        self.table = table
 
-    @staticmethod
-    async def add_public_posts(data: dict) -> None:
+    async def get_public_posts(self) -> list:
         async with db_helper.engine.connect() as conn:
-            await conn.execute(insert(PublicPosts).values(data))
+            return (await conn.execute(select(self.table))).fetchall()
+
+    async def add_public_posts(self, data: dict) -> None:
+        async with db_helper.engine.connect() as conn:
+            await conn.execute(insert(self.table).values(data))
             await conn.commit()
 
 

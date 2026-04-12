@@ -189,8 +189,6 @@ class MarkupButton:
         info = await self.bot.get_chat(call.data.split(";")[1])
         user = formatting.escape_markdown(info.username)
         msg = "информация: \n" + f"id: `{info.id}`\n" + f"username @{user}\n" + f"name: `{info.first_name}`"
-        if info.last_name is not None:
-            msg += f" last_name: `{info.last_name}`"
         await self.bot.send_message(
             chat_id=call.message.chat.id,
             text=msg,
@@ -237,9 +235,14 @@ class MarkupButton:
             callback_data=f"anonym_button;{chat_id}"
         )
 
+        advertising_button = InlineKeyboardButton(
+            text="💵Реклама",
+            callback_data=f"advertising_button;{chat_id}"
+        )
+
         markup.add(banned_user, addition_info, anon_button)
         markup.add(send_button, reject_button)
-        markup.add(delayed_button)
+        markup.add(delayed_button, advertising_button)
         if is_send:
             await self.bot.copy_message(
                 chat_id=chat_suggest,
@@ -387,3 +390,21 @@ class MarkupButton:
         markup.add(button_reject, button_info)
         markup.add(button_time)
         return markup
+
+    async def advertising_button(self, call: CallbackQuery):
+        logger.info(f"advertising button: {call.data}")
+        markup = InlineKeyboardMarkup()
+        sender_id = call.data.split(";")[1]
+        sender_info = await self.bot.get_chat(sender_id)
+        button_info = InlineKeyboardButton(
+            text=f"@{sender_info.username} (реклама отправлена)",
+            callback_data=f"add_info;{sender_id}"
+        )
+        markup.add(button_info)
+        await self.bot.send_message(text=settings.advertising_text, chat_id=sender_id)
+        await self.bot.edit_message_reply_markup(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            reply_markup=markup,
+        )
+

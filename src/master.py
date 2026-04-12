@@ -27,7 +27,7 @@ class MasterBot:
         self.commands = [
             BotCommand("bots", "выводит список подчиненных ботов"),
             BotCommand("add", "добавление нового бота, указывай api токен, потом ссылку на канал"),
-            BotCommand("remove", "сначала юз бота, потом юз канала")
+            BotCommand("delete", "сначала юз бота, потом юз канала")
         ]
 
         self.api_token_bot = api_token_bot
@@ -87,6 +87,28 @@ class MasterBot:
             scope=BotCommandScopeChat(*self.chats),
         )
         self.bot_info = await self.main_bot.get_me()
+    
+    @logger.catch
+    async def callback_adv_send_message(self, call: CallbackQuery, channel_username: str, info_sender):
+        text_adv = call.message.text if call.message.text is not None else call.message.caption
+        message = (f"<b>реклама:</b> {channel_username}\n"
+                   f"<blockquote expandable>{
+                   text_adv if text_adv is not None else 'текста нет в сообщении с рекламой'
+                   }</blockquote>\n"
+                   f"отправитель: {sender_id if info_sender.username is None
+                   else ('@' + info_sender.username)},"
+                   f" ник: <b>{info_sender.first_name}</b>\n")
+        logger.info(f"message: {message}")
+        for adv_admin in settings.advertiser:
+            try:
+                logger.info(f"send adv info to {adv_admin}")
+                await self.main_bot.send_message(
+                    text=message,
+                    chat_id=adv_admin,
+                    parse_mode="HTML",
+                )
+            except Exception as ex:
+                logger.error(ex)
 
     def __setup_handlers(self):
         @self.main_bot.message_handler(commands=["push"])
@@ -158,11 +180,13 @@ class MasterBot:
                 await self.main_bot.send_message(message.chat.id, "канал не найден")
                 return
             bot = await SubBot.create(
+                main_bot_username=self.bot_info.username,
                 api_token_bot=api_token,
                 channel_username=channel_username,
                 hello_msg=settings.hello_msg,
                 ban_usr_msg=settings.ban_msg,
                 send_post_msg=settings.send_post_msg,
+                callback_adv_action=self.callback_adv_send_message
             )
             logger.info("init bot")
             is_admin = await bot.check_admin(channel_id)
@@ -307,7 +331,8 @@ class MasterBot:
                             channel_username=channel_username,
                             hello_msg=settings.hello_msg,
                             ban_usr_msg=settings.ban_msg,
-                            send_post_msg=settings.send_post_msg
+                            send_post_msg=settings.send_post_msg,
+                            callback_adv_action=self.callback_adv_send_message
                         )
                         await bot.run_bot()
                         self.bots_work.append(bot)
