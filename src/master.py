@@ -95,7 +95,7 @@ class MasterBot:
                    f"<blockquote expandable>{
                    text_adv if text_adv is not None else 'текста нет в сообщении с рекламой'
                    }</blockquote>\n"
-                   f"отправитель: {sender_id if info_sender.username is None
+                   f"отправитель: {info_sender.id if info_sender.username is None
                    else ('@' + info_sender.username)},"
                    f" ник: <b>{info_sender.first_name}</b>\n")
         logger.info(f"message: {message}")

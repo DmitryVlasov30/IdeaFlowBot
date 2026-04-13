@@ -1,0 +1,76 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ideaflow_editorial}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+
+  collector-bot:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: python main.py
+    depends_on:
+      - postgres
+      - redis
+
+  editorial-api:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: sh -c "alembic upgrade head && uvicorn src.editorial.api.app:app --host 0.0.0.0 --port 8080"
+    depends_on:
+      - postgres
+      - redis
+    ports:
+      - "8080:8080"
+
+  editorial-importer:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: sh -c "alembic upgrade head && while true; do python -m src.editorial.cli import-legacy; sleep 60; done"
+    depends_on:
+      - postgres
+      - redis
+
+  editorial-scheduler:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: sh -c "alembic upgrade head && while true; do python -m src.editorial.cli schedule; sleep 300; done"
+    depends_on:
+      - postgres
+      - redis
+
+  editorial-publisher:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: sh -c "alembic upgrade head && while true; do python -m src.editorial.cli publish; sleep 30; done"
+    depends_on:
+      - postgres
+      - redis
+
+volumes:
+  postgres_data:
+

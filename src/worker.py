@@ -452,7 +452,7 @@ class SubBot:
             await utils_func.save_admin_action(call)
             match call.data.split(";")[0]:
                 case "banned_user":
-                    await buttons_func.add_ban_user(call, self.channel_id, self.bot_info, self.chat_suggest)
+                    await buttons_func.add_ban_user(call, self.ban_database, self.channel_id, self.bot_info, self.chat_suggest)
                 case "add_info":
                     await utils_func.save_admin_action(call)
                     await buttons_func.add_info(call)
