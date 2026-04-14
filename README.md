@@ -5,6 +5,7 @@
 - старый collector-бот, который принимает сообщения и не ломается;
 - новый editorial layer, который строит поверх collector полноценный pipeline:
   `submission -> content_item -> review -> approved -> scheduled -> published`.
+- Telegram-first панель в главном боте, через которую модераторы и генеральный админ могут управлять системой кнопками.
 
 Основная идея проекта:
 
@@ -27,29 +28,47 @@
 
 1. Скопируй `.env.example` в `.env`.
 2. Заполни `BOT_API_TOKEN`, `GENERAL_ADMIN` и остальные важные переменные.
-3. Подними инфраструктуру:
+3. Выключи генерацию, если пока хочешь работать только с реальными сообщениями и пастами:
+
+```env
+EDITORIAL_GENERATION_ENABLED=false
+```
+
+4. Подними инфраструктуру:
 
 ```bash
 docker compose up --build
 ```
 
-4. Примени миграции вручную, если запускаешь не через compose:
+5. Примени миграции вручную, если запускаешь не через compose:
 
 ```bash
 alembic upgrade head
 ```
 
-5. Запусти legacy collector:
+6. Запусти legacy collector:
 
 ```bash
 python main.py
 ```
 
-6. Запусти editorial API:
+7. Запусти editorial API:
 
 ```bash
 uvicorn src.editorial.api.app:app --host 0.0.0.0 --port 8080
 ```
+
+8. В Telegram открой главного бота и используй `/panel`.
+
+Через `/panel` теперь можно:
+
+- импортировать новые сообщения из legacy inbox;
+- смотреть поступившие submissions;
+- approve / hold / reject / publish now;
+- сохранять пасты;
+- запускать scheduler и publisher;
+- создавать стандартные слоты каналов;
+- для генерального админа: добавлять модераторов и управлять сабботами.
 
 ## Полезные CLI Команды
 
@@ -89,3 +108,6 @@ python -m src.editorial.cli generate --channel-id 1 --variants 3 --sources 5
 - [Поток контента](docs/CONTENT_FLOW.md)
 - [Деплой и сервер](docs/DEPLOYMENT.md)
 
+## Важная Практическая Деталь
+
+В `docker-compose.yml` collector, importer и publisher теперь шарят `./data:/app/data`, поэтому legacy SQLite `data/bot_network_db.db` виден всем нужным контейнерам сразу. Это важно для локальной работы сети сабботов и новой editorial панели.

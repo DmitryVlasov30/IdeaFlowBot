@@ -14,6 +14,7 @@ from src.core_database.models.db_helper import db_helper
 from src.core_database.models.advertising import Advertising
 from src.core_database.models.sender_info import SenderData
 from src.core_database.models.admin_actions import AdminActionData
+from src.core_database.models.bot_admins import BotAdmin
 
 
 async def create_table():
@@ -341,6 +342,34 @@ class CrudPostData:
     async def add_public_posts(self, data: dict) -> None:
         async with db_helper.engine.connect() as conn:
             await conn.execute(insert(self.table).values(data))
+            await conn.commit()
+
+    async def get_first_by_filters(self, **filters):
+        async with db_helper.engine.connect() as conn:
+            stmt = select(self.table)
+            for key, value in filters.items():
+                stmt = stmt.filter(getattr(self.table, key) == value)
+            return (await conn.execute(stmt.limit(1))).scalars().first()
+
+
+class CrudBotAdmins:
+    @staticmethod
+    async def get_admins(user_id: int = None) -> list:
+        async with db_helper.engine.connect() as conn:
+            if user_id is None:
+                return (await conn.execute(select(BotAdmin))).fetchall()
+            return (await conn.execute(select(BotAdmin).filter(BotAdmin.user_id == user_id))).fetchall()
+
+    @staticmethod
+    async def add_admin(data: dict) -> None:
+        async with db_helper.engine.connect() as conn:
+            await conn.execute(insert(BotAdmin).values(data))
+            await conn.commit()
+
+    @staticmethod
+    async def delete_admin(user_id: int) -> None:
+        async with db_helper.engine.connect() as conn:
+            await conn.execute(delete(BotAdmin).filter(BotAdmin.user_id == user_id))
             await conn.commit()
 
 

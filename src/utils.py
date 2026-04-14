@@ -63,6 +63,38 @@ class Utils:
         elif call.message.caption is not None:
             data["text_post"] = call.message.caption
 
+        await self._save_sender_record(data)
+
+    @logger.catch
+    async def save_incoming_message(self, message: Message, channel_id: int, bot_info: str) -> None:
+        timestamp = datetime.now(pytz.timezone('Europe/Moscow')).timestamp()
+        data = {
+            "user_id": message.from_user.id,
+            "channel_id": channel_id,
+            "bot_username": bot_info,
+            "username": message.from_user.username if message.from_user.username is not None else "",
+            "first_name": message.from_user.first_name,
+            "message_id": message.id,
+            "chat_id": message.chat.id,
+            "text_post": None,
+            "timestamp": int(timestamp),
+        }
+        if message.content_type == "text":
+            data["text_post"] = message.text
+        elif message.caption is not None:
+            data["text_post"] = message.caption
+
+        await self._save_sender_record(data)
+
+    async def _save_sender_record(self, data: dict) -> None:
+        existing = await self.sender_data.get_first_by_filters(
+            channel_id=data["channel_id"],
+            bot_username=data["bot_username"],
+            message_id=data["message_id"],
+            chat_id=data["chat_id"],
+        )
+        if existing:
+            return
         await self.sender_data.add_public_posts(data)
 
     @logger.catch

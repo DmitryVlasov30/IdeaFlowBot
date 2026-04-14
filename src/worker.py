@@ -352,6 +352,7 @@ class SubBot:
                 logger.info("bot not chat")
                 return
 
+            await Utils().save_incoming_message(message, self.channel_id, self.bot_info.username)
             await (MarkupButton(self.sup_bot)
                    .main_menu(message.chat.id, message.chat.id, message.message_id, self.chat_suggest))
 

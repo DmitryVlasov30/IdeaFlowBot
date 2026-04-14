@@ -25,6 +25,9 @@ services:
     env_file:
       - .env
     command: python main.py
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
     depends_on:
       - postgres
       - redis
@@ -47,6 +50,8 @@ services:
     env_file:
       - .env
     command: sh -c "alembic upgrade head && while true; do python -m src.editorial.cli import-legacy; sleep 60; done"
+    volumes:
+      - ./data:/app/data
     depends_on:
       - postgres
       - redis
@@ -67,10 +72,11 @@ services:
     env_file:
       - .env
     command: sh -c "alembic upgrade head && while true; do python -m src.editorial.cli publish; sleep 30; done"
+    volumes:
+      - ./data:/app/data
     depends_on:
       - postgres
       - redis
 
 volumes:
   postgres_data:
-

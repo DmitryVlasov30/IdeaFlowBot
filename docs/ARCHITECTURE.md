@@ -34,6 +34,7 @@
 - [src/editorial/services/publisher.py](/D:/VS%20projects/bot_pslshke/IdeaFlowBot/src/editorial/services/publisher.py:1) — отправка в Telegram
 - [src/editorial/services/generation](/D:/VS%20projects/bot_pslshke/IdeaFlowBot/src/editorial/services/generation) — простая генерация черновиков
 - [src/editorial/api/app.py](/D:/VS%20projects/bot_pslshke/IdeaFlowBot/src/editorial/api/app.py:1) — минимальный HTTP API для управления
+- [src/master.py](/D:/VS%20projects/bot_pslshke/IdeaFlowBot/src/master.py:1) — теперь ещё и Telegram-first панель для модераторов и генерального админа
 
 ## 2. Почему Новый Слой Вынесен Отдельно
 
@@ -101,6 +102,11 @@
 6. `SchedulerService` выбирает approved item и ставит его в `scheduled`.
 7. `PublisherService` публикует его в Telegram и пишет `publication_log`.
 
+На практике теперь этим можно управлять двумя способами:
+
+- через HTTP API;
+- через `/panel` в главном Telegram-боте.
+
 ## 5. Где Что Лучше Менять
 
 - Приём сообщений: старый collector
@@ -108,5 +114,5 @@
 - Модели PostgreSQL: `src/editorial/models`
 - Миграции: `alembic/versions`
 - HTTP endpoints: `src/editorial/api/app.py`
+- Telegram-панель и кнопочные сценарии: `src/master.py`, `src/panel_markups.py`
 - Нормализация текста: `src/editorial/utils/text.py`
-

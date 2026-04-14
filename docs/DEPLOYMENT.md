@@ -51,6 +51,7 @@ docker compose up --build -d
 - API само прогонит `alembic upgrade head`
 - importer/scheduler/publisher стартуют в цикле
 - collector-bot поднимется отдельно
+- `./data` будет общим volume для collector/importer/publisher, поэтому legacy SQLite не разъедется по разным контейнерам
 
 ## 5. Если Хочешь Запускать Процессы Вручную
 
@@ -107,6 +108,12 @@ python -m src.editorial.cli generate --channel-id 1
 
 Без слотов scheduler ничего не запланирует, и это нормально.
 
+Если пока хочешь жить без генерации, просто выставь:
+
+```env
+EDITORIAL_GENERATION_ENABLED=false
+```
+
 ## 7. Как Понять, Что Всё Работает
 
 Порядок проверки:
@@ -118,3 +125,20 @@ python -m src.editorial.cli generate --channel-id 1
 5. Publisher отправляет пост в Telegram канал.
 6. В `publication_log` появляется `sent`.
 
+## 8. Более Простой Повседневный Сценарий
+
+После локального запуска открой в Telegram главного бота и используй `/panel`.
+
+Что умеет панель:
+
+- модератор:
+  - импорт новых сообщений;
+  - просмотр incoming submissions;
+  - approve / reject / hold / publish now;
+  - создание paste из submission;
+  - запуск scheduler/publisher;
+  - создание стандартных слотов канала.
+- генеральный админ:
+  - всё вышеперечисленное;
+  - добавление и удаление динамических модераторов;
+  - добавление и удаление сабботов кнопками.
