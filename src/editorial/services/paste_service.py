@@ -14,6 +14,19 @@ from src.editorial.utils.text import compute_text_hash, detect_tags, normalize_t
 
 
 class PasteService:
+    async def list_pastes(
+        self,
+        session: AsyncSession,
+        status: PasteStatus | None = None,
+        limit: int | None = 50,
+    ) -> list[PasteLibrary]:
+        stmt = select(PasteLibrary).order_by(PasteLibrary.updated_at.desc())
+        if status is not None:
+            stmt = stmt.where(PasteLibrary.status == status)
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        return list((await session.execute(stmt)).scalars().all())
+
     async def create_manual_paste(
         self,
         session: AsyncSession,
@@ -119,6 +132,19 @@ class PasteService:
         await session.refresh(item)
         return item
 
+    async def archive_paste(
+        self,
+        session: AsyncSession,
+        paste_id: int,
+    ) -> PasteLibrary:
+        paste = await session.get(PasteLibrary, paste_id)
+        if paste is None:
+            raise ValueError(f"Paste {paste_id} not found")
+        paste.status = PasteStatus.ARCHIVED
+        await session.commit()
+        await session.refresh(paste)
+        return paste
+
     async def list_available_for_channel(
         self,
         session: AsyncSession,
@@ -218,4 +244,3 @@ class PasteService:
         if last_publish and last_publish.published_at and last_publish.published_at >= now - timedelta(days=paste.per_channel_cooldown_days):
             return True
         return False
-

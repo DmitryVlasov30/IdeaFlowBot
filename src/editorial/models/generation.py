@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.editorial.db.base import BaseIdMixin, EditorialBase
-from src.editorial.models.enums import GenerationStatus
+from src.editorial.models.enums import GenerationStatus, enum_column
 
 
 class GenerationRun(EditorialBase, BaseIdMixin):
@@ -19,7 +19,7 @@ class GenerationRun(EditorialBase, BaseIdMixin):
     source_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     generated_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     status: Mapped[GenerationStatus] = mapped_column(
-        Enum(GenerationStatus, name="generation_status"),
+        enum_column(GenerationStatus, "generation_status"),
         default=GenerationStatus.PENDING,
         nullable=False,
         index=True,
@@ -27,4 +27,3 @@ class GenerationRun(EditorialBase, BaseIdMixin):
     error_text: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-

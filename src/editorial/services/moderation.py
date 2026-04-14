@@ -22,11 +22,13 @@ class ModerationService:
         self,
         session: AsyncSession,
         status: SubmissionStatus | None = None,
-        limit: int = 50,
+        limit: int | None = 50,
     ) -> list[Submission]:
-        stmt = select(Submission).order_by(Submission.created_at.desc()).limit(limit)
+        stmt = select(Submission).order_by(Submission.created_at.desc())
         if status is not None:
             stmt = stmt.where(Submission.status == status)
+        if limit is not None:
+            stmt = stmt.limit(limit)
         return list((await session.execute(stmt)).scalars().all())
 
     async def set_submission_status(
@@ -140,4 +142,3 @@ class ModerationService:
         await session.commit()
         await session.refresh(item)
         return item
-

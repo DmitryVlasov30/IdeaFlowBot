@@ -21,6 +21,7 @@ submission_status = sa.Enum(
     "rejected",
     "hold",
     name="submission_status",
+    create_type=False,
 )
 content_source_type = sa.Enum(
     "submission",
@@ -28,6 +29,7 @@ content_source_type = sa.Enum(
     "paste",
     "editorial",
     name="content_source_type",
+    create_type=False,
 )
 content_item_status = sa.Enum(
     "draft",
@@ -38,6 +40,7 @@ content_item_status = sa.Enum(
     "rejected",
     "hold",
     name="content_item_status",
+    create_type=False,
 )
 review_decision = sa.Enum(
     "approve",
@@ -47,6 +50,7 @@ review_decision = sa.Enum(
     "save_as_paste",
     "approve_as_source",
     name="review_decision",
+    create_type=False,
 )
 publication_status = sa.Enum(
     "scheduled",
@@ -54,6 +58,7 @@ publication_status = sa.Enum(
     "failed",
     "cancelled",
     name="publication_status",
+    create_type=False,
 )
 generation_status = sa.Enum(
     "pending",
@@ -61,26 +66,20 @@ generation_status = sa.Enum(
     "failed",
     "disabled",
     name="generation_status",
+    create_type=False,
 )
 paste_status = sa.Enum(
     "draft",
     "active",
     "archived",
     name="paste_status",
+    create_type=False,
 )
 
 
 def upgrade() -> None:
     op.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
     op.execute("CREATE EXTENSION IF NOT EXISTS unaccent")
-
-    submission_status.create(op.get_bind(), checkfirst=True)
-    content_source_type.create(op.get_bind(), checkfirst=True)
-    content_item_status.create(op.get_bind(), checkfirst=True)
-    review_decision.create(op.get_bind(), checkfirst=True)
-    publication_status.create(op.get_bind(), checkfirst=True)
-    generation_status.create(op.get_bind(), checkfirst=True)
-    paste_status.create(op.get_bind(), checkfirst=True)
 
     op.create_table(
         "channels",
@@ -371,12 +370,3 @@ def downgrade() -> None:
     op.drop_table("channel_slots")
     op.drop_index("ix_channels_tg_channel_id", table_name="channels")
     op.drop_table("channels")
-
-    paste_status.drop(op.get_bind(), checkfirst=True)
-    generation_status.drop(op.get_bind(), checkfirst=True)
-    publication_status.drop(op.get_bind(), checkfirst=True)
-    review_decision.drop(op.get_bind(), checkfirst=True)
-    content_item_status.drop(op.get_bind(), checkfirst=True)
-    content_source_type.drop(op.get_bind(), checkfirst=True)
-    submission_status.drop(op.get_bind(), checkfirst=True)
-

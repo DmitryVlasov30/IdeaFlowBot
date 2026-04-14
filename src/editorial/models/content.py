@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.editorial.db.base import BaseIdMixin, EditorialBase, TimestampMixin
-from src.editorial.models.enums import ContentItemStatus, ContentSourceType
+from src.editorial.models.enums import ContentItemStatus, ContentSourceType, enum_column
 
 
 class ContentItem(EditorialBase, BaseIdMixin, TimestampMixin):
@@ -15,7 +15,7 @@ class ContentItem(EditorialBase, BaseIdMixin, TimestampMixin):
 
     channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), nullable=False, index=True)
     source_type: Mapped[ContentSourceType] = mapped_column(
-        Enum(ContentSourceType, name="content_source_type"),
+        enum_column(ContentSourceType, "content_source_type"),
         nullable=False,
         index=True,
     )
@@ -31,7 +31,7 @@ class ContentItem(EditorialBase, BaseIdMixin, TimestampMixin):
     priority: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
     review_required: Mapped[bool] = mapped_column(default=True, nullable=False)
     status: Mapped[ContentItemStatus] = mapped_column(
-        Enum(ContentItemStatus, name="content_item_status"),
+        enum_column(ContentItemStatus, "content_item_status"),
         default=ContentItemStatus.PENDING_REVIEW,
         nullable=False,
         index=True,
@@ -59,4 +59,3 @@ class ContentItemSource(EditorialBase, BaseIdMixin):
         index=True,
     )
     role: Mapped[str] = mapped_column(String(32), default="source", nullable=False)
-

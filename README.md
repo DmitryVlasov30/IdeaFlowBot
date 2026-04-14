@@ -107,6 +107,7 @@ python -m src.editorial.cli generate --channel-id 1 --variants 3 --sources 5
 - [Архитектура](docs/ARCHITECTURE.md)
 - [Поток контента](docs/CONTENT_FLOW.md)
 - [Деплой и сервер](docs/DEPLOYMENT.md)
+- [Telegram-панель](docs/TELEGRAM_PANEL.md)
 
 ## Важная Практическая Деталь
 

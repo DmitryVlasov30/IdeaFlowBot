@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Type
+
+from sqlalchemy import Enum
 
 
 class SubmissionStatus(StrEnum):
@@ -57,3 +60,11 @@ class PasteStatus(StrEnum):
     ACTIVE = "active"
     ARCHIVED = "archived"
 
+
+def enum_column(enum_cls: Type[StrEnum], name: str) -> Enum:
+    return Enum(
+        enum_cls,
+        name=name,
+        values_callable=lambda members: [member.value for member in members],
+        validate_strings=True,
+    )

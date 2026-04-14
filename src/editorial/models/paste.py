@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.editorial.db.base import BaseIdMixin, EditorialBase, TimestampMixin
-from src.editorial.models.enums import PasteStatus
+from src.editorial.models.enums import PasteStatus, enum_column
 
 
 class PasteLibrary(EditorialBase, BaseIdMixin, TimestampMixin):
@@ -23,7 +23,7 @@ class PasteLibrary(EditorialBase, BaseIdMixin, TimestampMixin):
     tags: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
     primary_tag: Mapped[str | None] = mapped_column(String(64), index=True)
     status: Mapped[PasteStatus] = mapped_column(
-        Enum(PasteStatus, name="paste_status"),
+        enum_column(PasteStatus, "paste_status"),
         default=PasteStatus.ACTIVE,
         nullable=False,
         index=True,
@@ -57,4 +57,3 @@ class PasteChannelRule(EditorialBase, BaseIdMixin):
     paste_id: Mapped[int] = mapped_column(ForeignKey("paste_library.id", ondelete="CASCADE"), nullable=False, index=True)
     channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), nullable=False, index=True)
     is_allowed: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-

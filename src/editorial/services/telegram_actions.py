@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Iterable
 
 from sqlalchemy import select
 
 from src.editorial.db.session import session_factory
 from src.editorial.models.channel import Channel
 from src.editorial.models.content import ContentItem
-from src.editorial.models.enums import ContentItemStatus, PublicationStatus, ReviewDecision, SubmissionStatus
+from src.editorial.models.enums import ContentItemStatus, PasteStatus, PublicationStatus, ReviewDecision, SubmissionStatus
+from src.editorial.models.paste import PasteLibrary
 from src.editorial.models.publication import PublicationLog
 from src.editorial.models.submission import Submission
 from src.editorial.services.channel_service import ChannelService
@@ -35,6 +37,14 @@ class TelegramEditorialActions:
         async with session_factory() as session:
             return await self.channel_service.list_channels(session)
 
+    async def get_channel(self, channel_id: int) -> Channel | None:
+        async with session_factory() as session:
+            return await self.channel_service.get_channel(session, channel_id)
+
+    async def list_channel_slots(self, channel_id: int):
+        async with session_factory() as session:
+            return await self.channel_service.list_channel_slots(session, channel_id)
+
     async def seed_default_slots(self, channel_id: int) -> int:
         async with session_factory() as session:
             created = await self.channel_service.seed_daily_slots(
@@ -45,6 +55,20 @@ class TelegramEditorialActions:
             )
             return len(created)
 
+    async def add_slots(self, channel_id: int, slot_time: str, weekdays: Iterable[int]) -> int:
+        async with session_factory() as session:
+            created = await self.channel_service.seed_daily_slots(
+                session=session,
+                channel_id=channel_id,
+                slot_times=[slot_time],
+                weekdays=list(weekdays),
+            )
+            return len(created)
+
+    async def remove_slot(self, slot_id: int):
+        async with session_factory() as session:
+            return await self.channel_service.delete_slot(session, slot_id)
+
     async def list_pending_submissions(self) -> list[Submission]:
         async with session_factory() as session:
             stmt = (
@@ -54,6 +78,10 @@ class TelegramEditorialActions:
                 .limit(50)
             )
             return list((await session.execute(stmt)).scalars().all())
+
+    async def list_recent_submissions(self, limit: int | None = None) -> list[Submission]:
+        async with session_factory() as session:
+            return await self.moderation.list_submissions(session=session, status=None, limit=limit)
 
     async def get_submission(self, submission_id: int) -> Submission | None:
         async with session_factory() as session:
@@ -126,6 +154,29 @@ class TelegramEditorialActions:
     async def get_content_item(self, content_item_id: int) -> ContentItem | None:
         async with session_factory() as session:
             return await session.get(ContentItem, content_item_id)
+
+    async def list_pastes(self, limit: int | None = None) -> list[PasteLibrary]:
+        async with session_factory() as session:
+            return await self.paste_service.list_pastes(session=session, status=None, limit=limit)
+
+    async def get_paste(self, paste_id: int) -> PasteLibrary | None:
+        async with session_factory() as session:
+            return await session.get(PasteLibrary, paste_id)
+
+    async def create_manual_paste(self, body_text: str, reviewer_id: int, title: str | None = None) -> PasteLibrary:
+        clean_title = (title or body_text.strip().splitlines()[0][:60] or "Manual paste").strip()
+        async with session_factory() as session:
+            return await self.paste_service.create_manual_paste(
+                session=session,
+                title=clean_title,
+                body_text=body_text.strip(),
+                created_by=reviewer_id,
+                status=PasteStatus.ACTIVE,
+            )
+
+    async def archive_paste(self, paste_id: int) -> PasteLibrary:
+        async with session_factory() as session:
+            return await self.paste_service.archive_paste(session=session, paste_id=paste_id)
 
     async def approve_content_item(self, content_item_id: int, reviewer_id: int) -> ContentItem:
         async with session_factory() as session:
@@ -229,4 +280,3 @@ class TelegramEditorialActions:
         await session.commit()
         await session.refresh(log_item)
         return log_item
-

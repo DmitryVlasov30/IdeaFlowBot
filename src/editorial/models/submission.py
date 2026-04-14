@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Enum, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.editorial.db.base import BaseIdMixin, EditorialBase
-from src.editorial.models.enums import SubmissionStatus
+from src.editorial.models.enums import SubmissionStatus, enum_column
 
 
 class Submission(EditorialBase, BaseIdMixin):
@@ -34,7 +34,7 @@ class Submission(EditorialBase, BaseIdMixin):
     is_candidate_for_generation: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_candidate_for_paste: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     status: Mapped[SubmissionStatus] = mapped_column(
-        Enum(SubmissionStatus, name="submission_status"),
+        enum_column(SubmissionStatus, "submission_status"),
         default=SubmissionStatus.NEW,
         nullable=False,
         index=True,
@@ -42,4 +42,3 @@ class Submission(EditorialBase, BaseIdMixin):
     moderator_note: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-

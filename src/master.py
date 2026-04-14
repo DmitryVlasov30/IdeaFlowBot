@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 import asyncio
+from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import aiohttp
 from loguru import logger
@@ -11,17 +12,33 @@ from telebot.types import BotCommand, CallbackQuery, InlineKeyboardButton, Inlin
 
 from config import settings
 from src.core_database.database import CrudBotAdmins, CrudBotsData, CrudDelayedPosts
+from src.editorial.models.enums import SubmissionStatus
 from src.editorial.services.telegram_actions import TelegramEditorialActions
 from src.panel_markups import (
     build_admin_menu,
+    build_channel_slots_actions,
     build_channels_actions,
     build_content_actions,
+    build_empty_paste_actions,
     build_main_panel,
+    build_paste_actions,
     build_submission_actions,
+    build_submission_history_actions,
     build_subbot_menu,
 )
 from src.utils import filter_admin
 from src.worker import SubBot
+
+
+WEEKDAY_LABELS = {
+    0: "Пн",
+    1: "Вт",
+    2: "Ср",
+    3: "Чт",
+    4: "Пт",
+    5: "Сб",
+    6: "Вс",
+}
 
 
 class MasterBot:
@@ -29,7 +46,7 @@ class MasterBot:
         self.delayed_task = None
         self.bot_info = None
         self.flag_register_push_message = False
-        self.user_states: dict[int, dict] = {}
+        self.user_states: dict[int, dict[str, Any]] = {}
 
         self.bots_database = CrudBotsData()
         self.delayed_database = CrudDelayedPosts()
@@ -84,10 +101,17 @@ class MasterBot:
     def _clear_user_state(self, user_id: int) -> None:
         self.user_states.pop(user_id, None)
 
-    async def _answer_panel(self, chat_id: int, text: str = "Панель управления") -> None:
+    async def _answer_panel(self, chat_id: int, text: str | None = None) -> None:
+        panel_text = text or (
+            "Панель управления.\n\n"
+            "Поступившие сообщения: новые сырые сообщения пользователей, которые еще не превращены в пост.\n"
+            "Все сообщения: журнал submissions из базы, включая уже обработанные записи.\n"
+            "Черновики на review: уже собранные content items, которые ждут финального approve.\n"
+            "Пасты: библиотека сохраненных текстов, которые можно переиспользовать."
+        )
         await self.main_bot.send_message(
             chat_id=chat_id,
-            text=text,
+            text=panel_text,
             reply_markup=build_main_panel(self._is_general_admin(chat_id)),
         )
 
@@ -127,7 +151,7 @@ class MasterBot:
             channel_username = "@" + channel_username
         return channel_username
 
-    async def _add_subbot_from_values(self, api_token: str, channel_username: str, admin_chat_id: int) -> str:
+    async def _add_subbot_from_values(self, api_token: str, channel_username: str) -> str:
         channel_username = await self._normalize_channel_username(channel_username)
         try:
             channel_id = (await self.main_bot.get_chat(channel_username)).id
@@ -201,44 +225,149 @@ class MasterBot:
             reply_markup=build_subbot_menu(buttons),
         )
 
+    def _channel_label_from_runtime(self, tg_channel_id: int) -> str | None:
+        for bot in self.bots_work:
+            if getattr(bot, "channel_id", None) == tg_channel_id:
+                return getattr(bot, "channel_username", None)
+        return None
+
+    async def _get_channel_label(self, editorial_channel_id: int) -> str:
+        channel = await self.editorial_actions.get_channel(editorial_channel_id)
+        if channel is None:
+            return f"Канал #{editorial_channel_id}"
+        runtime_label = self._channel_label_from_runtime(channel.tg_channel_id)
+        if runtime_label:
+            return runtime_label
+        return channel.title or channel.short_code or f"tg {channel.tg_channel_id}"
+
+    def _weekday_label(self, weekday: int) -> str:
+        return WEEKDAY_LABELS.get(weekday, str(weekday))
+
+    def _parse_slot_input(self, raw_value: str) -> tuple[list[int], str]:
+        text = raw_value.strip()
+        if not text:
+            raise ValueError("Пустой ввод")
+
+        parts = text.split()
+        if len(parts) == 1:
+            days_token = "all"
+            time_token = parts[0]
+        elif len(parts) == 2:
+            days_token, time_token = parts
+        else:
+            raise ValueError("Используйте формат '<дни> HH:MM' или просто 'HH:MM'")
+
+        try:
+            datetime.strptime(time_token, "%H:%M")
+        except ValueError as exc:
+            raise ValueError("Время должно быть в формате HH:MM") from exc
+
+        if days_token.lower() in {"all", "*"}:
+            weekdays = [0, 1, 2, 3, 4, 5, 6]
+        else:
+            weekdays = []
+            for item in days_token.split(","):
+                item = item.strip()
+                if not item:
+                    continue
+                weekday = int(item)
+                if weekday < 0 or weekday > 6:
+                    raise ValueError("Дни недели должны быть числами от 0 до 6")
+                weekdays.append(weekday)
+            if not weekdays:
+                raise ValueError("Не удалось распознать дни недели")
+
+        return sorted(set(weekdays)), time_token
+
     async def _show_channels_menu(self, chat_id: int) -> None:
         channels = await self.editorial_actions.list_channels()
         if not channels:
             await self.main_bot.send_message(chat_id, "Каналов в editorial-слое пока нет. Сначала импортируйте legacy данные.")
             return
-        buttons = [(item.id, item.title or item.short_code) for item in channels]
-        lines = [f"{item.id}. {item.title or item.short_code} (tg {item.tg_channel_id})" for item in channels]
+
+        buttons = []
+        lines = ["Каналы:"]
+        for item in channels:
+            label = self._channel_label_from_runtime(item.tg_channel_id) or item.title or item.short_code
+            buttons.append((item.id, label))
+            lines.append(f"{item.id}. {label}")
+
         await self.main_bot.send_message(
             chat_id,
-            "Каналы:\n" + "\n".join(lines),
+            "\n".join(lines),
             reply_markup=build_channels_actions(buttons),
         )
 
-    def _format_submission(self, submission: SubmissionLike) -> str:
+    async def _show_channel_slots_menu(self, chat_id: int, channel_id: int) -> None:
+        channel = await self.editorial_actions.get_channel(channel_id)
+        if channel is None:
+            await self.main_bot.send_message(chat_id, f"Канал {channel_id} не найден.")
+            return
+
+        label = await self._get_channel_label(channel_id)
+        slots = await self.editorial_actions.list_channel_slots(channel_id)
+        slot_lines = [f"Слоты для {label}:"]
+        slot_buttons: list[tuple[int, str]] = []
+        if not slots:
+            slot_lines.append("Слотов пока нет.")
+        else:
+            for slot in slots:
+                slot_label = f"{self._weekday_label(slot.weekday)} {slot.slot_time.strftime('%H:%M')}"
+                slot_lines.append(f"#{slot.id} {slot_label}")
+                slot_buttons.append((slot.id, slot_label))
+
+        await self.main_bot.send_message(
+            chat_id,
+            "\n".join(slot_lines),
+            reply_markup=build_channel_slots_actions(channel_id, slot_buttons),
+        )
+
+    def _submission_moderation_allowed(self, status: str) -> bool:
+        return status in {SubmissionStatus.NEW.value, SubmissionStatus.HOLD.value}
+
+    async def _format_submission(self, submission) -> str:
         body = submission.cleaned_text or submission.raw_text or "<без текста>"
         if len(body) > 3000:
             body = body[:3000] + "..."
         tags = ", ".join(submission.detected_tags) if submission.detected_tags else "нет"
+        channel_label = await self._get_channel_label(submission.channel_id)
+        username = f"@{submission.username}" if submission.username else "-"
+        first_name = submission.first_name or "-"
         return (
             f"Сообщение #{submission.id}\n"
-            f"Канал ID: {submission.channel_id}\n"
-            f"Пользователь: @{submission.username or '-'} / {submission.first_name or '-'}\n"
+            f"Канал: {channel_label}\n"
+            f"Пользователь: {username} / {first_name}\n"
             f"Статус: {submission.status}\n"
             f"Теги: {tags}\n\n"
             f"{body}"
         )
 
-    def _format_content_item(self, item: ContentLike) -> str:
+    async def _format_content_item(self, item) -> str:
         body = item.body_text
         if len(body) > 3000:
             body = body[:3000] + "..."
         tags = ", ".join(item.tags) if item.tags else "нет"
+        channel_label = await self._get_channel_label(item.channel_id)
         return (
             f"Контент #{item.id}\n"
-            f"Канал ID: {item.channel_id}\n"
+            f"Канал: {channel_label}\n"
             f"Источник: {item.source_type}\n"
             f"Статус: {item.status}\n"
             f"Теги: {tags}\n\n"
+            f"{body}"
+        )
+
+    async def _format_paste(self, paste) -> str:
+        body = paste.body_text
+        if len(body) > 3000:
+            body = body[:3000] + "..."
+        tags = ", ".join(paste.tags) if paste.tags else "нет"
+        return (
+            f"Паста #{paste.id}\n"
+            f"Заголовок: {paste.title}\n"
+            f"Статус: {paste.status}\n"
+            f"Теги: {tags}\n"
+            f"Primary tag: {paste.primary_tag or '-'}\n\n"
             f"{body}"
         )
 
@@ -258,8 +387,32 @@ class MasterBot:
         submission = submissions[index]
         await self.main_bot.send_message(
             chat_id,
-            self._format_submission(submission),
-            reply_markup=build_submission_actions(submission.id, len(submissions) > index + 1),
+            await self._format_submission(submission),
+            reply_markup=build_submission_actions(submission.id, len(submissions) > index + 1, allow_moderation=True),
+        )
+
+    async def _show_submission_history(self, chat_id: int, current_id: int | None = None) -> None:
+        submissions = await self.editorial_actions.list_recent_submissions(limit=None)
+        if not submissions:
+            await self.main_bot.send_message(chat_id, "История сообщений пока пуста.")
+            return
+
+        index = 0
+        if current_id is not None:
+            for idx, item in enumerate(submissions):
+                if item.id == current_id:
+                    index = min(idx + 1, len(submissions) - 1)
+                    break
+
+        submission = submissions[index]
+        await self.main_bot.send_message(
+            chat_id,
+            await self._format_submission(submission),
+            reply_markup=build_submission_history_actions(
+                submission.id,
+                len(submissions) > index + 1,
+                allow_moderation=self._submission_moderation_allowed(str(submission.status)),
+            ),
         )
 
     async def _show_first_pending_content(self, chat_id: int, current_id: int | None = None) -> None:
@@ -278,8 +431,32 @@ class MasterBot:
         item = items[index]
         await self.main_bot.send_message(
             chat_id,
-            self._format_content_item(item),
+            await self._format_content_item(item),
             reply_markup=build_content_actions(item.id, len(items) > index + 1),
+        )
+
+    async def _show_first_paste(self, chat_id: int, current_id: int | None = None) -> None:
+        pastes = await self.editorial_actions.list_pastes(limit=None)
+        if not pastes:
+            await self.main_bot.send_message(
+                chat_id,
+                "В библиотеке паст пока ничего нет.",
+                reply_markup=build_empty_paste_actions(),
+            )
+            return
+
+        index = 0
+        if current_id is not None:
+            for idx, item in enumerate(pastes):
+                if item.id == current_id:
+                    index = min(idx + 1, len(pastes) - 1)
+                    break
+
+        paste = pastes[index]
+        await self.main_bot.send_message(
+            chat_id,
+            await self._format_paste(paste),
+            reply_markup=build_paste_actions(paste.id, len(pastes) > index + 1),
         )
 
     async def _handle_stateful_admin_text(self, message: Message) -> bool:
@@ -289,10 +466,11 @@ class MasterBot:
 
         action = state["action"]
         self._clear_user_state(message.chat.id)
+        text_value = (message.text or message.caption or "").strip()
 
         if action == "await_add_moderator":
             try:
-                user_id = int(message.text.strip())
+                user_id = int(text_value)
             except ValueError:
                 await self.main_bot.send_message(message.chat.id, "Нужен числовой Telegram user id.")
                 return True
@@ -303,13 +481,52 @@ class MasterBot:
             return True
 
         if action == "await_add_subbot":
-            parts = message.text.strip().split(maxsplit=1)
+            parts = text_value.split(maxsplit=1)
             if len(parts) != 2:
                 await self.main_bot.send_message(message.chat.id, "Отправьте строку в формате: <api_token> @channel_username")
                 return True
             api_token, channel_username = parts
-            result_text = await self._add_subbot_from_values(api_token, channel_username, message.chat.id)
+            result_text = await self._add_subbot_from_values(api_token, channel_username)
             await self.main_bot.send_message(message.chat.id, result_text)
+            return True
+
+        if action == "await_add_slot":
+            channel_id = state["channel_id"]
+            try:
+                weekdays, slot_time = self._parse_slot_input(text_value)
+            except ValueError as exc:
+                await self.main_bot.send_message(
+                    message.chat.id,
+                    f"{exc}\n\nПримеры:\n10:00\nall 10:00\n0 09:30\n0,2,4 18:00",
+                )
+                return True
+            created_count = await self.editorial_actions.add_slots(channel_id, slot_time, weekdays)
+            label = await self._get_channel_label(channel_id)
+            await self.main_bot.send_message(
+                message.chat.id,
+                f"Для {label} добавлено слотов: {created_count}.",
+            )
+            await self._show_channel_slots_menu(message.chat.id, channel_id)
+            return True
+
+        if action == "await_add_paste":
+            body_text = text_value
+            if not body_text:
+                await self.main_bot.send_message(message.chat.id, "Нужен текст пасты.")
+                return True
+            title = None
+            if "::" in body_text:
+                raw_title, raw_body = body_text.split("::", maxsplit=1)
+                if raw_title.strip() and raw_body.strip():
+                    title = raw_title.strip()
+                    body_text = raw_body.strip()
+            paste = await self.editorial_actions.create_manual_paste(
+                body_text=body_text,
+                reviewer_id=message.from_user.id if message.from_user else message.chat.id,
+                title=title,
+            )
+            await self.main_bot.send_message(message.chat.id, f"Паста #{paste.id} добавлена: {paste.title}")
+            await self._show_first_paste(message.chat.id, current_id=paste.id)
             return True
 
         return False
@@ -348,7 +565,7 @@ class MasterBot:
             await asyncio.sleep(settings.const_time_sleep)
 
     @logger.catch
-    async def callback_adv_send_message(self, call: CallbackQuery, channel_username: str, info_sender) -> None:
+    async def callback_adv_send_message(self, call: CallbackQuery, channel_username: str, info_sender: User) -> None:
         text_adv = call.message.text if call.message.text is not None else call.message.caption
         message = (
             f"<b>реклама:</b> {channel_username}\n"
@@ -396,7 +613,7 @@ class MasterBot:
                 await self.main_bot.send_message(message.chat.id, "Формат команды: /add <token> @channel")
                 return
             _command, api_token, channel_username = parts
-            result_text = await self._add_subbot_from_values(api_token, channel_username, message.chat.id)
+            result_text = await self._add_subbot_from_values(api_token, channel_username)
             await self.main_bot.send_message(message.chat.id, result_text)
 
         @self.main_bot.message_handler(commands=["delete"])
@@ -440,7 +657,7 @@ class MasterBot:
         @logger.catch
         @self.main_bot.callback_query_handler(func=lambda call: True)
         async def callback(call: CallbackQuery) -> None:
-            if not self._is_admin(call.message.chat.id):
+            if not self._is_admin(call.from_user.id):
                 await self.main_bot.answer_callback_query(call.id, "Доступно только администраторам.", show_alert=True)
                 return
 
@@ -460,8 +677,12 @@ class MasterBot:
                     case "submissions":
                         await self.editorial_actions.import_new()
                         await self._show_first_pending_submission(call.message.chat.id)
+                    case "all_submissions":
+                        await self._show_submission_history(call.message.chat.id)
                     case "content":
                         await self._show_first_pending_content(call.message.chat.id)
+                    case "pastes":
+                        await self._show_first_paste(call.message.chat.id)
                     case "channels":
                         await self._show_channels_menu(call.message.chat.id)
                     case "scheduler":
@@ -479,12 +700,12 @@ class MasterBot:
                             f"Успешно: {result.sent}\nОшибок: {result.failed}",
                         )
                     case "admins":
-                        if not self._is_general_admin(call.message.chat.id):
+                        if not self._is_general_admin(call.from_user.id):
                             await self.main_bot.answer_callback_query(call.id, "Только для генерального админа.", show_alert=True)
                             return
                         await self._show_admins_menu(call.message.chat.id)
                     case "subbots":
-                        if not self._is_general_admin(call.message.chat.id):
+                        if not self._is_general_admin(call.from_user.id):
                             await self.main_bot.answer_callback_query(call.id, "Только для генерального админа.", show_alert=True)
                             return
                         await self._show_subbots_menu(call.message.chat.id)
@@ -499,20 +720,31 @@ class MasterBot:
                     case "approve":
                         item = await self.editorial_actions.approve_submission(submission_id, reviewer_id)
                         await self.main_bot.send_message(call.message.chat.id, f"Сообщение {submission_id} одобрено. Content item #{item.id}.")
+                        await self._show_first_pending_submission(call.message.chat.id, current_id=submission_id)
                     case "publish":
                         log_item = await self.editorial_actions.publish_submission_now(submission_id, reviewer_id)
                         await self.main_bot.send_message(call.message.chat.id, f"Сообщение {submission_id} отправлено в publish pipeline. Log #{log_item.id}.")
+                        await self._show_first_pending_submission(call.message.chat.id, current_id=submission_id)
                     case "paste":
                         paste = await self.editorial_actions.paste_submission(submission_id, reviewer_id)
                         await self.main_bot.send_message(call.message.chat.id, f"Создана паста #{paste.id}: {paste.title}")
+                        await self._show_first_pending_submission(call.message.chat.id, current_id=submission_id)
                     case "hold":
                         await self.editorial_actions.hold_submission(submission_id)
                         await self.main_bot.send_message(call.message.chat.id, f"Сообщение {submission_id} отправлено в hold.")
+                        await self._show_first_pending_submission(call.message.chat.id, current_id=submission_id)
                     case "reject":
                         await self.editorial_actions.reject_submission(submission_id)
                         await self.main_bot.send_message(call.message.chat.id, f"Сообщение {submission_id} отклонено.")
+                        await self._show_first_pending_submission(call.message.chat.id, current_id=submission_id)
                     case "next":
                         await self._show_first_pending_submission(call.message.chat.id, current_id=submission_id)
+                await self.main_bot.answer_callback_query(call.id)
+                return
+
+            if data.startswith("submission_all:next:"):
+                submission_id = int(data.split(":")[-1])
+                await self._show_submission_history(call.message.chat.id, current_id=submission_id)
                 await self.main_bot.answer_callback_query(call.id)
                 return
 
@@ -524,27 +756,91 @@ class MasterBot:
                     case "approve":
                         await self.editorial_actions.approve_content_item(content_item_id, reviewer_id)
                         await self.main_bot.send_message(call.message.chat.id, f"Контент {content_item_id} одобрен.")
+                        await self._show_first_pending_content(call.message.chat.id, current_id=content_item_id)
                     case "publish":
                         log_item = await self.editorial_actions.publish_content_item_now(content_item_id, reviewer_id)
                         await self.main_bot.send_message(call.message.chat.id, f"Контент {content_item_id} поставлен в публикацию. Log #{log_item.id}.")
+                        await self._show_first_pending_content(call.message.chat.id, current_id=content_item_id)
                     case "hold":
                         await self.editorial_actions.hold_content_item(content_item_id, reviewer_id)
                         await self.main_bot.send_message(call.message.chat.id, f"Контент {content_item_id} отправлен в hold.")
+                        await self._show_first_pending_content(call.message.chat.id, current_id=content_item_id)
                     case "reject":
                         await self.editorial_actions.reject_content_item(content_item_id, reviewer_id)
                         await self.main_bot.send_message(call.message.chat.id, f"Контент {content_item_id} отклонен.")
+                        await self._show_first_pending_content(call.message.chat.id, current_id=content_item_id)
                     case "next":
                         await self._show_first_pending_content(call.message.chat.id, current_id=content_item_id)
+                await self.main_bot.answer_callback_query(call.id)
+                return
+
+            if data.startswith("channel:view:"):
+                channel_id = int(data.split(":")[-1])
+                await self._show_channel_slots_menu(call.message.chat.id, channel_id)
                 await self.main_bot.answer_callback_query(call.id)
                 return
 
             if data.startswith("channel:seed:"):
                 channel_id = int(data.split(":")[-1])
                 created_count = await self.editorial_actions.seed_default_slots(channel_id)
+                label = await self._get_channel_label(channel_id)
                 await self.main_bot.send_message(
                     call.message.chat.id,
-                    f"Для канала {channel_id} создано {created_count} стандартных слотов.",
+                    f"Для {label} создано стандартных слотов: {created_count}.",
                 )
+                await self._show_channel_slots_menu(call.message.chat.id, channel_id)
+                await self.main_bot.answer_callback_query(call.id)
+                return
+
+            if data.startswith("channel:add_slot:"):
+                channel_id = int(data.split(":")[-1])
+                self._set_user_state(call.message.chat.id, "await_add_slot", channel_id=channel_id)
+                await self.main_bot.send_message(
+                    call.message.chat.id,
+                    "Отправьте слот в формате 'HH:MM' для всех дней или '<дни> HH:MM'.\n"
+                    "Примеры:\n10:00\nall 10:00\n0 09:30\n0,2,4 18:00\n"
+                    "Где 0 = понедельник, 6 = воскресенье.",
+                )
+                await self.main_bot.answer_callback_query(call.id)
+                return
+
+            if data.startswith("slot:delete:"):
+                slot_id = int(data.split(":")[-1])
+                slot = await self.editorial_actions.remove_slot(slot_id)
+                if slot is None:
+                    await self.main_bot.send_message(call.message.chat.id, f"Слот {slot_id} не найден.")
+                else:
+                    label = await self._get_channel_label(slot.channel_id)
+                    await self.main_bot.send_message(
+                        call.message.chat.id,
+                        f"Слот {self._weekday_label(slot.weekday)} {slot.slot_time.strftime('%H:%M')} удален из {label}.",
+                    )
+                    await self._show_channel_slots_menu(call.message.chat.id, slot.channel_id)
+                await self.main_bot.answer_callback_query(call.id)
+                return
+
+            if data == "paste:add":
+                self._set_user_state(call.message.chat.id, "await_add_paste")
+                await self.main_bot.send_message(
+                    call.message.chat.id,
+                    "Отправьте текст пасты одним сообщением.\n"
+                    "Если хотите задать заголовок вручную, используйте формат:\n"
+                    "Заголовок :: Текст пасты",
+                )
+                await self.main_bot.answer_callback_query(call.id)
+                return
+
+            if data.startswith("paste:delete:"):
+                paste_id = int(data.split(":")[-1])
+                paste = await self.editorial_actions.archive_paste(paste_id)
+                await self.main_bot.send_message(call.message.chat.id, f"Паста #{paste.id} переведена в archived.")
+                await self._show_first_paste(call.message.chat.id, current_id=paste_id)
+                await self.main_bot.answer_callback_query(call.id)
+                return
+
+            if data.startswith("paste:next:"):
+                paste_id = int(data.split(":")[-1])
+                await self._show_first_paste(call.message.chat.id, current_id=paste_id)
                 await self.main_bot.answer_callback_query(call.id)
                 return
 
@@ -625,23 +921,3 @@ class MasterBot:
             await self.main_bot.polling(none_stop=True)
         except Exception as ex:
             logger.error("bot: @{}, mistake: {}", self.bot_info.username if self.bot_info else "unknown", ex)
-
-
-class SubmissionLike:
-    id: int
-    channel_id: int
-    username: str | None
-    first_name: str | None
-    cleaned_text: str | None
-    raw_text: str | None
-    detected_tags: list[str]
-    status: str
-
-
-class ContentLike:
-    id: int
-    channel_id: int
-    source_type: str
-    status: str
-    body_text: str
-    tags: list[str]
