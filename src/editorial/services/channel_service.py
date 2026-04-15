@@ -67,3 +67,37 @@ class ChannelService:
         await session.delete(slot)
         await session.commit()
         return slot
+
+    async def delete_slots(
+        self,
+        session: AsyncSession,
+        channel_id: int,
+        slot_times: list[str],
+        weekdays: list[int] | None = None,
+    ) -> list[ChannelSlot]:
+        channel = await session.get(Channel, channel_id)
+        if channel is None:
+            raise ValueError(f"Channel {channel_id} not found")
+
+        weekdays = weekdays or [0, 1, 2, 3, 4, 5, 6]
+        target_times = []
+        for slot_value in slot_times:
+            hour, minute = map(int, slot_value.split(":"))
+            target_times.append(time(hour=hour, minute=minute))
+
+        slots = list(
+            (
+                await session.execute(
+                    select(ChannelSlot).where(
+                        ChannelSlot.channel_id == channel_id,
+                        ChannelSlot.weekday.in_(weekdays),
+                        ChannelSlot.slot_time.in_(target_times),
+                    )
+                )
+            ).scalars().all()
+        )
+
+        for slot in slots:
+            await session.delete(slot)
+        await session.commit()
+        return slots

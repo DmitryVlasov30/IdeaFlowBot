@@ -147,6 +147,9 @@ class PublisherService:
                     )
                     .order_by(PublicationLog.scheduled_for.asc())
                     .limit(limit or settings.publisher_batch_size)
+                    # Protect against concurrent manual/background publisher runs.
+                    # Once one session claims these rows, others skip them until commit.
+                    .with_for_update(skip_locked=True)
                 )
             ).scalars().all()
         )

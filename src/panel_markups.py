@@ -121,10 +121,9 @@ def build_channel_slots_actions(channel_id: int, slot_buttons: list[tuple[int, s
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(
         InlineKeyboardButton("Добавить слот", callback_data=f"channel:add_slot:{channel_id}"),
+        InlineKeyboardButton("Удалить слоты", callback_data=f"channel:delete_slots:{channel_id}"),
         InlineKeyboardButton("Создать стандартные слоты", callback_data=f"channel:seed:{channel_id}"),
     )
-    for slot_id, title in slot_buttons:
-        markup.add(InlineKeyboardButton(f"Удалить {title}", callback_data=f"slot:delete:{slot_id}"))
     markup.add(InlineKeyboardButton("Назад к каналам", callback_data="panel:channels"))
     markup.add(InlineKeyboardButton("Назад в панель", callback_data="panel:main"))
     return markup

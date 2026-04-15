@@ -252,24 +252,37 @@ class MasterBot:
     def _weekday_label(self, weekday: int) -> str:
         return WEEKDAY_LABELS.get(weekday, str(weekday))
 
-    def _parse_slot_input(self, raw_value: str) -> tuple[list[int], str]:
+    @staticmethod
+    def _is_time_token(value: str) -> bool:
+        try:
+            datetime.strptime(value, "%H:%M")
+        except ValueError:
+            return False
+        return True
+
+    def _parse_slot_input(self, raw_value: str) -> tuple[list[int], list[str]]:
         text = raw_value.strip()
         if not text:
             raise ValueError("Пустой ввод")
 
         parts = text.split()
-        if len(parts) == 1:
+        if self._is_time_token(parts[0]):
             days_token = "all"
-            time_token = parts[0]
-        elif len(parts) == 2:
-            days_token, time_token = parts
+            time_tokens = parts
         else:
-            raise ValueError("Используйте формат '<дни> HH:MM' или просто 'HH:MM'")
+            days_token = parts[0]
+            time_tokens = parts[1:]
 
-        try:
-            datetime.strptime(time_token, "%H:%M")
-        except ValueError as exc:
-            raise ValueError("Время должно быть в формате HH:MM") from exc
+        if not time_tokens:
+            raise ValueError("После дней недели укажите хотя бы одно время в формате HH:MM")
+
+        slot_times: list[str] = []
+        for time_token in time_tokens:
+            try:
+                datetime.strptime(time_token, "%H:%M")
+            except ValueError as exc:
+                raise ValueError(f"Время '{time_token}' должно быть в формате HH:MM") from exc
+            slot_times.append(time_token)
 
         if days_token.lower() in {"all", "*"}:
             weekdays = [0, 1, 2, 3, 4, 5, 6]
@@ -286,7 +299,7 @@ class MasterBot:
             if not weekdays:
                 raise ValueError("Не удалось распознать дни недели")
 
-        return sorted(set(weekdays)), time_token
+        return sorted(set(weekdays)), slot_times
 
     async def _show_channels_menu(self, chat_id: int) -> None:
         channels = await self.editorial_actions.list_channels()
@@ -691,18 +704,37 @@ class MasterBot:
         if action == "await_add_slot":
             channel_id = state["channel_id"]
             try:
-                weekdays, slot_time = self._parse_slot_input(text_value)
+                weekdays, slot_times = self._parse_slot_input(text_value)
             except ValueError as exc:
                 await self.main_bot.send_message(
                     message.chat.id,
-                    f"{exc}\n\nПримеры:\n10:00\nall 10:00\n0 09:30\n0,2,4 18:00",
+                    f"{exc}\n\nПримеры:\n10:00 15:00 16:00\nall 10:00 15:00\n0 09:30 18:00\n0,2,4 18:00 21:00",
                 )
                 return True
-            created_count = await self.editorial_actions.add_slots(channel_id, slot_time, weekdays)
+            created_count = await self.editorial_actions.add_slots(channel_id, slot_times, weekdays)
             label = await self._get_channel_label(channel_id)
             await self.main_bot.send_message(
                 message.chat.id,
                 f"Для {label} добавлено слотов: {created_count}.",
+            )
+            await self._show_channel_slots_menu(message.chat.id, channel_id)
+            return True
+
+        if action == "await_delete_slots":
+            channel_id = state["channel_id"]
+            try:
+                weekdays, slot_times = self._parse_slot_input(text_value)
+            except ValueError as exc:
+                await self.main_bot.send_message(
+                    message.chat.id,
+                    f"{exc}\n\nПримеры:\n10:00 15:00 16:00\nall 10:00 15:00\n0 09:30 18:00\n0,2,4 18:00 21:00",
+                )
+                return True
+            removed_count = await self.editorial_actions.remove_slots(channel_id, slot_times, weekdays)
+            label = await self._get_channel_label(channel_id)
+            await self.main_bot.send_message(
+                message.chat.id,
+                f"Для {label} удалено слотов: {removed_count}.",
             )
             await self._show_channel_slots_menu(message.chat.id, channel_id)
             return True
@@ -1050,25 +1082,24 @@ class MasterBot:
                 self._set_user_state(call.message.chat.id, "await_add_slot", channel_id=channel_id)
                 await self.main_bot.send_message(
                     call.message.chat.id,
-                    "Отправьте слот в формате 'HH:MM' для всех дней или '<дни> HH:MM'.\n"
-                    "Примеры:\n10:00\nall 10:00\n0 09:30\n0,2,4 18:00\n"
+                    "Отправьте одно или несколько времен через пробел.\n"
+                    "Можно указать только время для всех дней или '<дни> <времена...>'.\n"
+                    "Примеры:\n12:00 15:00 16:00\nall 10:00 15:00\n0 09:30 18:00\n0,2,4 18:00 21:00\n"
                     "Где 0 = понедельник, 6 = воскресенье.",
                 )
                 await self.main_bot.answer_callback_query(call.id)
                 return
 
-            if data.startswith("slot:delete:"):
-                slot_id = int(data.split(":")[-1])
-                slot = await self.editorial_actions.remove_slot(slot_id)
-                if slot is None:
-                    await self.main_bot.send_message(call.message.chat.id, f"Слот {slot_id} не найден.")
-                else:
-                    label = await self._get_channel_label(slot.channel_id)
-                    await self.main_bot.send_message(
-                        call.message.chat.id,
-                        f"Слот {self._weekday_label(slot.weekday)} {slot.slot_time.strftime('%H:%M')} удален из {label}.",
-                    )
-                    await self._show_channel_slots_menu(call.message.chat.id, slot.channel_id)
+            if data.startswith("channel:delete_slots:"):
+                channel_id = int(data.split(":")[-1])
+                self._set_user_state(call.message.chat.id, "await_delete_slots", channel_id=channel_id)
+                await self.main_bot.send_message(
+                    call.message.chat.id,
+                    "Отправьте времена слотов, которые нужно удалить.\n"
+                    "Можно указать только время для всех дней или '<дни> <времена...>'.\n"
+                    "Примеры:\n12:00 15:00 16:00\nall 10:00 15:00\n0 09:30 18:00\n0,2,4 18:00 21:00\n"
+                    "Где 0 = понедельник, 6 = воскресенье.",
+                )
                 await self.main_bot.answer_callback_query(call.id)
                 return
 

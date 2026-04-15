@@ -71,12 +71,12 @@ class TelegramEditorialActions:
             )
             return len(created)
 
-    async def add_slots(self, channel_id: int, slot_time: str, weekdays: Iterable[int]) -> int:
+    async def add_slots(self, channel_id: int, slot_times: Iterable[str], weekdays: Iterable[int]) -> int:
         async with session_factory() as session:
             created = await self.channel_service.seed_daily_slots(
                 session=session,
                 channel_id=channel_id,
-                slot_times=[slot_time],
+                slot_times=list(slot_times),
                 weekdays=list(weekdays),
             )
             return len(created)
@@ -84,6 +84,16 @@ class TelegramEditorialActions:
     async def remove_slot(self, slot_id: int):
         async with session_factory() as session:
             return await self.channel_service.delete_slot(session, slot_id)
+
+    async def remove_slots(self, channel_id: int, slot_times: Iterable[str], weekdays: Iterable[int]) -> int:
+        async with session_factory() as session:
+            removed = await self.channel_service.delete_slots(
+                session=session,
+                channel_id=channel_id,
+                slot_times=list(slot_times),
+                weekdays=list(weekdays),
+            )
+            return len(removed)
 
     async def list_pending_submissions(self) -> list[Submission]:
         async with session_factory() as session:
