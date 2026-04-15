@@ -34,6 +34,7 @@ class Settings:
     proxy_host_port: str = os.getenv("PROXY_HOST_PORT", "")
     shift_time_seconds: int = int(os.getenv("SHIFT_TIME_SECONDS", "3600"))
     sup_bot_limit: int = int(os.getenv("SUP_BOT_LIMIT", "20"))
+    media_preview_max_mb: int = int(os.getenv("MEDIA_PREVIEW_MAX_MB", "20"))
     advertiser: list[int] = field(default_factory=lambda: _split_int_collection(os.getenv("ADVERTISER_IDS", "")))
     advertising_text: str = os.getenv(
         "ADVERTISING_TEXT",

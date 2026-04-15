@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.editorial.config import settings
 from src.editorial.models.channel import Channel
 from src.editorial.models.submission import Submission
-from src.editorial.services.legacy_source import LegacyCollectorReader
+from src.editorial.services.legacy_source import LegacyCollectorReader, LegacySenderRow
 from src.editorial.utils.text import (
     clean_text,
     compute_text_hash,
@@ -36,6 +36,11 @@ class ImportLegacyResult:
 class LegacyImporter:
     def __init__(self, legacy_reader: LegacyCollectorReader | None = None):
         self.legacy_reader = legacy_reader or LegacyCollectorReader()
+
+    @staticmethod
+    def _build_media_fingerprint(row: LegacySenderRow) -> str:
+        message_ref = row.media_group_id or str(row.message_id or row.id)
+        return f"telegram media {row.content_type or 'unknown'} {row.channel_id} {row.chat_id or 0} {message_ref}"
 
     async def sync_channels(self, session: AsyncSession) -> int:
         created = 0
@@ -122,6 +127,11 @@ class LegacyImporter:
             raw_text = row.text_post or ""
             cleaned_text = clean_text(raw_text)
             normalized_text = normalize_text(cleaned_text)
+            text_hash = compute_text_hash(cleaned_text)
+            if not normalized_text:
+                normalized_text = self._build_media_fingerprint(row)
+            if text_hash is None:
+                text_hash = compute_text_hash(normalized_text) or ""
             created_at = datetime.fromtimestamp(row.timestamp, tz=timezone.utc)
 
             submission = Submission(
@@ -131,13 +141,15 @@ class LegacyImporter:
                 source_user_id=row.user_id,
                 source_message_id=row.message_id,
                 source_chat_id=row.chat_id,
+                content_type=(row.content_type or "text"),
+                media_group_id=row.media_group_id or None,
                 bot_username=row.bot_username,
                 username=row.username or None,
                 first_name=row.first_name or None,
                 raw_text=raw_text or None,
                 cleaned_text=cleaned_text or None,
                 normalized_text=normalized_text or None,
-                text_hash=compute_text_hash(cleaned_text),
+                text_hash=text_hash,
                 detected_tags=detect_tags(cleaned_text),
                 language_code=detect_language_code(cleaned_text),
                 is_candidate_for_generation=len(cleaned_text) >= settings.minimum_submission_length,
@@ -149,4 +161,3 @@ class LegacyImporter:
 
         await session.commit()
         return result
-

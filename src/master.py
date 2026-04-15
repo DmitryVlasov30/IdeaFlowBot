@@ -8,11 +8,19 @@ import aiohttp
 from loguru import logger
 from requests import HTTPError
 from telebot.async_telebot import AsyncTeleBot, asyncio_helper
-from telebot.types import BotCommand, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, User
+from telebot.types import (
+    BotCommand,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    User,
+)
 
 from config import settings
 from src.core_database.database import CrudBotAdmins, CrudBotsData, CrudDelayedPosts
 from src.editorial.models.enums import SubmissionStatus
+from src.editorial.services.legacy_source import LegacyCollectorReader
 from src.editorial.services.telegram_actions import TelegramEditorialActions
 from src.panel_markups import (
     build_admin_menu,
@@ -52,6 +60,7 @@ class MasterBot:
         self.delayed_database = CrudDelayedPosts()
         self.bot_admins_database = CrudBotAdmins()
         self.editorial_actions = TelegramEditorialActions()
+        self.legacy_reader = LegacyCollectorReader()
 
         self.commands = [
             BotCommand("panel", "открыть панель управления"),
@@ -325,19 +334,76 @@ class MasterBot:
     def _submission_moderation_allowed(self, status: str) -> bool:
         return status in {SubmissionStatus.NEW.value, SubmissionStatus.HOLD.value}
 
+    def _submission_status_label(self, status: str) -> str:
+        labels = {
+            SubmissionStatus.NEW.value: "новое",
+            SubmissionStatus.APPROVED_AS_SOURCE.value: "одобрено как источник",
+            SubmissionStatus.PASTE_CANDIDATE.value: "сохранено как паста",
+            SubmissionStatus.CONTENT_CREATED.value: "черновик создан",
+            SubmissionStatus.REJECTED.value: "отклонено",
+            SubmissionStatus.HOLD.value: "hold",
+        }
+        return labels.get(status, status)
+
+    def _content_status_label(self, status: str) -> str:
+        labels = {
+            "draft": "черновик",
+            "pending_review": "на review",
+            "approved": "одобрено",
+            "scheduled": "запланировано",
+            "published": "опубликовано",
+            "rejected": "отклонено",
+            "hold": "hold",
+        }
+        return labels.get(status, status)
+
+    def _submission_type_label(self, submission) -> str:
+        if getattr(submission, "media_group_id", None):
+            return "медиа-группа"
+        labels = {
+            "text": "текст",
+            "photo": "фото",
+            "video": "видео",
+            "animation": "gif",
+        }
+        return labels.get(getattr(submission, "content_type", "text"), getattr(submission, "content_type", "text"))
+
+    def _submission_author_tag(self, submission) -> str:
+        return f"@{submission.username}" if submission.username else "@None"
+
     async def _format_submission(self, submission) -> str:
-        body = submission.cleaned_text or submission.raw_text or "<без текста>"
+        body = submission.cleaned_text or submission.raw_text
+        if not body:
+            if getattr(submission, "media_group_id", None):
+                body = "<медиа-группа без подписи>"
+            elif getattr(submission, "content_type", "text") != "text":
+                body = f"<{self._submission_type_label(submission)} без подписи>"
+            else:
+                body = "<без текста>"
         if len(body) > 3000:
             body = body[:3000] + "..."
         tags = ", ".join(submission.detected_tags) if submission.detected_tags else "нет"
         channel_label = await self._get_channel_label(submission.channel_id)
         username = f"@{submission.username}" if submission.username else "-"
         first_name = submission.first_name or "-"
+        primary_item = await self.editorial_actions.get_submission_primary_content_item(submission.id)
+        if primary_item is None:
+            status_label = self._submission_status_label(str(submission.status))
+            pipeline_line = "Публикация: еще не создан content item"
+        else:
+            status_label = self._content_status_label(str(primary_item.status))
+            pipeline_line = (
+                f"Пайплайн: content #{primary_item.id}, "
+                f"статус submission = {self._submission_status_label(str(submission.status))}"
+            )
         return (
             f"Сообщение #{submission.id}\n"
             f"Канал: {channel_label}\n"
+            f"Тип: {self._submission_type_label(submission)}\n"
             f"Пользователь: {username} / {first_name}\n"
-            f"Статус: {submission.status}\n"
+            f"Режим автора: {'анон' if submission.is_anonymous else f'не анон ({self._submission_author_tag(submission)})'}\n"
+            f"Статус: {status_label}\n"
+            f"{pipeline_line}\n"
             f"Теги: {tags}\n\n"
             f"{body}"
         )
@@ -371,6 +437,130 @@ class MasterBot:
             f"{body}"
         )
 
+    async def _send_submission_preview(self, chat_id: int, submission_id: int) -> None:
+        preview = await self.editorial_actions.get_submission_preview(submission_id)
+        if preview is None or not preview.review_message_ids:
+            return
+
+        try:
+            if len(preview.review_message_ids) == 1:
+                await self.main_bot.copy_message(
+                    chat_id=chat_id,
+                    from_chat_id=preview.review_chat_id,
+                    message_id=preview.review_message_ids[0],
+                )
+                return
+
+            url = f"https://api.telegram.org/bot{self.api_token_bot}/copyMessages"
+            payload = {
+                "chat_id": chat_id,
+                "from_chat_id": preview.review_chat_id,
+                "message_ids": preview.review_message_ids,
+            }
+            request_kwargs = {}
+            if settings.proxies["http"]:
+                request_kwargs["proxy"] = settings.proxies["http"]
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload, **request_kwargs) as response:
+                    result = await response.json()
+            if not result.get("ok"):
+                raise RuntimeError(result.get("description", str(result)))
+        except Exception as ex:
+            logger.error("Failed to send submission preview for {}: {}", submission_id, ex)
+            await self._send_submission_preview_fallback(chat_id, preview)
+
+    async def _send_submission_preview_fallback(self, chat_id: int, preview) -> None:
+        if not preview.preview_file_ids:
+            return
+
+        max_preview_bytes = settings.media_preview_max_mb * 1024 * 1024
+        if any(size and size > max_preview_bytes for size in preview.preview_file_sizes):
+            await self.main_bot.send_message(
+                chat_id,
+                (
+                    "Медиа слишком большое для быстрого предпросмотра в главном боте. "
+                    "Его всё ещё можно approve и публиковать, но превью здесь пропущено."
+                ),
+            )
+            return
+
+        binding = await self.legacy_reader.get_bot_binding(preview.channel_tg_id)
+        if binding is None:
+            logger.error("Failed to build preview fallback: no bot binding for channel {}", preview.channel_tg_id)
+            return
+
+        try:
+            if preview.media_group_id and len(preview.preview_file_ids) > 1:
+                for index, file_id in enumerate(preview.preview_file_ids):
+                    item_type = preview.preview_content_types[index] if index < len(preview.preview_content_types) else preview.content_type
+                    await self._send_binary_preview_item(
+                        chat_id=chat_id,
+                        bot_token=binding.bot_api_token,
+                        file_id=file_id,
+                        content_type=item_type,
+                    )
+                return
+
+            first_type = preview.preview_content_types[0] if preview.preview_content_types else preview.content_type
+            await self._send_binary_preview_item(
+                chat_id=chat_id,
+                bot_token=binding.bot_api_token,
+                file_id=preview.preview_file_ids[0],
+                content_type=first_type,
+            )
+        except Exception as ex:
+            logger.error("Failed to send preview fallback for submission: {}", ex)
+
+    async def _send_binary_preview_item(
+        self,
+        chat_id: int,
+        bot_token: str,
+        file_id: str,
+        content_type: str,
+    ) -> None:
+        subbot = AsyncTeleBot(bot_token)
+        file_info = await subbot.get_file(file_id)
+        file_url = f"https://api.telegram.org/file/bot{bot_token}/{file_info.file_path}"
+
+        request_kwargs = {}
+        if settings.proxies["http"]:
+            request_kwargs["proxy"] = settings.proxies["http"]
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(file_url, **request_kwargs) as response:
+                response.raise_for_status()
+                payload = await response.read()
+
+        filename = file_info.file_path.split("/")[-1] or "preview.bin"
+        form = aiohttp.FormData()
+        form.add_field("chat_id", str(chat_id))
+
+        send_method = "sendPhoto"
+        field_name = "photo"
+        mime_type = "image/jpeg"
+        if content_type == "video":
+            send_method = "sendVideo"
+            field_name = "video"
+            mime_type = "video/mp4"
+        elif content_type == "animation":
+            send_method = "sendAnimation"
+            field_name = "animation"
+            mime_type = "image/gif"
+
+        form.add_field(
+            field_name,
+            payload,
+            filename=filename,
+            content_type=mime_type,
+        )
+
+        api_url = f"https://api.telegram.org/bot{self.api_token_bot}/{send_method}"
+        async with aiohttp.ClientSession() as session:
+            async with session.post(api_url, data=form, **request_kwargs) as response:
+                result = await response.json()
+        if not result.get("ok"):
+            raise RuntimeError(result.get("description", str(result)))
+
     async def _show_first_pending_submission(self, chat_id: int, current_id: int | None = None) -> None:
         submissions = await self.editorial_actions.list_pending_submissions()
         if not submissions:
@@ -385,10 +575,16 @@ class MasterBot:
                     break
 
         submission = submissions[index]
+        await self._send_submission_preview(chat_id, submission.id)
         await self.main_bot.send_message(
             chat_id,
             await self._format_submission(submission),
-            reply_markup=build_submission_actions(submission.id, len(submissions) > index + 1, allow_moderation=True),
+            reply_markup=build_submission_actions(
+                submission.id,
+                len(submissions) > index + 1,
+                submission.is_anonymous,
+                allow_moderation=True,
+            ),
         )
 
     async def _show_submission_history(self, chat_id: int, current_id: int | None = None) -> None:
@@ -405,12 +601,14 @@ class MasterBot:
                     break
 
         submission = submissions[index]
+        await self._send_submission_preview(chat_id, submission.id)
         await self.main_bot.send_message(
             chat_id,
             await self._format_submission(submission),
             reply_markup=build_submission_history_actions(
                 submission.id,
                 len(submissions) > index + 1,
+                submission.is_anonymous,
                 allow_moderation=self._submission_moderation_allowed(str(submission.status)),
             ),
         )
@@ -527,6 +725,19 @@ class MasterBot:
             )
             await self.main_bot.send_message(message.chat.id, f"Паста #{paste.id} добавлена: {paste.title}")
             await self._show_first_paste(message.chat.id, current_id=paste.id)
+            return True
+
+        if action == "await_reply_submission":
+            submission_id = state["submission_id"]
+            if not text_value:
+                await self.main_bot.send_message(message.chat.id, "Нужен текст сообщения для пользователя.")
+                return True
+            try:
+                await self.editorial_actions.reply_to_submission_author(submission_id, text_value)
+            except Exception as ex:
+                await self.main_bot.send_message(message.chat.id, f"Не удалось отправить сообщение: {ex}")
+                return True
+            await self.main_bot.send_message(message.chat.id, f"Ответ пользователю по сообщению {submission_id} отправлен.")
             return True
 
         return False
@@ -737,6 +948,48 @@ class MasterBot:
                         await self.editorial_actions.reject_submission(submission_id)
                         await self.main_bot.send_message(call.message.chat.id, f"Сообщение {submission_id} отклонено.")
                         await self._show_first_pending_submission(call.message.chat.id, current_id=submission_id)
+                    case "toggle_anon":
+                        submission = await self.editorial_actions.get_submission(submission_id)
+                        if submission is None:
+                            await self.main_bot.send_message(call.message.chat.id, f"Сообщение {submission_id} не найдено.")
+                        else:
+                            updated = await self.editorial_actions.set_submission_anonymous(
+                                submission_id=submission_id,
+                                is_anonymous=not submission.is_anonymous,
+                            )
+                            mode_text = "анон" if updated.is_anonymous else f"не анон ({self._submission_author_tag(updated)})"
+                            await self.main_bot.send_message(
+                                call.message.chat.id,
+                                f"Для сообщения {submission_id} установлен режим: {mode_text}.",
+                            )
+                            await self.main_bot.send_message(
+                                call.message.chat.id,
+                                await self._format_submission(updated),
+                                reply_markup=build_submission_actions(
+                                    updated.id,
+                                    has_next=False,
+                                    is_anonymous=updated.is_anonymous,
+                                    allow_moderation=self._submission_moderation_allowed(str(updated.status)),
+                                ),
+                            )
+                    case "advertise":
+                        try:
+                            await self.editorial_actions.send_submission_advertising_reply(submission_id)
+                            await self.main_bot.send_message(
+                                call.message.chat.id,
+                                f"Пользователю по сообщению {submission_id} отправлена инструкция по рекламе.",
+                            )
+                        except Exception as ex:
+                            await self.main_bot.send_message(
+                                call.message.chat.id,
+                                f"Не удалось отправить рекламный ответ: {ex}",
+                            )
+                    case "reply":
+                        self._set_user_state(call.message.chat.id, "await_reply_submission", submission_id=submission_id)
+                        await self.main_bot.send_message(
+                            call.message.chat.id,
+                            "Отправьте одним сообщением текст, который нужно переслать автору предложки.",
+                        )
                     case "next":
                         await self._show_first_pending_submission(call.message.chat.id, current_id=submission_id)
                 await self.main_bot.answer_callback_query(call.id)

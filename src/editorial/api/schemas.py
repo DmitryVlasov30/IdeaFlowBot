@@ -23,6 +23,8 @@ class SubmissionResponse(BaseModel):
     legacy_row_id: int | None
     username: str | None
     first_name: str | None
+    content_type: str
+    media_group_id: str | None
     cleaned_text: str | None
     detected_tags: list[str]
     status: SubmissionStatus

@@ -154,6 +154,23 @@ class SchedulerService:
         channel: Channel,
         slot_dt: datetime,
     ) -> ContentItem | None:
+        candidate = await self._pick_existing_candidate(session, channel, slot_dt, include_generated=False)
+        if candidate is not None:
+            return candidate
+
+        candidate = await self._pick_library_paste_candidate(session, channel, slot_dt)
+        if candidate is not None:
+            return candidate
+
+        return await self._pick_existing_candidate(session, channel, slot_dt, include_generated=True)
+
+    async def _pick_existing_candidate(
+        self,
+        session: AsyncSession,
+        channel: Channel,
+        slot_dt: datetime,
+        include_generated: bool,
+    ) -> ContentItem | None:
         priority_case = case(
             (ContentItem.source_type == ContentSourceType.SUBMISSION, 0),
             (ContentItem.source_type == ContentSourceType.EDITORIAL, 1),
@@ -161,21 +178,23 @@ class SchedulerService:
             (ContentItem.source_type == ContentSourceType.GENERATED, 3),
             else_=99,
         )
-        candidates = list(
-            (
-                await session.execute(
-                    select(ContentItem)
-                    .where(
-                        ContentItem.channel_id == channel.id,
-                        ContentItem.status == ContentItemStatus.APPROVED,
-                        (ContentItem.publish_after.is_(None) | (ContentItem.publish_after <= slot_dt)),
-                        (ContentItem.expires_at.is_(None) | (ContentItem.expires_at > slot_dt)),
-                    )
-                    .order_by(priority_case.asc(), ContentItem.priority.asc(), ContentItem.created_at.asc())
-                    .limit(50)
-                )
-            ).scalars().all()
+        stmt = (
+            select(ContentItem)
+            .where(
+                ContentItem.channel_id == channel.id,
+                ContentItem.status == ContentItemStatus.APPROVED,
+                (ContentItem.publish_after.is_(None) | (ContentItem.publish_after <= slot_dt)),
+                (ContentItem.expires_at.is_(None) | (ContentItem.expires_at > slot_dt)),
+            )
+            .order_by(priority_case.asc(), ContentItem.priority.asc(), ContentItem.created_at.asc())
+            .limit(50)
         )
+        if include_generated:
+            stmt = stmt.where(ContentItem.source_type == ContentSourceType.GENERATED)
+        else:
+            stmt = stmt.where(ContentItem.source_type != ContentSourceType.GENERATED)
+
+        candidates = list(((await session.execute(stmt)).scalars().all()))
 
         for candidate in candidates:
             if not await self._passes_limits(session, channel, candidate, slot_dt):
@@ -183,6 +202,43 @@ class SchedulerService:
             if await self._is_duplicate_for_channel(session, channel.id, candidate):
                 continue
             return candidate
+        return None
+
+    async def _pick_library_paste_candidate(
+        self,
+        session: AsyncSession,
+        channel: Channel,
+        slot_dt: datetime,
+    ) -> ContentItem | None:
+        if not channel.allow_pastes:
+            return None
+
+        for paste in await self.paste_service.list_available_for_channel(session, channel.id, limit=20):
+            draft_candidate = ContentItem(
+                channel_id=channel.id,
+                source_type=ContentSourceType.PASTE,
+                origin_paste_id=paste.id,
+                body_text=paste.body_text,
+                normalized_text=paste.normalized_text,
+                text_hash=paste.text_hash,
+                primary_tag=paste.primary_tag,
+                tags=paste.tags,
+                template_key="paste_library",
+                tone_key="community",
+                review_required=False,
+                status=ContentItemStatus.APPROVED,
+            )
+            if not await self._passes_limits(session, channel, draft_candidate, slot_dt):
+                continue
+            if await self._is_duplicate_for_channel(session, channel.id, draft_candidate):
+                continue
+            return await self.paste_service.create_content_item_from_paste(
+                session=session,
+                paste_id=paste.id,
+                channel_id=channel.id,
+                status=ContentItemStatus.APPROVED,
+                review_required=False,
+            )
         return None
 
     async def _passes_limits(
@@ -232,8 +288,25 @@ class SchedulerService:
                 paste = await session.get(PasteLibrary, candidate.origin_paste_id)
                 if paste and await self.paste_service._is_paste_in_cooldown(session, paste, channel.id):
                     return False
+                latest_same_paste = await session.scalar(
+                    select(PublicationLog)
+                    .join(ContentItem, ContentItem.id == PublicationLog.content_item_id)
+                    .where(
+                        PublicationLog.channel_id == channel.id,
+                        PublicationLog.publish_status.in_([PublicationStatus.SCHEDULED, PublicationStatus.SENT]),
+                        ContentItem.origin_paste_id == candidate.origin_paste_id,
+                    )
+                    .order_by(desc(PublicationLog.scheduled_for))
+                    .limit(1)
+                )
+                if (
+                    latest_same_paste
+                    and latest_same_paste.scheduled_for
+                    and latest_same_paste.scheduled_for >= slot_dt - timedelta(days=channel.same_paste_cooldown_days)
+                ):
+                    return False
 
-        if candidate.primary_tag:
+        if candidate.primary_tag and channel.same_tag_cooldown_hours > 0:
             latest_same_tag = await session.scalar(
                 select(PublicationLog)
                 .join(ContentItem, ContentItem.id == PublicationLog.content_item_id)
@@ -248,7 +321,7 @@ class SchedulerService:
             if latest_same_tag and latest_same_tag.published_at and latest_same_tag.published_at >= slot_dt - timedelta(hours=channel.same_tag_cooldown_hours):
                 return False
 
-        if candidate.template_key:
+        if candidate.template_key and channel.same_template_cooldown_hours > 0:
             latest_same_template = await session.scalar(
                 select(PublicationLog)
                 .join(ContentItem, ContentItem.id == PublicationLog.content_item_id)

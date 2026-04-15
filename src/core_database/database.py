@@ -20,6 +20,48 @@ from src.core_database.models.bot_admins import BotAdmin
 async def create_table():
     async with db_helper.engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await ensure_legacy_schema()
+
+
+async def ensure_legacy_schema() -> None:
+    async with db_helper.engine.begin() as conn:
+        if conn.dialect.name != "sqlite":
+            return
+
+        result = await conn.exec_driver_sql("PRAGMA table_info(sender_info)")
+        columns = {row[1] for row in result.fetchall()}
+
+        if "content_type" not in columns:
+            await conn.exec_driver_sql(
+                "ALTER TABLE sender_info ADD COLUMN content_type VARCHAR DEFAULT 'text'"
+            )
+        if "media_group_id" not in columns:
+            await conn.exec_driver_sql(
+                "ALTER TABLE sender_info ADD COLUMN media_group_id VARCHAR"
+            )
+        if "preview_file_id" not in columns:
+            await conn.exec_driver_sql(
+                "ALTER TABLE sender_info ADD COLUMN preview_file_id VARCHAR"
+            )
+        if "preview_file_size" not in columns:
+            await conn.exec_driver_sql(
+                "ALTER TABLE sender_info ADD COLUMN preview_file_size INTEGER"
+            )
+        if "review_chat_id" not in columns:
+            await conn.exec_driver_sql(
+                "ALTER TABLE sender_info ADD COLUMN review_chat_id INTEGER"
+            )
+        if "review_message_id" not in columns:
+            await conn.exec_driver_sql(
+                "ALTER TABLE sender_info ADD COLUMN review_message_id INTEGER"
+            )
+
+        result = await conn.exec_driver_sql("PRAGMA table_info(service_message)")
+        service_columns = {row[1] for row in result.fetchall()}
+        if "send_post_message" not in service_columns:
+            await conn.exec_driver_sql(
+                "ALTER TABLE service_message ADD COLUMN send_post_message VARCHAR DEFAULT ''"
+            )
 
 
 async def drop_table():

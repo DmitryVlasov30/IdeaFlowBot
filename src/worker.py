@@ -352,9 +352,17 @@ class SubBot:
                 logger.info("bot not chat")
                 return
 
-            await Utils().save_incoming_message(message, self.channel_id, self.bot_info.username)
-            await (MarkupButton(self.sup_bot)
-                   .main_menu(message.chat.id, message.chat.id, message.message_id, self.chat_suggest))
+            review_message = await (
+                MarkupButton(self.sup_bot)
+                .main_menu(message.chat.id, message.chat.id, message.message_id, self.chat_suggest)
+            )
+            await Utils().save_incoming_message_with_review(
+                message=message,
+                channel_id=self.channel_id,
+                bot_info=self.bot_info.username,
+                review_chat_id=self.chat_suggest,
+                review_message_id=getattr(review_message, "message_id", None),
+            )
 
         async def shift_timer():
             interval_lst = list(map(

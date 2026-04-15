@@ -107,6 +107,7 @@ class PasteService:
         paste_id: int,
         channel_id: int,
         status: ContentItemStatus = ContentItemStatus.PENDING_REVIEW,
+        review_required: bool = True,
     ) -> ContentItem:
         paste = await session.get(PasteLibrary, paste_id)
         if paste is None:
@@ -124,7 +125,7 @@ class PasteService:
             tags=tags,
             template_key="paste_library",
             tone_key="community",
-            review_required=True,
+            review_required=review_required,
             status=status,
         )
         session.add(item)
@@ -161,16 +162,24 @@ class PasteService:
             ).scalars().all()
         )
 
-        available: list[PasteLibrary] = []
+        available: list[tuple[datetime, datetime, int, PasteLibrary]] = []
         for paste in pastes:
             if not await self._is_paste_allowed_for_channel(session, paste, channel_id):
                 continue
             if await self._is_paste_in_cooldown(session, paste, channel_id):
                 continue
-            available.append(paste)
-            if len(available) >= limit:
-                break
-        return available
+            last_channel_use = await self.get_last_used_at(session, paste.id, channel_id=channel_id)
+            last_global_use = await self.get_last_used_at(session, paste.id, channel_id=None)
+            available.append(
+                (
+                    last_channel_use or datetime.fromtimestamp(0, tz=timezone.utc),
+                    last_global_use or datetime.fromtimestamp(0, tz=timezone.utc),
+                    paste.id,
+                    paste,
+                )
+            )
+        available.sort(key=lambda item: (item[0], item[1], item[2]))
+        return [item[-1] for item in available[:limit]]
 
     async def register_usage(
         self,
@@ -189,6 +198,35 @@ class PasteService:
         await session.commit()
         await session.refresh(usage)
         return usage
+
+    async def get_last_used_at(
+        self,
+        session: AsyncSession,
+        paste_id: int,
+        channel_id: int | None = None,
+    ) -> datetime | None:
+        usage_stmt = select(PasteUsage.used_at).where(PasteUsage.paste_id == paste_id)
+        if channel_id is not None:
+            usage_stmt = usage_stmt.where(PasteUsage.channel_id == channel_id)
+        last_usage = await session.scalar(usage_stmt.order_by(desc(PasteUsage.used_at)).limit(1))
+
+        publish_stmt = (
+            select(PublicationLog.published_at)
+            .join(ContentItem, ContentItem.id == PublicationLog.content_item_id)
+            .where(
+                ContentItem.origin_paste_id == paste_id,
+                PublicationLog.published_at.is_not(None),
+            )
+        )
+        if channel_id is not None:
+            publish_stmt = publish_stmt.where(PublicationLog.channel_id == channel_id)
+        last_publish = await session.scalar(publish_stmt.order_by(desc(PublicationLog.published_at)).limit(1))
+
+        if last_usage is None:
+            return last_publish
+        if last_publish is None:
+            return last_usage
+        return max(last_usage, last_publish)
 
     async def _is_paste_allowed_for_channel(
         self,

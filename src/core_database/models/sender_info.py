@@ -13,5 +13,11 @@ class SenderData(Base):
     message_id: Mapped[int]
     chat_id: Mapped[int]
     text_post: Mapped[str]
+    content_type: Mapped[str]
+    media_group_id: Mapped[str | None]
+    preview_file_id: Mapped[str | None]
+    preview_file_size: Mapped[int | None]
+    review_chat_id: Mapped[int | None]
+    review_message_id: Mapped[int | None]
     timestamp: Mapped[int]
 

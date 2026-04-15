@@ -15,6 +15,26 @@ class Utils:
         self.sender_data = CrudPostData(SenderData)
         self.action_admin = CrudPostData(AdminActionData)
 
+    @staticmethod
+    def _extract_preview_file_id(message: Message) -> str | None:
+        if message.content_type == "photo" and message.photo:
+            return message.photo[-1].file_id
+        if message.content_type == "video" and message.video is not None:
+            return message.video.file_id
+        if message.content_type == "animation" and message.animation is not None:
+            return message.animation.file_id
+        return None
+
+    @staticmethod
+    def _extract_preview_file_size(message: Message) -> int | None:
+        if message.content_type == "photo" and message.photo:
+            return message.photo[-1].file_size
+        if message.content_type == "video" and message.video is not None:
+            return message.video.file_size
+        if message.content_type == "animation" and message.animation is not None:
+            return message.animation.file_size
+        return None
+
     async def check_banned_user(self, id_user: int, id_channel: int) -> bool:
         all_info = await self.db_banned.get_banned_users(id_user=id_user, id_channel=id_channel)
         return bool(all_info)
@@ -55,7 +75,11 @@ class Utils:
             "first_name": info_sender.first_name,
             "message_id": call.message.id,
             "chat_id": call.message.chat.id,
-            "text_post": None,
+            "text_post": "",
+            "content_type": call.message.content_type,
+            "media_group_id": getattr(call.message, "media_group_id", None),
+            "preview_file_id": self._extract_preview_file_id(call.message),
+            "preview_file_size": self._extract_preview_file_size(call.message),
             "timestamp": int(timestamp),
             }
         if call.message.content_type == "text":
@@ -67,6 +91,23 @@ class Utils:
 
     @logger.catch
     async def save_incoming_message(self, message: Message, channel_id: int, bot_info: str) -> None:
+        await self.save_incoming_message_with_review(
+            message=message,
+            channel_id=channel_id,
+            bot_info=bot_info,
+            review_chat_id=None,
+            review_message_id=None,
+        )
+
+    @logger.catch
+    async def save_incoming_message_with_review(
+            self,
+            message: Message,
+            channel_id: int,
+            bot_info: str,
+            review_chat_id: int | None,
+            review_message_id: int | None,
+    ) -> None:
         timestamp = datetime.now(pytz.timezone('Europe/Moscow')).timestamp()
         data = {
             "user_id": message.from_user.id,
@@ -76,7 +117,13 @@ class Utils:
             "first_name": message.from_user.first_name,
             "message_id": message.id,
             "chat_id": message.chat.id,
-            "text_post": None,
+            "text_post": "",
+            "content_type": message.content_type,
+            "media_group_id": getattr(message, "media_group_id", None),
+            "preview_file_id": self._extract_preview_file_id(message),
+            "preview_file_size": self._extract_preview_file_size(message),
+            "review_chat_id": review_chat_id,
+            "review_message_id": review_message_id,
             "timestamp": int(timestamp),
         }
         if message.content_type == "text":

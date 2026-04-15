@@ -22,6 +22,8 @@ class Submission(EditorialBase, BaseIdMixin):
     source_user_id: Mapped[int | None] = mapped_column(BigInteger)
     source_message_id: Mapped[int | None] = mapped_column(BigInteger)
     source_chat_id: Mapped[int | None] = mapped_column(BigInteger)
+    content_type: Mapped[str] = mapped_column(String(32), default="text", nullable=False, index=True)
+    media_group_id: Mapped[str | None] = mapped_column(String(255), index=True)
     bot_username: Mapped[str | None] = mapped_column(String(255))
     username: Mapped[str | None] = mapped_column(String(255))
     first_name: Mapped[str | None] = mapped_column(String(255))
@@ -31,6 +33,7 @@ class Submission(EditorialBase, BaseIdMixin):
     text_hash: Mapped[str | None] = mapped_column(String(64), index=True)
     detected_tags: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
     language_code: Mapped[str | None] = mapped_column(String(16))
+    is_anonymous: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_candidate_for_generation: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_candidate_for_paste: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     status: Mapped[SubmissionStatus] = mapped_column(

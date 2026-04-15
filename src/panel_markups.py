@@ -32,6 +32,7 @@ def build_main_panel(is_general_admin: bool) -> InlineKeyboardMarkup:
 def build_submission_actions(
     submission_id: int,
     has_next: bool,
+    is_anonymous: bool,
     allow_moderation: bool = True,
 ) -> InlineKeyboardMarkup:
     markup = InlineKeyboardMarkup(row_width=2)
@@ -45,9 +46,14 @@ def build_submission_actions(
             InlineKeyboardButton("Hold", callback_data=f"submission:hold:{submission_id}"),
         )
         markup.add(
-            InlineKeyboardButton("Reject", callback_data=f"submission:reject:{submission_id}"),
-            InlineKeyboardButton("Назад в панель", callback_data="panel:main"),
+            InlineKeyboardButton("Анон" if is_anonymous else "Не анон", callback_data=f"submission:toggle_anon:{submission_id}"),
+            InlineKeyboardButton("Реклама", callback_data=f"submission:advertise:{submission_id}"),
         )
+        markup.add(
+            InlineKeyboardButton("Ответить", callback_data=f"submission:reply:{submission_id}"),
+            InlineKeyboardButton("Reject", callback_data=f"submission:reject:{submission_id}"),
+        )
+        markup.add(InlineKeyboardButton("Назад в панель", callback_data="panel:main"))
     else:
         markup.add(InlineKeyboardButton("Назад в панель", callback_data="panel:main"))
     if has_next:
@@ -58,6 +64,7 @@ def build_submission_actions(
 def build_submission_history_actions(
     submission_id: int,
     has_next: bool,
+    is_anonymous: bool,
     allow_moderation: bool = True,
 ) -> InlineKeyboardMarkup:
     markup = InlineKeyboardMarkup(row_width=2)
@@ -71,15 +78,18 @@ def build_submission_history_actions(
             InlineKeyboardButton("Hold", callback_data=f"submission:hold:{submission_id}"),
         )
         markup.add(
-            InlineKeyboardButton("Reject", callback_data=f"submission:reject:{submission_id}"),
-            InlineKeyboardButton("Назад в панель", callback_data="panel:main"),
+            InlineKeyboardButton("Анон" if is_anonymous else "Не анон", callback_data=f"submission:toggle_anon:{submission_id}"),
+            InlineKeyboardButton("Реклама", callback_data=f"submission:advertise:{submission_id}"),
         )
+        markup.add(
+            InlineKeyboardButton("Ответить", callback_data=f"submission:reply:{submission_id}"),
+            InlineKeyboardButton("Reject", callback_data=f"submission:reject:{submission_id}"),
+        )
+        markup.add(InlineKeyboardButton("Назад в панель", callback_data="panel:main"))
     else:
         markup.add(InlineKeyboardButton("Назад в панель", callback_data="panel:main"))
     if has_next:
-        markup.add(
-            InlineKeyboardButton("Следующее сообщение", callback_data=f"submission_all:next:{submission_id}")
-        )
+        markup.add(InlineKeyboardButton("Следующее сообщение", callback_data=f"submission_all:next:{submission_id}"))
     return markup
 
 
