@@ -3,7 +3,6 @@ from telebot.async_telebot import AsyncTeleBot
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 from loguru import logger
 
-from src.core_database.config import settings
 from src.utils import Utils
 from config import settings
 
@@ -244,7 +243,7 @@ class MarkupButton:
         markup.add(send_button, reject_button)
         markup.add(delayed_button, advertising_button)
         if is_send:
-            await self.bot.copy_message(
+            return await self.bot.copy_message(
                 chat_id=chat_suggest,
                 from_chat_id=sender_id,
                 message_id=message_id,
@@ -256,6 +255,7 @@ class MarkupButton:
                 message_id=message_id,
                 reply_markup=markup,
             )
+            return None
 
     @logger.catch
     async def delayed_buttons_times(self, call: CallbackQuery, sender_id):

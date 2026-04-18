@@ -1,2 +1,9 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.env
+.venv/
+logs/
 data/bot_network_db.db
 log_data.log
+

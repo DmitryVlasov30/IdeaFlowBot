@@ -1,6 +1,9 @@
 import asyncio
+import sqlite3
 
-from sqlalchemy import insert, select, and_, delete, update, Delete
+from loguru import logger
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import insert, select, and_, delete, update, Delete, func
 
 from src.core_database.models.base import Base
 from src.core_database.models.banned_user import BannedUser
@@ -14,11 +17,214 @@ from src.core_database.models.db_helper import db_helper
 from src.core_database.models.advertising import Advertising
 from src.core_database.models.sender_info import SenderData
 from src.core_database.models.admin_actions import AdminActionData
+from src.core_database.models.bot_admins import BotAdmin
+from src.core_database.config import settings
+
+
+POSTGRES_BIGINT_COLUMNS = {
+    "admin_actions_data": ["message_id", "chat_id", "admin_id", "timestamp"],
+    "advertising": ["channel_id", "post_id", "time"],
+    "anonym_message": ["message_id", "chat_id"],
+    "banned_user": ["id_user", "id_channel", "bot_id"],
+    "bots_data": ["channel_id"],
+    "bot_admins": ["user_id"],
+    "chat_admins": ["bot_id", "chat_id"],
+    "delayed_posts": ["bot_id", "time_seconds", "message_id", "sender_id"],
+    "sender_info": [
+        "user_id",
+        "channel_id",
+        "message_id",
+        "chat_id",
+        "preview_file_size",
+        "review_chat_id",
+        "review_message_id",
+        "timestamp",
+    ],
+    "service_message": ["bot_id"],
+    "users": ["user_id"],
+}
 
 
 async def create_table():
     async with db_helper.engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await ensure_legacy_schema()
+
+
+async def ensure_legacy_schema() -> None:
+    should_migrate_from_sqlite = False
+    async with db_helper.engine.begin() as conn:
+        if conn.dialect.name != "sqlite":
+            await conn.run_sync(Base.metadata.create_all)
+            await _ensure_postgres_bigint_columns(conn)
+            should_migrate_from_sqlite = True
+        else:
+            result = await conn.exec_driver_sql("PRAGMA table_info(sender_info)")
+            columns = {row[1] for row in result.fetchall()}
+
+            if "content_type" not in columns:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE sender_info ADD COLUMN content_type VARCHAR DEFAULT 'text'"
+                )
+            if "media_group_id" not in columns:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE sender_info ADD COLUMN media_group_id VARCHAR"
+                )
+            if "preview_file_id" not in columns:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE sender_info ADD COLUMN preview_file_id VARCHAR"
+                )
+            if "preview_file_size" not in columns:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE sender_info ADD COLUMN preview_file_size INTEGER"
+                )
+            if "entities_json" not in columns:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE sender_info ADD COLUMN entities_json TEXT"
+                )
+            if "review_chat_id" not in columns:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE sender_info ADD COLUMN review_chat_id INTEGER"
+                )
+            if "review_message_id" not in columns:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE sender_info ADD COLUMN review_message_id INTEGER"
+                )
+
+            result = await conn.exec_driver_sql("PRAGMA table_info(service_message)")
+            service_columns = {row[1] for row in result.fetchall()}
+            if "send_post_message" not in service_columns:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE service_message ADD COLUMN send_post_message VARCHAR DEFAULT ''"
+                )
+
+    if should_migrate_from_sqlite:
+        await migrate_legacy_sqlite_to_current_db()
+
+
+def _sqlite_table_exists(sqlite_conn: sqlite3.Connection, table_name: str) -> bool:
+    row = sqlite_conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _sqlite_table_row_count(sqlite_conn: sqlite3.Connection, table_name: str) -> int:
+    if not _sqlite_table_exists(sqlite_conn, table_name):
+        return 0
+    row = sqlite_conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()
+    return int(row[0]) if row else 0
+
+
+def _fetch_sqlite_rows(sqlite_conn: sqlite3.Connection, table) -> list[dict]:
+    if not _sqlite_table_exists(sqlite_conn, table.name):
+        return []
+
+    sqlite_conn.row_factory = sqlite3.Row
+    source_columns = {
+        row[1]
+        for row in sqlite_conn.execute(f"PRAGMA table_info({table.name})").fetchall()
+    }
+    target_columns = [column.name for column in table.columns]
+    selected_columns = [column_name for column_name in target_columns if column_name in source_columns]
+    if not selected_columns:
+        return []
+
+    query = f"SELECT {', '.join(selected_columns)} FROM {table.name}"
+    rows = sqlite_conn.execute(query).fetchall()
+    payload: list[dict] = []
+    for row in rows:
+        item = {column_name: row[column_name] for column_name in selected_columns}
+        _normalize_legacy_row_values(table.name, item)
+        payload.append(item)
+    return payload
+
+
+def _normalize_legacy_row_values(table_name: str, item: dict) -> None:
+    for column_name in POSTGRES_BIGINT_COLUMNS.get(table_name, []):
+        if column_name not in item:
+            continue
+
+        value = item[column_name]
+        if value is None or isinstance(value, int):
+            continue
+
+        if isinstance(value, str):
+            normalized_value = value.strip()
+            if not normalized_value:
+                item[column_name] = None
+                continue
+            item[column_name] = int(normalized_value)
+            continue
+
+        item[column_name] = int(value)
+
+
+async def _set_postgres_sequence(conn, table_name: str) -> None:
+    await conn.exec_driver_sql(
+        f"""
+        SELECT setval(
+            pg_get_serial_sequence('"{table_name}"', 'id'),
+            COALESCE((SELECT MAX(id) FROM "{table_name}"), 1),
+            EXISTS(SELECT 1 FROM "{table_name}")
+        )
+        """
+    )
+
+
+async def _ensure_postgres_bigint_columns(conn) -> None:
+    for table_name, column_names in POSTGRES_BIGINT_COLUMNS.items():
+        for column_name in column_names:
+            await conn.exec_driver_sql(
+                f'''
+                ALTER TABLE "{table_name}"
+                ALTER COLUMN "{column_name}" TYPE BIGINT
+                USING NULLIF("{column_name}"::text, '')::bigint
+                '''
+            )
+
+
+async def _legacy_source_needs_sync(conn, sqlite_conn: sqlite3.Connection) -> bool:
+    for table in Base.metadata.sorted_tables:
+        source_rows = _sqlite_table_row_count(sqlite_conn, table.name)
+        if source_rows == 0:
+            continue
+
+        target_rows = await conn.scalar(select(func.count()).select_from(table))
+        if int(target_rows or 0) < source_rows:
+            return True
+
+    return False
+
+
+async def migrate_legacy_sqlite_to_current_db() -> None:
+    source_path = settings.legacy_sqlite_path
+    if not source_path.exists():
+        return
+
+    async with db_helper.engine.begin() as conn:
+        if conn.dialect.name == "sqlite":
+            return
+
+        with sqlite3.connect(source_path) as sqlite_conn:
+            sqlite_conn.row_factory = sqlite3.Row
+            if not await _legacy_source_needs_sync(conn, sqlite_conn):
+                return
+
+            for table in Base.metadata.sorted_tables:
+                rows = _fetch_sqlite_rows(sqlite_conn, table)
+                if not rows:
+                    continue
+
+                logger.info("Migrating {} legacy rows into {}", len(rows), table.name)
+                for start in range(0, len(rows), 500):
+                    chunk = rows[start:start + 500]
+                    stmt = pg_insert(table).values(chunk).on_conflict_do_nothing(index_elements=[table.c.id])
+                    await conn.execute(stmt)
+
+            for table in Base.metadata.sorted_tables:
+                await _set_postgres_sequence(conn, table.name)
 
 
 async def drop_table():
@@ -341,6 +547,34 @@ class CrudPostData:
     async def add_public_posts(self, data: dict) -> None:
         async with db_helper.engine.connect() as conn:
             await conn.execute(insert(self.table).values(data))
+            await conn.commit()
+
+    async def get_first_by_filters(self, **filters):
+        async with db_helper.engine.connect() as conn:
+            stmt = select(self.table)
+            for key, value in filters.items():
+                stmt = stmt.filter(getattr(self.table, key) == value)
+            return (await conn.execute(stmt.limit(1))).scalars().first()
+
+
+class CrudBotAdmins:
+    @staticmethod
+    async def get_admins(user_id: int = None) -> list:
+        async with db_helper.engine.connect() as conn:
+            if user_id is None:
+                return (await conn.execute(select(BotAdmin))).fetchall()
+            return (await conn.execute(select(BotAdmin).filter(BotAdmin.user_id == user_id))).fetchall()
+
+    @staticmethod
+    async def add_admin(data: dict) -> None:
+        async with db_helper.engine.connect() as conn:
+            await conn.execute(insert(BotAdmin).values(data))
+            await conn.commit()
+
+    @staticmethod
+    async def delete_admin(user_id: int) -> None:
+        async with db_helper.engine.connect() as conn:
+            await conn.execute(delete(BotAdmin).filter(BotAdmin.user_id == user_id))
             await conn.commit()
 
 

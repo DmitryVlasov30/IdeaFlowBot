@@ -1,0 +1,119 @@
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ideaflow_editorial}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-ideaflow_editorial}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    ports:
+      - "6379:6379"
+
+  collector-bot:
+    image: ideaflowbot-app:local
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: python main.py
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  editorial-migrate:
+    image: ideaflowbot-app:local
+    restart: "no"
+    env_file:
+      - .env
+    command: alembic upgrade head
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  editorial-api:
+    image: ideaflowbot-app:local
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: uvicorn src.editorial.api.app:app --host 0.0.0.0 --port 8080
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      editorial-migrate:
+        condition: service_completed_successfully
+    ports:
+      - "8080:8080"
+
+  editorial-importer:
+    image: ideaflowbot-app:local
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: sh -c "while true; do python -m src.editorial.cli import-legacy; sleep 60; done"
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      editorial-migrate:
+        condition: service_completed_successfully
+
+  editorial-scheduler:
+    image: ideaflowbot-app:local
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: sh -c "while true; do python -m src.editorial.cli schedule; sleep 300; done"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      editorial-migrate:
+        condition: service_completed_successfully
+
+  editorial-publisher:
+    image: ideaflowbot-app:local
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: sh -c "while true; do python -m src.editorial.cli publish; sleep 30; done"
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      editorial-migrate:
+        condition: service_completed_successfully
+
+volumes:
+  postgres_data:

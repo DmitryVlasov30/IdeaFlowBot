@@ -352,8 +352,17 @@ class SubBot:
                 logger.info("bot not chat")
                 return
 
-            await (MarkupButton(self.sup_bot)
-                   .main_menu(message.chat.id, message.chat.id, message.message_id, self.chat_suggest))
+            review_message = await (
+                MarkupButton(self.sup_bot)
+                .main_menu(message.chat.id, message.chat.id, message.message_id, self.chat_suggest)
+            )
+            await Utils().save_incoming_message_with_review(
+                message=message,
+                channel_id=self.channel_id,
+                bot_info=self.bot_info.username,
+                review_chat_id=self.chat_suggest,
+                review_message_id=getattr(review_message, "message_id", None),
+            )
 
         async def shift_timer():
             interval_lst = list(map(
@@ -452,7 +461,7 @@ class SubBot:
             await utils_func.save_admin_action(call)
             match call.data.split(";")[0]:
                 case "banned_user":
-                    await buttons_func.add_ban_user(call, self.channel_id, self.bot_info, self.chat_suggest)
+                    await buttons_func.add_ban_user(call, self.ban_database, self.channel_id, self.bot_info, self.chat_suggest)
                 case "add_info":
                     await utils_func.save_admin_action(call)
                     await buttons_func.add_info(call)

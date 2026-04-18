@@ -1,13 +1,13 @@
-from sqlalchemy import UniqueConstraint
-from sqlalchemy.orm import Mapped
+from sqlalchemy import BigInteger, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column
 from src.core_database.models.base import Base
 from typing import Optional
 
 
 class AnonymMessage(Base):
     __tablename__ = 'anonym_message'
-    message_id: Mapped[int]
-    chat_id: Mapped[int]
+    message_id: Mapped[int] = mapped_column(BigInteger)
+    chat_id: Mapped[int] = mapped_column(BigInteger)
 
     __table_args__ = (
         UniqueConstraint('message_id', 'chat_id'),

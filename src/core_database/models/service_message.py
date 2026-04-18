@@ -1,3 +1,4 @@
+from sqlalchemy import BigInteger
 from sqlalchemy.orm import Mapped, mapped_column
 from src.core_database.models.base import Base
 
@@ -5,7 +6,7 @@ from src.core_database.models.base import Base
 class ServiceMessage(Base):
     __tablename__ = "service_message"
 
-    bot_id: Mapped[int] = mapped_column(unique=True)
+    bot_id: Mapped[int] = mapped_column(BigInteger, unique=True)
     hello_message: Mapped[str]
     ban_user_message: Mapped[str]
     send_post_message: Mapped[str]
