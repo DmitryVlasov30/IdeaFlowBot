@@ -22,6 +22,35 @@ class TelegramPublisherAdapter:
         message = await bot.send_message(chat_id=channel_id, text=text)
         return int(message.message_id)
 
+    async def send_text_with_entities(
+        self,
+        bot_token: str,
+        channel_id: int,
+        text: str,
+        entities: list[dict],
+    ) -> int:
+        payload = {
+            "chat_id": channel_id,
+            "text": text,
+            "entities": entities,
+        }
+        request_kwargs = {}
+        proxy = None
+        try:
+            proxy = legacy_settings.proxies.get("http")
+        except Exception:
+            proxy = None
+        if proxy:
+            request_kwargs["proxy"] = proxy
+
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, **request_kwargs) as response:
+                result = await response.json()
+        if not result.get("ok"):
+            raise RuntimeError(result.get("description", str(result)))
+        return int(result["result"]["message_id"])
+
     async def copy_message(
         self,
         bot_token: str,

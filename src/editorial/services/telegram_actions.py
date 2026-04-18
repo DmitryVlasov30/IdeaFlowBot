@@ -4,9 +4,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from telebot.async_telebot import AsyncTeleBot
 
+from src.core_database.database import CrudBannedUser
 from src.editorial.db.session import session_factory
 from src.editorial.models.channel import Channel
 from src.editorial.models.content import ContentItem
@@ -35,6 +36,15 @@ class SubmissionPreview:
     media_group_id: str | None
 
 
+@dataclass(slots=True)
+class SubmissionBanResult:
+    submission_id: int
+    user_id: int
+    username: str | None
+    channel_tg_id: int
+    already_banned: bool
+
+
 class TelegramEditorialActions:
     def __init__(self) -> None:
         self.importer = LegacyImporter()
@@ -44,6 +54,8 @@ class TelegramEditorialActions:
         self.channel_service = ChannelService()
         self.scheduler = SchedulerService()
         self.publisher = PublisherService()
+        self.banned_users = CrudBannedUser()
+        self._legacy_bot_id_cache: dict[str, int] = {}
 
     async def import_new(self):
         async with session_factory() as session:
@@ -99,7 +111,10 @@ class TelegramEditorialActions:
         async with session_factory() as session:
             stmt = (
                 select(Submission)
-                .where(Submission.status.in_([SubmissionStatus.NEW, SubmissionStatus.HOLD]))
+                .where(
+                    Submission.status.in_([SubmissionStatus.NEW, SubmissionStatus.HOLD]),
+                    or_(Submission.source_chat_id.is_(None), Submission.source_chat_id >= 0),
+                )
                 .order_by(Submission.created_at.asc())
                 .limit(50)
             )
@@ -272,6 +287,61 @@ class TelegramEditorialActions:
             "По рекламе напишите пожалуйста @ivanblk, сразу укажите, что вы хотите рекламировать",
         )
 
+    async def ban_submission_author(
+        self,
+        submission_id: int,
+        reviewer_id: int | None = None,
+    ) -> SubmissionBanResult:
+        async with session_factory() as session:
+            submission = await session.get(Submission, submission_id)
+            if submission is None:
+                raise ValueError(f"Submission {submission_id} not found")
+            if submission.source_user_id is None:
+                raise ValueError("Submission has no source user id")
+
+            channel = await session.get(Channel, submission.channel_id)
+            if channel is None:
+                raise ValueError(f"Channel {submission.channel_id} not found")
+
+            await self.moderation.set_submission_status(
+                session=session,
+                submission_id=submission_id,
+                status=SubmissionStatus.REJECTED,
+                moderator_note=(
+                    f"Banned in Telegram panel by {reviewer_id}"
+                    if reviewer_id is not None
+                    else "Banned in Telegram panel"
+                ),
+            )
+            user_id = int(submission.source_user_id)
+            username = submission.username
+            tg_channel_id = int(channel.tg_channel_id)
+
+        binding = await self.legacy_reader.get_bot_binding(tg_channel_id)
+        if binding is None:
+            raise ValueError(f"Legacy bot binding for channel {tg_channel_id} not found")
+
+        already_banned = bool(
+            await self.banned_users.get_banned_users(id_user=user_id, id_channel=tg_channel_id)
+        )
+        if not already_banned:
+            bot_id = await self._get_legacy_bot_id(binding.bot_api_token)
+            await self.banned_users.add_banned_user(
+                {
+                    "id_user": user_id,
+                    "id_channel": tg_channel_id,
+                    "bot_id": bot_id,
+                }
+            )
+
+        return SubmissionBanResult(
+            submission_id=submission_id,
+            user_id=user_id,
+            username=username,
+            channel_tg_id=tg_channel_id,
+            already_banned=already_banned,
+        )
+
     async def list_pending_content_items(self) -> list[ContentItem]:
         async with session_factory() as session:
             stmt = (
@@ -413,3 +483,18 @@ class TelegramEditorialActions:
         await session.commit()
         await session.refresh(log_item)
         return log_item
+
+    async def _get_legacy_bot_id(self, bot_api_token: str) -> int:
+        cached_id = self._legacy_bot_id_cache.get(bot_api_token)
+        if cached_id is not None:
+            return cached_id
+
+        bot = AsyncTeleBot(bot_api_token)
+        try:
+            bot_info = await bot.get_me()
+            self._legacy_bot_id_cache[bot_api_token] = bot_info.id
+            return bot_info.id
+        finally:
+            close_session = getattr(bot, "close_session", None)
+            if close_session is not None:
+                await close_session()

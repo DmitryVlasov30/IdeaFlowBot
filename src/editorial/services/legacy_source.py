@@ -32,13 +32,14 @@ class LegacySenderRow:
     media_group_id: str | None
     preview_file_id: str | None
     preview_file_size: int | None
+    entities_json: str | None
     review_chat_id: int | None
     review_message_id: int | None
     timestamp: int
 
 
 class LegacyCollectorReader:
-    """Read-only bridge to the existing SQLite collector database."""
+    """Read-only bridge to the current legacy collector database."""
 
     async def fetch_sender_rows(self, after_id: int = 0, limit: int = 200) -> list[LegacySenderRow]:
         await ensure_legacy_schema()
@@ -58,6 +59,7 @@ class LegacyCollectorReader:
                     SenderData.media_group_id,
                     SenderData.preview_file_id,
                     SenderData.preview_file_size,
+                    SenderData.entities_json,
                     SenderData.review_chat_id,
                     SenderData.review_message_id,
                     SenderData.timestamp,
@@ -82,6 +84,7 @@ class LegacyCollectorReader:
                     media_group_id=row["media_group_id"],
                     preview_file_id=row["preview_file_id"],
                     preview_file_size=row["preview_file_size"],
+                    entities_json=row["entities_json"],
                     review_chat_id=row["review_chat_id"],
                     review_message_id=row["review_message_id"],
                     timestamp=row["timestamp"],
@@ -109,6 +112,7 @@ class LegacyCollectorReader:
                     SenderData.media_group_id,
                     SenderData.preview_file_id,
                     SenderData.preview_file_size,
+                    SenderData.entities_json,
                     SenderData.review_chat_id,
                     SenderData.review_message_id,
                     SenderData.timestamp,
@@ -132,12 +136,72 @@ class LegacyCollectorReader:
                     media_group_id=row["media_group_id"],
                     preview_file_id=row["preview_file_id"],
                     preview_file_size=row["preview_file_size"],
+                    entities_json=row["entities_json"],
                     review_chat_id=row["review_chat_id"],
                     review_message_id=row["review_message_id"],
                     timestamp=row["timestamp"],
                 )
                 for row in rows
             ]
+
+    async def find_sender_row_by_review_message(
+        self,
+        channel_id: int,
+        review_chat_id: int,
+        review_message_id: int,
+    ) -> LegacySenderRow | None:
+        await ensure_legacy_schema()
+        async with legacy_db_helper.engine.connect() as conn:
+            result = await conn.execute(
+                select(
+                    SenderData.id,
+                    SenderData.user_id,
+                    SenderData.channel_id,
+                    SenderData.bot_username,
+                    SenderData.username,
+                    SenderData.first_name,
+                    SenderData.message_id,
+                    SenderData.chat_id,
+                    SenderData.text_post,
+                    SenderData.content_type,
+                    SenderData.media_group_id,
+                    SenderData.preview_file_id,
+                    SenderData.preview_file_size,
+                    SenderData.entities_json,
+                    SenderData.review_chat_id,
+                    SenderData.review_message_id,
+                    SenderData.timestamp,
+                )
+                .where(
+                    SenderData.channel_id == channel_id,
+                    SenderData.review_chat_id == review_chat_id,
+                    SenderData.review_message_id == review_message_id,
+                )
+                .order_by(SenderData.id.asc())
+                .limit(1)
+            )
+            row = result.mappings().first()
+            if row is None:
+                return None
+            return LegacySenderRow(
+                id=row["id"],
+                user_id=row["user_id"],
+                channel_id=int(row["channel_id"]),
+                bot_username=row["bot_username"],
+                username=row["username"],
+                first_name=row["first_name"],
+                message_id=row["message_id"],
+                chat_id=row["chat_id"],
+                text_post=row["text_post"],
+                content_type=row["content_type"],
+                media_group_id=row["media_group_id"],
+                preview_file_id=row["preview_file_id"],
+                preview_file_size=row["preview_file_size"],
+                entities_json=row["entities_json"],
+                review_chat_id=row["review_chat_id"],
+                review_message_id=row["review_message_id"],
+                timestamp=row["timestamp"],
+            )
 
     async def fetch_all_bot_bindings(self) -> list[LegacyBotBinding]:
         async with legacy_db_helper.engine.connect() as conn:

@@ -1,4 +1,5 @@
 import pytz
+import json
 from telebot.types import Message, CallbackQuery, InlineKeyboardButton
 from datetime import datetime, timedelta, timezone
 from loguru import logger
@@ -34,6 +35,49 @@ class Utils:
         if message.content_type == "animation" and message.animation is not None:
             return message.animation.file_size
         return None
+
+    @staticmethod
+    def _serialize_entity_value(value):
+        if value is None:
+            return None
+        if isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, list):
+            return [Utils._serialize_entity_value(item) for item in value if item is not None]
+        if isinstance(value, dict):
+            return {
+                key: Utils._serialize_entity_value(item)
+                for key, item in value.items()
+                if item is not None
+            }
+        if hasattr(value, "to_dict"):
+            return Utils._serialize_entity_value(value.to_dict())
+        if hasattr(value, "__dict__"):
+            return {
+                key: Utils._serialize_entity_value(item)
+                for key, item in value.__dict__.items()
+                if not key.startswith("_") and item is not None
+            }
+        return str(value)
+
+    @staticmethod
+    def _extract_entities_json(message: Message) -> str | None:
+        entities = message.entities if message.content_type == "text" else message.caption_entities
+        if not entities:
+            raw_payload = None
+            if message.content_type == "text":
+                raw_payload = message.json.get("entities")
+            elif message.caption is not None:
+                raw_payload = message.json.get("caption_entities")
+            if not raw_payload:
+                return None
+            return json.dumps(raw_payload, ensure_ascii=False)
+
+        payload = [Utils._serialize_entity_value(entity) for entity in entities]
+        payload = [item for item in payload if item]
+        if not payload:
+            return None
+        return json.dumps(payload, ensure_ascii=False)
 
     async def check_banned_user(self, id_user: int, id_channel: int) -> bool:
         all_info = await self.db_banned.get_banned_users(id_user=id_user, id_channel=id_channel)
@@ -80,6 +124,7 @@ class Utils:
             "media_group_id": getattr(call.message, "media_group_id", None),
             "preview_file_id": self._extract_preview_file_id(call.message),
             "preview_file_size": self._extract_preview_file_size(call.message),
+            "entities_json": self._extract_entities_json(call.message),
             "timestamp": int(timestamp),
             }
         if call.message.content_type == "text":
@@ -122,6 +167,7 @@ class Utils:
             "media_group_id": getattr(message, "media_group_id", None),
             "preview_file_id": self._extract_preview_file_id(message),
             "preview_file_size": self._extract_preview_file_size(message),
+            "entities_json": self._extract_entities_json(message),
             "review_chat_id": review_chat_id,
             "review_message_id": review_message_id,
             "timestamp": int(timestamp),

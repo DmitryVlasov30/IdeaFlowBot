@@ -1,5 +1,5 @@
-from sqlalchemy import UniqueConstraint
-from sqlalchemy.orm import Mapped
+from sqlalchemy import BigInteger, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column
 from src.core_database.models.base import Base
 from typing import Optional
 
@@ -7,9 +7,9 @@ from typing import Optional
 class Advertising(Base):
     __tablename__ = 'advertising'
 
-    channel_id: Mapped[int]
-    post_id: Mapped[int]
-    time: Mapped[int]
+    channel_id: Mapped[int] = mapped_column(BigInteger)
+    post_id: Mapped[int] = mapped_column(BigInteger)
+    time: Mapped[int] = mapped_column(BigInteger)
 
     __table_args__ = (
         UniqueConstraint('time', 'channel_id', 'post_id'),

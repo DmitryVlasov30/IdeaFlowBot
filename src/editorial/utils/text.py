@@ -47,6 +47,13 @@ def compute_text_hash(text: str | None) -> str | None:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
+def compute_raw_text_hash(text: str | None) -> str | None:
+    cleaned = clean_text(text)
+    if not cleaned:
+        return None
+    return hashlib.sha256(cleaned.encode("utf-8")).hexdigest()
+
+
 def detect_tags(text: str | None) -> list[str]:
     normalized = normalize_text(text)
     if not normalized:
@@ -81,4 +88,3 @@ def pick_primary_tag(tags: Iterable[str]) -> str | None:
     for tag in tags:
         return tag
     return None
-

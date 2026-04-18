@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.editorial.models.content import ContentItem
@@ -14,10 +14,14 @@ from src.editorial.models.enums import (
 )
 from src.editorial.models.review import Review
 from src.editorial.models.submission import Submission
-from src.editorial.utils.text import compute_text_hash, detect_tags, normalize_text, pick_primary_tag
+from src.editorial.utils.text import clean_text, compute_raw_text_hash, compute_text_hash, detect_tags, normalize_text, pick_primary_tag
 
 
 class ModerationService:
+    @staticmethod
+    def _visible_submission_filter():
+        return or_(Submission.source_chat_id.is_(None), Submission.source_chat_id >= 0)
+
     @staticmethod
     def _submission_group_key(submission: Submission) -> tuple | None:
         if not submission.media_group_id:
@@ -92,6 +96,10 @@ class ModerationService:
         if normalized and text_hash:
             return normalized, text_hash
 
+        cleaned_text = clean_text(text_value)
+        if cleaned_text and submission.content_type == "text":
+            return cleaned_text, compute_raw_text_hash(cleaned_text) or ""
+
         message_ref = submission.media_group_id or str(submission.source_message_id or submission.id)
         fingerprint = (
             f"telegram media {submission.content_type} "
@@ -113,7 +121,11 @@ class ModerationService:
         status: SubmissionStatus | None = None,
         limit: int | None = 50,
     ) -> list[Submission]:
-        stmt = select(Submission).order_by(Submission.created_at.desc())
+        stmt = (
+            select(Submission)
+            .where(self._visible_submission_filter())
+            .order_by(Submission.created_at.desc())
+        )
         if status is not None:
             stmt = stmt.where(Submission.status == status)
         if limit is not None:
@@ -223,8 +235,14 @@ class ModerationService:
                 raise ValueError("edited_text is required for edit_and_approve")
             tags = detect_tags(edited_text)
             item.body_text = edited_text
-            item.normalized_text = normalize_text(edited_text)
-            item.text_hash = compute_text_hash(edited_text) or ""
+            normalized_text = normalize_text(edited_text)
+            text_hash = compute_text_hash(edited_text)
+            if normalized_text and text_hash:
+                item.normalized_text = normalized_text
+                item.text_hash = text_hash
+            else:
+                item.normalized_text = clean_text(edited_text)
+                item.text_hash = compute_raw_text_hash(edited_text) or ""
             item.tags = tags
             item.primary_tag = pick_primary_tag(tags)
             item.status = ContentItemStatus.APPROVED

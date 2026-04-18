@@ -344,18 +344,32 @@ class SchedulerService:
         channel_id: int,
         candidate: ContentItem,
     ) -> bool:
-        exact_match_count = await session.scalar(
-            select(func.count())
-            .select_from(ContentItem)
-            .join(PublicationLog, PublicationLog.content_item_id == ContentItem.id)
-            .where(
-                PublicationLog.channel_id == channel_id,
-                PublicationLog.publish_status == PublicationStatus.SENT,
-                ContentItem.text_hash == candidate.text_hash,
+        if candidate.text_hash:
+            exact_match_count = await session.scalar(
+                select(func.count())
+                .select_from(ContentItem)
+                .join(PublicationLog, PublicationLog.content_item_id == ContentItem.id)
+                .where(
+                    PublicationLog.channel_id == channel_id,
+                    PublicationLog.publish_status == PublicationStatus.SENT,
+                    ContentItem.text_hash == candidate.text_hash,
+                )
             )
-        )
-        if exact_match_count:
-            return True
+            if exact_match_count:
+                return True
+        elif candidate.body_text:
+            exact_body_match_count = await session.scalar(
+                select(func.count())
+                .select_from(ContentItem)
+                .join(PublicationLog, PublicationLog.content_item_id == ContentItem.id)
+                .where(
+                    PublicationLog.channel_id == channel_id,
+                    PublicationLog.publish_status == PublicationStatus.SENT,
+                    ContentItem.body_text == candidate.body_text,
+                )
+            )
+            if exact_body_match_count:
+                return True
 
         recent_items = list(
             (
@@ -372,6 +386,8 @@ class SchedulerService:
             ).scalars().all()
         )
         for recent in recent_items:
+            if not candidate.normalized_text or not recent.normalized_text:
+                continue
             if similarity_score(candidate.normalized_text, recent.normalized_text) >= settings.similarity_threshold:
                 return True
         return False

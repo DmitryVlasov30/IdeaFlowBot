@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from random import SystemRandom
 
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.editorial.models.content import ContentItem
-from src.editorial.models.enums import ContentItemStatus, ContentSourceType, PasteStatus, SubmissionStatus
+from src.editorial.models.enums import ContentItemStatus, ContentSourceType, PasteStatus, PublicationStatus, SubmissionStatus
 from src.editorial.models.paste import PasteChannelRule, PasteLibrary, PasteUsage
 from src.editorial.models.publication import PublicationLog
 from src.editorial.models.submission import Submission
@@ -14,6 +15,11 @@ from src.editorial.utils.text import compute_text_hash, detect_tags, normalize_t
 
 
 class PasteService:
+    GLOBAL_CROSS_CHANNEL_COOLDOWN_DAYS = 3
+
+    def __init__(self) -> None:
+        self._random = SystemRandom()
+
     async def list_pastes(
         self,
         session: AsyncSession,
@@ -162,24 +168,20 @@ class PasteService:
             ).scalars().all()
         )
 
-        available: list[tuple[datetime, datetime, int, PasteLibrary]] = []
+        available: list[PasteLibrary] = []
         for paste in pastes:
             if not await self._is_paste_allowed_for_channel(session, paste, channel_id):
                 continue
             if await self._is_paste_in_cooldown(session, paste, channel_id):
                 continue
-            last_channel_use = await self.get_last_used_at(session, paste.id, channel_id=channel_id)
-            last_global_use = await self.get_last_used_at(session, paste.id, channel_id=None)
-            available.append(
-                (
-                    last_channel_use or datetime.fromtimestamp(0, tz=timezone.utc),
-                    last_global_use or datetime.fromtimestamp(0, tz=timezone.utc),
-                    paste.id,
-                    paste,
-                )
-            )
-        available.sort(key=lambda item: (item[0], item[1], item[2]))
-        return [item[-1] for item in available[:limit]]
+            if await self._is_paste_recently_reserved(session, paste, channel_id):
+                continue
+            available.append(paste)
+
+        # Choose randomly among all pastes that already passed cooldown and
+        # channel restrictions so scheduler does not always reuse the same item.
+        self._random.shuffle(available)
+        return available[:limit]
 
     async def register_usage(
         self,
@@ -249,15 +251,17 @@ class PasteService:
         channel_id: int,
     ) -> bool:
         now = datetime.now(timezone.utc)
+        global_cooldown_days = self._global_cooldown_days(paste)
 
-        last_global_use = await session.scalar(
-            select(PasteUsage)
-            .where(PasteUsage.paste_id == paste.id)
-            .order_by(desc(PasteUsage.used_at))
-            .limit(1)
-        )
-        if last_global_use and last_global_use.used_at >= now - timedelta(days=paste.global_cooldown_days):
-            return True
+        if global_cooldown_days > 0:
+            last_global_use = await session.scalar(
+                select(PasteUsage)
+                .where(PasteUsage.paste_id == paste.id)
+                .order_by(desc(PasteUsage.used_at))
+                .limit(1)
+            )
+            if last_global_use and last_global_use.used_at >= now - timedelta(days=global_cooldown_days):
+                return True
 
         last_channel_use = await session.scalar(
             select(PasteUsage)
@@ -282,3 +286,53 @@ class PasteService:
         if last_publish and last_publish.published_at and last_publish.published_at >= now - timedelta(days=paste.per_channel_cooldown_days):
             return True
         return False
+
+    async def _is_paste_recently_reserved(
+        self,
+        session: AsyncSession,
+        paste: PasteLibrary,
+        channel_id: int,
+    ) -> bool:
+        now = datetime.now(timezone.utc)
+        global_cooldown_days = self._global_cooldown_days(paste)
+
+        if global_cooldown_days > 0:
+            latest_global_log = await session.scalar(
+                select(PublicationLog)
+                .join(ContentItem, ContentItem.id == PublicationLog.content_item_id)
+                .where(
+                    ContentItem.origin_paste_id == paste.id,
+                    PublicationLog.publish_status.in_([PublicationStatus.SCHEDULED, PublicationStatus.SENT]),
+                )
+                .order_by(desc(PublicationLog.scheduled_for))
+                .limit(1)
+            )
+            if (
+                latest_global_log
+                and latest_global_log.scheduled_for
+                and latest_global_log.scheduled_for >= now - timedelta(days=global_cooldown_days)
+            ):
+                return True
+
+        latest_channel_log = await session.scalar(
+            select(PublicationLog)
+            .join(ContentItem, ContentItem.id == PublicationLog.content_item_id)
+            .where(
+                ContentItem.origin_paste_id == paste.id,
+                PublicationLog.channel_id == channel_id,
+                PublicationLog.publish_status.in_([PublicationStatus.SCHEDULED, PublicationStatus.SENT]),
+            )
+            .order_by(desc(PublicationLog.scheduled_for))
+            .limit(1)
+        )
+        if (
+            latest_channel_log
+            and latest_channel_log.scheduled_for
+            and latest_channel_log.scheduled_for >= now - timedelta(days=paste.per_channel_cooldown_days)
+        ):
+            return True
+
+        return False
+
+    def _global_cooldown_days(self, paste: PasteLibrary) -> int:
+        return max(0, min(paste.global_cooldown_days, self.GLOBAL_CROSS_CHANNEL_COOLDOWN_DAYS))

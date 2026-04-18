@@ -10,10 +10,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.editorial.config import settings
 from src.editorial.models.channel import Channel
+from src.editorial.models.content import ContentItem
 from src.editorial.models.submission import Submission
 from src.editorial.services.legacy_source import LegacyCollectorReader, LegacySenderRow
 from src.editorial.utils.text import (
     clean_text,
+    compute_raw_text_hash,
     compute_text_hash,
     detect_language_code,
     detect_tags,
@@ -41,6 +43,97 @@ class LegacyImporter:
     def _build_media_fingerprint(row: LegacySenderRow) -> str:
         message_ref = row.media_group_id or str(row.message_id or row.id)
         return f"telegram media {row.content_type or 'unknown'} {row.channel_id} {row.chat_id or 0} {message_ref}"
+
+    @staticmethod
+    def _is_service_moderation_copy(row: LegacySenderRow) -> bool:
+        return bool(
+            row.chat_id is not None
+            and row.chat_id < 0
+            and row.review_chat_id is None
+            and row.review_message_id is None
+        )
+
+    async def repair_moderation_copy_links(self, session: AsyncSession) -> int:
+        duplicate_submissions = list(
+            (
+                await session.execute(
+                    select(Submission)
+                    .where(
+                        Submission.legacy_source == "sender_info",
+                        Submission.source_chat_id.is_not(None),
+                        Submission.source_chat_id < 0,
+                    )
+                    .order_by(Submission.id.asc())
+                )
+            ).scalars().all()
+        )
+        if not duplicate_submissions:
+            return 0
+
+        legacy_rows = await self.legacy_reader.fetch_sender_rows_by_ids(
+            [submission.legacy_row_id for submission in duplicate_submissions if submission.legacy_row_id is not None]
+        )
+        legacy_row_map = {row.id: row for row in legacy_rows}
+        repaired_count = 0
+
+        for duplicate in duplicate_submissions:
+            if duplicate.legacy_row_id is None:
+                continue
+            duplicate_row = legacy_row_map.get(duplicate.legacy_row_id)
+            if duplicate_row is None or duplicate_row.chat_id is None or duplicate_row.message_id is None:
+                continue
+
+            original_row = await self.legacy_reader.find_sender_row_by_review_message(
+                channel_id=duplicate_row.channel_id,
+                review_chat_id=int(duplicate_row.chat_id),
+                review_message_id=int(duplicate_row.message_id),
+            )
+            if original_row is None or original_row.id == duplicate_row.id:
+                continue
+
+            original_submission = await session.scalar(
+                select(Submission)
+                .where(
+                    Submission.legacy_source == "sender_info",
+                    Submission.legacy_row_id == original_row.id,
+                )
+                .limit(1)
+            )
+            if original_submission is None:
+                continue
+
+            content_items = list(
+                (
+                    await session.execute(
+                        select(ContentItem).where(ContentItem.origin_submission_id == duplicate.id)
+                    )
+                ).scalars().all()
+            )
+            if not content_items:
+                continue
+
+            for item in content_items:
+                item.origin_submission_id = original_submission.id
+
+            original_submission.is_anonymous = duplicate.is_anonymous
+            original_submission.status = duplicate.status
+            if duplicate.moderator_note and not original_submission.moderator_note:
+                original_submission.moderator_note = duplicate.moderator_note
+            if duplicate.reviewed_at and (
+                original_submission.reviewed_at is None
+                or duplicate.reviewed_at > original_submission.reviewed_at
+            ):
+                original_submission.reviewed_at = duplicate.reviewed_at
+
+            repaired_count += len(content_items)
+            logger.info(
+                "Re-linked {} content items from service copy submission {} to original submission {}",
+                len(content_items),
+                duplicate.id,
+                original_submission.id,
+            )
+
+        return repaired_count
 
     async def sync_channels(self, session: AsyncSession) -> int:
         created = 0
@@ -96,6 +189,9 @@ class LegacyImporter:
         )
 
         if not rows:
+            repaired_count = await self.repair_moderation_copy_links(session)
+            if repaired_count:
+                logger.info("Repaired {} existing content-item links from moderation-copy submissions", repaired_count)
             await session.commit()
             return result
 
@@ -110,6 +206,10 @@ class LegacyImporter:
 
             if row.id is None or row.channel_id not in channels:
                 logger.warning("Skipping legacy row {} because channel {} is unknown", row.id, row.channel_id)
+                continue
+
+            if self._is_service_moderation_copy(row):
+                logger.info("Skipping service moderation copy row {}", row.id)
                 continue
 
             exists = await session.scalar(
@@ -129,9 +229,15 @@ class LegacyImporter:
             normalized_text = normalize_text(cleaned_text)
             text_hash = compute_text_hash(cleaned_text)
             if not normalized_text:
-                normalized_text = self._build_media_fingerprint(row)
+                if cleaned_text and (row.content_type or "text") == "text":
+                    normalized_text = cleaned_text
+                else:
+                    normalized_text = self._build_media_fingerprint(row)
             if text_hash is None:
-                text_hash = compute_text_hash(normalized_text) or ""
+                if cleaned_text and (row.content_type or "text") == "text":
+                    text_hash = compute_raw_text_hash(cleaned_text) or ""
+                else:
+                    text_hash = compute_text_hash(normalized_text) or ""
             created_at = datetime.fromtimestamp(row.timestamp, tz=timezone.utc)
 
             submission = Submission(
@@ -158,6 +264,10 @@ class LegacyImporter:
             )
             session.add(submission)
             result.imported += 1
+
+        repaired_count = await self.repair_moderation_copy_links(session)
+        if repaired_count:
+            logger.info("Repaired {} existing content-item links from moderation-copy submissions", repaired_count)
 
         await session.commit()
         return result

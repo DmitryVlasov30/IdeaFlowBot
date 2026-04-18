@@ -20,6 +20,7 @@ from telebot.types import (
 from config import settings
 from src.core_database.database import CrudBotAdmins, CrudBotsData, CrudDelayedPosts
 from src.editorial.models.enums import SubmissionStatus
+from src.editorial.services.db_export import DatabaseExportService
 from src.editorial.services.legacy_source import LegacyCollectorReader
 from src.editorial.services.telegram_actions import TelegramEditorialActions
 from src.panel_markups import (
@@ -28,6 +29,7 @@ from src.panel_markups import (
     build_channels_actions,
     build_content_actions,
     build_empty_paste_actions,
+    build_extra_panel,
     build_main_panel,
     build_paste_actions,
     build_submission_actions,
@@ -60,6 +62,7 @@ class MasterBot:
         self.delayed_database = CrudDelayedPosts()
         self.bot_admins_database = CrudBotAdmins()
         self.editorial_actions = TelegramEditorialActions()
+        self.db_export_service = DatabaseExportService()
         self.legacy_reader = LegacyCollectorReader()
 
         self.commands = [
@@ -123,6 +126,140 @@ class MasterBot:
             text=panel_text,
             reply_markup=build_main_panel(self._is_general_admin(chat_id)),
         )
+
+    async def _show_extra_panel(self, chat_id: int) -> None:
+        await self.main_bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "Р”РѕРїРѕР»РЅРёС‚РµР»СЊРЅС‹Рµ С„СѓРЅРєС†РёРё.\n\n"
+                "Р’С‹РіСЂСѓР·РєР° Р‘Р” СЃРѕР·РґР°С‘С‚ .db-СЃРЅРёРјРѕРє С‚РµРєСѓС‰РµР№ PostgreSQL-Р±Р°Р·С‹, "
+                "С‡С‚РѕР±С‹ С„Р°Р№Р» РїРѕС‚РѕРј Р±С‹Р»Рѕ СѓРґРѕР±РЅРѕ РѕС‚РєСЂС‹С‚СЊ Рё СЃРјРѕС‚СЂРµС‚СЊ."
+            ),
+            reply_markup=build_extra_panel(),
+        )
+        return
+        await self.main_bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "Дополнительные функции.\n\n"
+                "Выгрузка БД создаёт SQLite-снимок со старой collector-базой и editorial-таблицами, "
+                "чтобы файл потом было удобно открыть и смотреть."
+            ),
+            reply_markup=build_extra_panel(),
+        )
+
+    async def _send_database_export(self, chat_id: int) -> None:
+        status_message = await self.main_bot.send_message(
+            chat_id,
+            "Р“РѕС‚РѕРІР»СЋ РІС‹РіСЂСѓР·РєСѓ Р±Р°Р·С‹ РґР°РЅРЅС‹С…. Р­С‚Рѕ РјРѕР¶РµС‚ Р·Р°РЅСЏС‚СЊ РЅРµСЃРєРѕР»СЊРєРѕ СЃРµРєСѓРЅРґ.",
+        )
+        export_path = None
+        try:
+            export_path = await self.db_export_service.export_snapshot()
+            with export_path.open("rb") as snapshot_file:
+                await self.main_bot.send_document(
+                    chat_id=chat_id,
+                    document=snapshot_file,
+                    visible_file_name=export_path.name,
+                    caption=(
+                        "РЎРЅРёРјРѕРє Р±Р°Р·С‹ РіРѕС‚РѕРІ.\n"
+                        "Р’РЅСѓС‚СЂРё: РІСЃРµ Р°РєС‚СѓР°Р»СЊРЅС‹Рµ С‚Р°Р±Р»РёС†С‹ РїСЂРѕРµРєС‚Р° РёР· С‚РµРєСѓС‰РµР№ PostgreSQL-Р±Р°Р·С‹."
+                    ),
+                )
+        except Exception as ex:
+            logger.exception("Failed to export database snapshot")
+            await self.main_bot.send_message(chat_id, f"РќРµ СѓРґР°Р»РѕСЃСЊ РїРѕРґРіРѕС‚РѕРІРёС‚СЊ РІС‹РіСЂСѓР·РєСѓ Р‘Р”: {ex}")
+        finally:
+            try:
+                await self.main_bot.delete_message(chat_id=chat_id, message_id=status_message.message_id)
+            except Exception:
+                pass
+            if export_path and export_path.exists():
+                export_path.unlink(missing_ok=True)
+        return
+        status_message = await self.main_bot.send_message(
+            chat_id,
+            "Готовлю выгрузку базы данных. Это может занять несколько секунд.",
+        )
+        export_path = None
+        try:
+            export_path = await self.db_export_service.export_snapshot()
+            with export_path.open("rb") as snapshot_file:
+                await self.main_bot.send_document(
+                    chat_id=chat_id,
+                    document=snapshot_file,
+                    visible_file_name=export_path.name,
+                    caption=(
+                        "SQLite-снимок готов.\n"
+                        "Внутри: исходные legacy-таблицы и editorial-таблицы с префиксом editorial__."
+                    ),
+                )
+        except Exception as ex:
+            logger.exception("Failed to export database snapshot")
+            await self.main_bot.send_message(chat_id, f"Не удалось подготовить выгрузку БД: {ex}")
+        finally:
+            try:
+                await self.main_bot.delete_message(chat_id=chat_id, message_id=status_message.message_id)
+            except Exception:
+                pass
+            if export_path and export_path.exists():
+                export_path.unlink(missing_ok=True)
+
+    async def _show_extra_panel(self, chat_id: int) -> None:
+        await self.main_bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "\u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0435 "
+                "\u0444\u0443\u043d\u043a\u0446\u0438\u0438.\n\n"
+                "\u0412\u044b\u0433\u0440\u0443\u0437\u043a\u0430 \u0411\u0414 \u0441\u043e\u0437\u0434\u0430\u0451\u0442 "
+                ".db-\u0441\u043d\u0438\u043c\u043e\u043a \u0442\u0435\u043a\u0443\u0449\u0435\u0439 "
+                "PostgreSQL-\u0431\u0430\u0437\u044b, \u0447\u0442\u043e\u0431\u044b \u0444\u0430\u0439\u043b "
+                "\u043f\u043e\u0442\u043e\u043c \u0431\u044b\u043b\u043e \u0443\u0434\u043e\u0431\u043d\u043e "
+                "\u043e\u0442\u043a\u0440\u044b\u0442\u044c \u0438 \u0441\u043c\u043e\u0442\u0440\u0435\u0442\u044c."
+            ),
+            reply_markup=build_extra_panel(),
+        )
+
+    async def _send_database_export(self, chat_id: int) -> None:
+        status_message = await self.main_bot.send_message(
+            chat_id,
+            "\u0413\u043e\u0442\u043e\u0432\u043b\u044e \u0432\u044b\u0433\u0440\u0443\u0437\u043a\u0443 "
+            "\u0431\u0430\u0437\u044b \u0434\u0430\u043d\u043d\u044b\u0445. \u042d\u0442\u043e "
+            "\u043c\u043e\u0436\u0435\u0442 \u0437\u0430\u043d\u044f\u0442\u044c "
+            "\u043d\u0435\u0441\u043a\u043e\u043b\u044c\u043a\u043e \u0441\u0435\u043a\u0443\u043d\u0434.",
+        )
+        export_path = None
+        try:
+            export_path = await self.db_export_service.export_snapshot()
+            with export_path.open("rb") as snapshot_file:
+                await self.main_bot.send_document(
+                    chat_id=chat_id,
+                    document=snapshot_file,
+                    visible_file_name=export_path.name,
+                    caption=(
+                        "\u0421\u043d\u0438\u043c\u043e\u043a \u0431\u0430\u0437\u044b "
+                        "\u0433\u043e\u0442\u043e\u0432.\n"
+                        "\u0412\u043d\u0443\u0442\u0440\u0438: \u0432\u0441\u0435 "
+                        "\u0430\u043a\u0442\u0443\u0430\u043b\u044c\u043d\u044b\u0435 "
+                        "\u0442\u0430\u0431\u043b\u0438\u0446\u044b \u043f\u0440\u043e\u0435\u043a\u0442\u0430 "
+                        "\u0438\u0437 \u0442\u0435\u043a\u0443\u0449\u0435\u0439 PostgreSQL-\u0431\u0430\u0437\u044b."
+                    ),
+                )
+        except Exception as ex:
+            logger.exception("Failed to export database snapshot")
+            await self.main_bot.send_message(
+                chat_id,
+                f"\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c "
+                f"\u043f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u0438\u0442\u044c "
+                f"\u0432\u044b\u0433\u0440\u0443\u0437\u043a\u0443 \u0411\u0414: {ex}",
+            )
+        finally:
+            try:
+                await self.main_bot.delete_message(chat_id=chat_id, message_id=status_message.message_id)
+            except Exception:
+                pass
+            if export_path and export_path.exists():
+                export_path.unlink(missing_ok=True)
 
     async def _list_subbots_text(self) -> str:
         all_info = await self.bots_database.get_bots_info()
@@ -942,6 +1079,12 @@ class MasterBot:
                             f"Publisher отработал.\nПопыток: {result.attempted}\n"
                             f"Успешно: {result.sent}\nОшибок: {result.failed}",
                         )
+                    case "extra":
+                        await self._show_extra_panel(call.message.chat.id)
+                    case "db_export":
+                        await self.main_bot.answer_callback_query(call.id)
+                        await self._send_database_export(call.message.chat.id)
+                        return
                     case "admins":
                         if not self._is_general_admin(call.from_user.id):
                             await self.main_bot.answer_callback_query(call.id, "Только для генерального админа.", show_alert=True)
@@ -979,6 +1122,20 @@ class MasterBot:
                     case "reject":
                         await self.editorial_actions.reject_submission(submission_id)
                         await self.main_bot.send_message(call.message.chat.id, f"Сообщение {submission_id} отклонено.")
+                        await self._show_first_pending_submission(call.message.chat.id, current_id=submission_id)
+                    case "ban":
+                        result = await self.editorial_actions.ban_submission_author(submission_id, reviewer_id)
+                        author_label = f"@{result.username}" if result.username else str(result.user_id)
+                        if result.already_banned:
+                            await self.main_bot.send_message(
+                                call.message.chat.id,
+                                f"РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ {author_label} СѓР¶Рµ Р±С‹Р» РІ Р±Р°РЅРµ. РЎРѕРѕР±С‰РµРЅРёРµ {submission_id} РѕС‚РєР»РѕРЅРµРЅРѕ.",
+                            )
+                        else:
+                            await self.main_bot.send_message(
+                                call.message.chat.id,
+                                f"РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ {author_label} Р·Р°Р±Р°РЅРµРЅ. РЎРѕРѕР±С‰РµРЅРёРµ {submission_id} РѕС‚РєР»РѕРЅРµРЅРѕ.",
+                            )
                         await self._show_first_pending_submission(call.message.chat.id, current_id=submission_id)
                     case "toggle_anon":
                         submission = await self.editorial_actions.get_submission(submission_id)
