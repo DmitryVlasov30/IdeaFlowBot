@@ -15,6 +15,7 @@ from src.editorial.models.enums import ContentItemStatus, PasteStatus, Publicati
 from src.editorial.models.paste import PasteLibrary
 from src.editorial.models.publication import PublicationLog
 from src.editorial.models.submission import Submission
+from src.editorial.services.channel_history_service import ChannelHistoryImportResult, ChannelHistoryService
 from src.editorial.services.channel_service import ChannelService
 from src.editorial.services.import_legacy import LegacyImporter
 from src.editorial.services.legacy_source import LegacyCollectorReader
@@ -51,6 +52,7 @@ class TelegramEditorialActions:
         self.legacy_reader = LegacyCollectorReader()
         self.moderation = ModerationService()
         self.paste_service = PasteService()
+        self.channel_history_service = ChannelHistoryService()
         self.channel_service = ChannelService()
         self.scheduler = SchedulerService()
         self.publisher = PublisherService()
@@ -68,6 +70,17 @@ class TelegramEditorialActions:
     async def get_channel(self, channel_id: int) -> Channel | None:
         async with session_factory() as session:
             return await self.channel_service.get_channel(session, channel_id)
+
+    async def ensure_channel_for_tg_channel_id(self, tg_channel_id: int) -> Channel:
+        async with session_factory() as session:
+            await self.importer.sync_channels(session)
+            channel = await session.scalar(
+                select(Channel).where(Channel.tg_channel_id == tg_channel_id).limit(1)
+            )
+            if channel is None:
+                raise ValueError(f"Channel with tg id {tg_channel_id} not found")
+            await session.commit()
+            return channel
 
     async def list_channel_slots(self, channel_id: int):
         async with session_factory() as session:
@@ -106,6 +119,48 @@ class TelegramEditorialActions:
                 weekdays=list(weekdays),
             )
             return len(removed)
+
+    async def update_channel_setting(self, channel_id: int, field_name: str, raw_value: str) -> Channel:
+        async with session_factory() as session:
+            return await self.channel_service.update_channel_setting(
+                session=session,
+                channel_id=channel_id,
+                field_name=field_name,
+                raw_value=raw_value,
+            )
+
+    async def get_channel_settings_snapshot(self, channel_id: int) -> list[tuple[str, object]]:
+        async with session_factory() as session:
+            channel = await self.channel_service.get_channel(session, channel_id)
+            if channel is None:
+                raise ValueError(f"Channel {channel_id} not found")
+            return self.channel_service.editable_settings_snapshot(channel)
+
+    def get_editable_channel_setting_names(self) -> list[str]:
+        return self.channel_service.editable_settings_names()
+
+    async def import_channel_history_message(
+        self,
+        *,
+        channel_id: int,
+        source_chat_id: int,
+        source_message_id: int,
+        content_type: str,
+        raw_text: str | None,
+        original_published_at: datetime | None,
+        imported_by: int | None,
+    ) -> ChannelHistoryImportResult:
+        async with session_factory() as session:
+            return await self.channel_history_service.import_message(
+                session=session,
+                channel_id=channel_id,
+                source_chat_id=source_chat_id,
+                source_message_id=source_message_id,
+                content_type=content_type,
+                raw_text=raw_text,
+                original_published_at=original_published_at,
+                imported_by=imported_by,
+            )
 
     async def list_pending_submissions(self) -> list[Submission]:
         async with session_factory() as session:

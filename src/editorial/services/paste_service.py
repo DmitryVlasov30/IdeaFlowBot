@@ -3,9 +3,10 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from random import SystemRandom
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.editorial.models.channel_history import ChannelHistoryMessage
 from src.editorial.models.content import ContentItem
 from src.editorial.models.enums import ContentItemStatus, ContentSourceType, PasteStatus, PublicationStatus, SubmissionStatus
 from src.editorial.models.paste import PasteChannelRule, PasteLibrary, PasteUsage
@@ -227,8 +228,26 @@ class PasteService:
         if last_usage is None:
             return last_publish
         if last_publish is None:
-            return last_usage
-        return max(last_usage, last_publish)
+            last_combined = last_usage
+        elif last_usage is None:
+            last_combined = last_publish
+        else:
+            last_combined = max(last_usage, last_publish)
+
+        history_timestamp_expr = func.coalesce(
+            ChannelHistoryMessage.original_published_at,
+            ChannelHistoryMessage.created_at,
+        )
+        history_stmt = select(history_timestamp_expr).where(ChannelHistoryMessage.matched_paste_id == paste_id)
+        if channel_id is not None:
+            history_stmt = history_stmt.where(ChannelHistoryMessage.channel_id == channel_id)
+        last_history_use = await session.scalar(history_stmt.order_by(desc(history_timestamp_expr)).limit(1))
+
+        if last_combined is None:
+            return last_history_use
+        if last_history_use is None:
+            return last_combined
+        return max(last_combined, last_history_use)
 
     async def _is_paste_allowed_for_channel(
         self,
@@ -254,36 +273,12 @@ class PasteService:
         global_cooldown_days = self._global_cooldown_days(paste)
 
         if global_cooldown_days > 0:
-            last_global_use = await session.scalar(
-                select(PasteUsage)
-                .where(PasteUsage.paste_id == paste.id)
-                .order_by(desc(PasteUsage.used_at))
-                .limit(1)
-            )
-            if last_global_use and last_global_use.used_at >= now - timedelta(days=global_cooldown_days):
+            last_global_use = await self.get_last_used_at(session, paste.id)
+            if last_global_use and last_global_use >= now - timedelta(days=global_cooldown_days):
                 return True
 
-        last_channel_use = await session.scalar(
-            select(PasteUsage)
-            .where(PasteUsage.paste_id == paste.id, PasteUsage.channel_id == channel_id)
-            .order_by(desc(PasteUsage.used_at))
-            .limit(1)
-        )
-        if last_channel_use and last_channel_use.used_at >= now - timedelta(days=paste.per_channel_cooldown_days):
-            return True
-
-        last_publish = await session.scalar(
-            select(PublicationLog)
-            .join(ContentItem, ContentItem.id == PublicationLog.content_item_id)
-            .where(
-                ContentItem.origin_paste_id == paste.id,
-                PublicationLog.channel_id == channel_id,
-                PublicationLog.published_at.is_not(None),
-            )
-            .order_by(desc(PublicationLog.published_at))
-            .limit(1)
-        )
-        if last_publish and last_publish.published_at and last_publish.published_at >= now - timedelta(days=paste.per_channel_cooldown_days):
+        last_channel_use = await self.get_last_used_at(session, paste.id, channel_id)
+        if last_channel_use and last_channel_use >= now - timedelta(days=paste.per_channel_cooldown_days):
             return True
         return False
 

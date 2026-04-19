@@ -22,9 +22,13 @@ from src.core_database.database import CrudBotAdmins, CrudBotsData, CrudDelayedP
 from src.editorial.models.enums import SubmissionStatus
 from src.editorial.services.db_export import DatabaseExportService
 from src.editorial.services.legacy_source import LegacyCollectorReader
+from src.editorial.services.sql_export import SqlExportService
 from src.editorial.services.telegram_actions import TelegramEditorialActions
 from src.panel_markups import (
     build_admin_menu,
+    build_channel_actions,
+    build_channel_history_import_progress_actions,
+    build_channel_history_import_start_actions,
     build_channel_slots_actions,
     build_channels_actions,
     build_content_actions,
@@ -63,6 +67,7 @@ class MasterBot:
         self.bot_admins_database = CrudBotAdmins()
         self.editorial_actions = TelegramEditorialActions()
         self.db_export_service = DatabaseExportService()
+        self.sql_export_service = SqlExportService()
         self.legacy_reader = LegacyCollectorReader()
 
         self.commands = [
@@ -206,6 +211,7 @@ class MasterBot:
                 export_path.unlink(missing_ok=True)
 
     async def _show_extra_panel(self, chat_id: int) -> None:
+        is_general_admin = self._is_general_admin(chat_id)
         await self.main_bot.send_message(
             chat_id=chat_id,
             text=(
@@ -215,7 +221,17 @@ class MasterBot:
                 ".db-\u0441\u043d\u0438\u043c\u043e\u043a \u0442\u0435\u043a\u0443\u0449\u0435\u0439 "
                 "PostgreSQL-\u0431\u0430\u0437\u044b, \u0447\u0442\u043e\u0431\u044b \u0444\u0430\u0439\u043b "
                 "\u043f\u043e\u0442\u043e\u043c \u0431\u044b\u043b\u043e \u0443\u0434\u043e\u0431\u043d\u043e "
-                "\u043e\u0442\u043a\u0440\u044b\u0442\u044c \u0438 \u0441\u043c\u043e\u0442\u0440\u0435\u0442\u044c."
+                "\u043e\u0442\u043a\u0440\u044b\u0442\u044c \u0438 \u0441\u043c\u043e\u0442\u0440\u0435\u0442\u044c.\n\n"
+                + (
+                    "\u041a\u043d\u043e\u043f\u043a\u0430 SQL -> CSV \u043f\u043e\u0437\u0432\u043e\u043b\u044f\u0435\u0442 "
+                    "\u0433\u0435\u043d\u0430\u0434\u043c\u0438\u043d\u0443 \u0432\u044b\u043f\u043e\u043b\u043d\u044f\u0442\u044c "
+                    "\u043b\u044e\u0431\u043e\u0439 \u043e\u0434\u0438\u043d\u043e\u0447\u043d\u044b\u0439 SQL-\u0437\u0430\u043f\u0440\u043e\u0441 "
+                    "\u0438 \u043f\u043e\u043b\u0443\u0447\u0430\u0442\u044c \u0440\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442 \u0432 CSV."
+                    if is_general_admin
+                    else
+                    "\u041a\u043d\u043e\u043f\u043a\u0430 SQL -> CSV \u0434\u043b\u044f \u043c\u043e\u0434\u0435\u0440\u0430\u0442\u043e\u0440\u0430 "
+                    "\u0440\u0430\u0437\u0440\u0435\u0448\u0430\u0435\u0442 \u0442\u043e\u043b\u044c\u043a\u043e SELECT-\u0437\u0430\u043f\u0440\u043e\u0441\u044b."
+                )
             ),
             reply_markup=build_extra_panel(),
         )
@@ -261,6 +277,62 @@ class MasterBot:
             if export_path and export_path.exists():
                 export_path.unlink(missing_ok=True)
 
+    async def _send_sql_export_prompt(self, chat_id: int, allow_mutating: bool) -> None:
+        self._set_user_state(chat_id, "await_sql_export", allow_mutating=allow_mutating)
+        if allow_mutating:
+            prompt_text = (
+                "\u041e\u0442\u043f\u0440\u0430\u0432\u044c\u0442\u0435 \u043e\u0434\u0438\u043d SQL-\u0437\u0430\u043f\u0440\u043e\u0441.\n"
+                "\u0414\u043b\u044f \u0433\u0435\u043d\u0430\u0434\u043c\u0438\u043d\u0430 \u0440\u0430\u0437\u0440\u0435\u0448\u0451\u043d "
+                "\u043b\u044e\u0431\u043e\u0439 \u043e\u0434\u0438\u043d\u043e\u0447\u043d\u044b\u0439 SQL.\n"
+                "\u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442 \u043f\u0440\u0438\u0434\u0451\u0442 CSV-\u0444\u0430\u0439\u043b\u043e\u043c."
+            )
+        else:
+            prompt_text = (
+                "\u041e\u0442\u043f\u0440\u0430\u0432\u044c\u0442\u0435 \u043e\u0434\u0438\u043d SELECT-\u0437\u0430\u043f\u0440\u043e\u0441.\n"
+                "\u0414\u043b\u044f \u043c\u043e\u0434\u0435\u0440\u0430\u0442\u043e\u0440\u0430 \u0440\u0430\u0437\u0440\u0435\u0448\u0451\u043d "
+                "\u0442\u043e\u043b\u044c\u043a\u043e SELECT.\n"
+                "\u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442 \u043f\u0440\u0438\u0434\u0451\u0442 CSV-\u0444\u0430\u0439\u043b\u043e\u043c."
+            )
+        await self.main_bot.send_message(chat_id, prompt_text)
+
+    async def _send_sql_export_result(self, chat_id: int, query: str, allow_mutating: bool) -> None:
+        status_message = await self.main_bot.send_message(
+            chat_id,
+            "\u0412\u044b\u043f\u043e\u043b\u043d\u044f\u044e SQL-\u0437\u0430\u043f\u0440\u043e\u0441 "
+            "\u0438 \u0433\u043e\u0442\u043e\u0432\u043b\u044e CSV. \u042d\u0442\u043e \u043c\u043e\u0436\u0435\u0442 "
+            "\u0437\u0430\u043d\u044f\u0442\u044c \u043d\u0435\u0441\u043a\u043e\u043b\u044c\u043a\u043e "
+            "\u0441\u0435\u043a\u0443\u043d\u0434.",
+        )
+        export_path = None
+        try:
+            result = await self.sql_export_service.export_query(query=query, allow_mutating=allow_mutating)
+            export_path = result.path
+            with export_path.open("rb") as export_file:
+                await self.main_bot.send_document(
+                    chat_id=chat_id,
+                    document=export_file,
+                    visible_file_name=export_path.name,
+                    caption=(
+                        f"SQL -> CSV готов.\n"
+                        f"Тип запроса: {result.statement_type}\n"
+                        f"Строк в файле: {result.rows_written}"
+                    ),
+                )
+        except Exception as ex:
+            logger.exception("Failed to export SQL query result")
+            await self.main_bot.send_message(
+                chat_id,
+                f"\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c "
+                f"\u0432\u044b\u043f\u043e\u043b\u043d\u0438\u0442\u044c SQL: {ex}",
+            )
+        finally:
+            try:
+                await self.main_bot.delete_message(chat_id=chat_id, message_id=status_message.message_id)
+            except Exception:
+                pass
+            if export_path and export_path.exists():
+                export_path.unlink(missing_ok=True)
+
     async def _list_subbots_text(self) -> str:
         all_info = await self.bots_database.get_bots_info()
         if not all_info:
@@ -297,13 +369,13 @@ class MasterBot:
             channel_username = "@" + channel_username
         return channel_username
 
-    async def _add_subbot_from_values(self, api_token: str, channel_username: str) -> str:
+    async def _add_subbot_from_values(self, api_token: str, channel_username: str) -> tuple[str, int | None]:
         channel_username = await self._normalize_channel_username(channel_username)
         try:
             channel_id = (await self.main_bot.get_chat(channel_username)).id
         except Exception:
             logger.error("channel not found: {}", channel_username)
-            return f"Канал {channel_username} не найден."
+            return f"Канал {channel_username} не найден.", None
 
         bot = await SubBot.create(
             main_bot_username=self.bot_info.username,
@@ -316,11 +388,11 @@ class MasterBot:
         )
         is_admin = await bot.check_admin(channel_id)
         if not is_admin:
-            return f"Сначала добавьте саббота в администраторы канала {channel_username}."
+            return f"Сначала добавьте саббота в администраторы канала {channel_username}.", None
 
         for item in await self.bots_database.get_bots_info():
             if item[1] == bot.bot_info.username.replace("@", ""):
-                return "Этот саббот уже привязан к каналу."
+                return "Этот саббот уже привязан к каналу.", None
 
         await self.bots_database.add_bots_info(
             {
@@ -331,7 +403,8 @@ class MasterBot:
         )
         await bot.run_bot()
         self.bots_work.append(bot)
-        return f"Саббот {bot.bot_info.username} подключен к {channel_username}."
+        editorial_channel = await self.editorial_actions.ensure_channel_for_tg_channel_id(channel_id)
+        return f"Саббот {bot.bot_info.username} подключен к {channel_username}.", editorial_channel.id
 
     async def _remove_subbot_from_values(self, username_bot: str, channel_id: int) -> str:
         await self.bots_database.delete_bots_info(
@@ -377,14 +450,35 @@ class MasterBot:
                 return getattr(bot, "channel_username", None)
         return None
 
+    def _channel_title_from_runtime(self, tg_channel_id: int) -> str | None:
+        for bot in self.bots_work:
+            if getattr(bot, "channel_id", None) == tg_channel_id:
+                return getattr(bot, "channel_title", None)
+        return None
+
+    @staticmethod
+    def _compose_channel_display_label(title: str | None, tag: str | None, short_code: str | None) -> str:
+        clean_title = (title or "").strip()
+        clean_tag = (tag or "").strip()
+        clean_short_code = (short_code or "").strip()
+
+        if clean_title and clean_tag:
+            return f"{clean_title} {clean_tag}"
+        if clean_title:
+            return clean_title
+        if clean_tag:
+            return clean_tag
+        if clean_short_code:
+            return clean_short_code
+        return "Канал"
+
     async def _get_channel_label(self, editorial_channel_id: int) -> str:
         channel = await self.editorial_actions.get_channel(editorial_channel_id)
         if channel is None:
             return f"Канал #{editorial_channel_id}"
+        runtime_title = self._channel_title_from_runtime(channel.tg_channel_id)
         runtime_label = self._channel_label_from_runtime(channel.tg_channel_id)
-        if runtime_label:
-            return runtime_label
-        return channel.title or channel.short_code or f"tg {channel.tg_channel_id}"
+        return self._compose_channel_display_label(runtime_title or channel.title, runtime_label, channel.short_code)
 
     def _weekday_label(self, weekday: int) -> str:
         return WEEKDAY_LABELS.get(weekday, str(weekday))
@@ -438,6 +532,80 @@ class MasterBot:
 
         return sorted(set(weekdays)), slot_times
 
+    def _parse_channel_setting_input(self, raw_value: str) -> tuple[str, str]:
+        text = raw_value.strip()
+        if not text:
+            raise ValueError("Пустой ввод")
+
+        parts = text.split(maxsplit=1)
+        if len(parts) != 2:
+            raise ValueError("Нужен формат: <параметр> <значение>")
+        return parts[0].strip(), parts[1].strip()
+
+    async def _send_channel_settings_prompt(self, chat_id: int, channel_id: int) -> None:
+        label = await self._get_channel_label(channel_id)
+        settings_snapshot = await self.editorial_actions.get_channel_settings_snapshot(channel_id)
+        lines = [
+            f"Изменение параметров для {label}.",
+            "",
+            "Отправьте одну строку в формате:",
+            "same_tag_cooldown_hours 24",
+            "",
+            "Для булевых полей используйте только true/false, yes/no, on/off или да/нет.",
+            "",
+            "Текущие доступные параметры:",
+        ]
+        lines.extend(
+            f"{field_name} = {self._format_channel_setting_value(value)}"
+            for field_name, value in settings_snapshot
+        )
+        await self.main_bot.send_message(chat_id, "\n".join(lines))
+
+    async def _send_channel_history_import_offer(self, chat_id: int, channel_id: int) -> None:
+        label = await self._get_channel_label(channel_id)
+        await self.main_bot.send_message(
+            chat_id,
+            (
+                f"Для {label} можно импортировать недавнюю историю канала.\n\n"
+                "Если в канале уже публиковались тексты, которые совпадают с пастами из базы, "
+                "бот запомнит это и не будет быстро переиспользовать такие пасты заново."
+            ),
+            reply_markup=build_channel_history_import_start_actions(channel_id),
+        )
+
+    @staticmethod
+    def _extract_forwarded_channel_payload(message: Message) -> tuple[int | None, int | None, datetime | None]:
+        source_chat_id = None
+        source_message_id = getattr(message, "forward_from_message_id", None)
+        original_published_at = None
+
+        forward_from_chat = getattr(message, "forward_from_chat", None)
+        if forward_from_chat is not None:
+            source_chat_id = getattr(forward_from_chat, "id", None)
+
+        forward_date = getattr(message, "forward_date", None)
+        if isinstance(forward_date, datetime):
+            original_published_at = forward_date if forward_date.tzinfo else forward_date.replace(tzinfo=timezone.utc)
+        elif isinstance(forward_date, int):
+            original_published_at = datetime.fromtimestamp(forward_date, tz=timezone.utc)
+
+        forward_origin = getattr(message, "forward_origin", None)
+        if forward_origin is not None:
+            origin_chat = getattr(forward_origin, "chat", None)
+            if origin_chat is not None and source_chat_id is None:
+                source_chat_id = getattr(origin_chat, "id", None)
+            origin_message_id = getattr(forward_origin, "message_id", None)
+            if source_message_id is None and origin_message_id is not None:
+                source_message_id = origin_message_id
+            origin_date = getattr(forward_origin, "date", None)
+            if original_published_at is None:
+                if isinstance(origin_date, datetime):
+                    original_published_at = origin_date if origin_date.tzinfo else origin_date.replace(tzinfo=timezone.utc)
+                elif isinstance(origin_date, int):
+                    original_published_at = datetime.fromtimestamp(origin_date, tz=timezone.utc)
+
+        return source_chat_id, source_message_id, original_published_at
+
     async def _show_channels_menu(self, chat_id: int) -> None:
         channels = await self.editorial_actions.list_channels()
         if not channels:
@@ -447,7 +615,11 @@ class MasterBot:
         buttons = []
         lines = ["Каналы:"]
         for item in channels:
-            label = self._channel_label_from_runtime(item.tg_channel_id) or item.title or item.short_code
+            label = self._compose_channel_display_label(
+                self._channel_title_from_runtime(item.tg_channel_id) or item.title,
+                self._channel_label_from_runtime(item.tg_channel_id),
+                item.short_code,
+            )
             buttons.append((item.id, label))
             lines.append(f"{item.id}. {label}")
 
@@ -455,6 +627,49 @@ class MasterBot:
             chat_id,
             "\n".join(lines),
             reply_markup=build_channels_actions(buttons),
+        )
+
+    @staticmethod
+    def _format_channel_setting_value(value: Any) -> str:
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return str(value)
+
+    async def _show_channel_menu(self, chat_id: int, channel_id: int) -> None:
+        channel = await self.editorial_actions.get_channel(channel_id)
+        if channel is None:
+            await self.main_bot.send_message(chat_id, f"Канал {channel_id} не найден.")
+            return
+
+        label = await self._get_channel_label(channel_id)
+        settings_snapshot = await self.editorial_actions.get_channel_settings_snapshot(channel_id)
+        summary_fields = {
+            "min_gap_minutes",
+            "max_posts_per_day",
+            "max_paste_per_day",
+            "same_tag_cooldown_hours",
+            "same_template_cooldown_hours",
+            "same_paste_cooldown_days",
+            "allow_generated",
+            "allow_pastes",
+        }
+        summary_lines = [
+            f"{field_name} = {self._format_channel_setting_value(value)}"
+            for field_name, value in settings_snapshot
+            if field_name in summary_fields
+        ]
+        text_lines = [
+            f"Канал: {label}",
+            f"tg_channel_id: {channel.tg_channel_id}",
+            f"timezone: {channel.timezone}",
+            "",
+            "Ключевые параметры:",
+            *summary_lines,
+        ]
+        await self.main_bot.send_message(
+            chat_id,
+            "\n".join(text_lines),
+            reply_markup=build_channel_actions(channel_id),
         )
 
     async def _show_channel_slots_menu(self, chat_id: int, channel_id: int) -> None:
@@ -466,19 +681,17 @@ class MasterBot:
         label = await self._get_channel_label(channel_id)
         slots = await self.editorial_actions.list_channel_slots(channel_id)
         slot_lines = [f"Слоты для {label}:"]
-        slot_buttons: list[tuple[int, str]] = []
         if not slots:
             slot_lines.append("Слотов пока нет.")
         else:
             for slot in slots:
                 slot_label = f"{self._weekday_label(slot.weekday)} {slot.slot_time.strftime('%H:%M')}"
                 slot_lines.append(f"#{slot.id} {slot_label}")
-                slot_buttons.append((slot.id, slot_label))
 
         await self.main_bot.send_message(
             chat_id,
             "\n".join(slot_lines),
-            reply_markup=build_channel_slots_actions(channel_id, slot_buttons),
+            reply_markup=build_channel_slots_actions(channel_id),
         )
 
     def _submission_moderation_allowed(self, status: str) -> bool:
@@ -813,7 +1026,8 @@ class MasterBot:
             return False
 
         action = state["action"]
-        self._clear_user_state(message.chat.id)
+        if action != "await_import_channel_history":
+            self._clear_user_state(message.chat.id)
         text_value = (message.text or message.caption or "").strip()
 
         if action == "await_add_moderator":
@@ -834,8 +1048,53 @@ class MasterBot:
                 await self.main_bot.send_message(message.chat.id, "Отправьте строку в формате: <api_token> @channel_username")
                 return True
             api_token, channel_username = parts
-            result_text = await self._add_subbot_from_values(api_token, channel_username)
+            result_text, channel_id = await self._add_subbot_from_values(api_token, channel_username)
             await self.main_bot.send_message(message.chat.id, result_text)
+            if channel_id is not None:
+                await self._send_channel_history_import_offer(message.chat.id, channel_id)
+            return True
+
+        if action == "await_import_channel_history":
+            channel_id = state["channel_id"]
+            source_chat_id, source_message_id, original_published_at = self._extract_forwarded_channel_payload(message)
+            channel = await self.editorial_actions.get_channel(channel_id)
+            if channel is None:
+                self._clear_user_state(message.chat.id)
+                await self.main_bot.send_message(message.chat.id, f"Канал {channel_id} не найден.")
+                return True
+            if source_chat_id is None or source_message_id is None:
+                await self.main_bot.send_message(
+                    message.chat.id,
+                    "Перешлите именно сообщение из нужного канала, а не скопированный текст.",
+                    reply_markup=build_channel_history_import_progress_actions(channel_id),
+                )
+                return True
+            if int(source_chat_id) != int(channel.tg_channel_id):
+                await self.main_bot.send_message(
+                    message.chat.id,
+                    "Это сообщение переслано не из выбранного канала. Перешлите пост именно из нужного канала.",
+                    reply_markup=build_channel_history_import_progress_actions(channel_id),
+                )
+                return True
+
+            import_result = await self.editorial_actions.import_channel_history_message(
+                channel_id=channel_id,
+                source_chat_id=int(source_chat_id),
+                source_message_id=int(source_message_id),
+                content_type=message.content_type or "text",
+                raw_text=(message.text or message.caption or "").strip() or None,
+                original_published_at=original_published_at,
+                imported_by=message.from_user.id if message.from_user else message.chat.id,
+            )
+
+            if import_result.duplicate:
+                state["history_duplicates"] = int(state.get("history_duplicates", 0)) + 1
+            elif import_result.saved:
+                state["history_saved"] = int(state.get("history_saved", 0)) + 1
+
+            if import_result.matched_paste_id is not None and not import_result.duplicate:
+                state["history_matches"] = int(state.get("history_matches", 0)) + 1
+
             return True
 
         if action == "await_add_slot":
@@ -876,6 +1135,29 @@ class MasterBot:
             await self._show_channel_slots_menu(message.chat.id, channel_id)
             return True
 
+        if action == "await_update_channel_setting":
+            channel_id = state["channel_id"]
+            try:
+                field_name, raw_setting_value = self._parse_channel_setting_input(text_value)
+                channel = await self.editorial_actions.update_channel_setting(
+                    channel_id=channel_id,
+                    field_name=field_name,
+                    raw_value=raw_setting_value,
+                )
+            except ValueError as exc:
+                await self.main_bot.send_message(
+                    message.chat.id,
+                    f"{exc}\n\nПример:\nsame_tag_cooldown_hours 24\nallow_pastes false",
+                )
+                await self._send_channel_settings_prompt(message.chat.id, channel_id)
+                return True
+            await self.main_bot.send_message(
+                message.chat.id,
+                f"Параметр {field_name} обновлён: {self._format_channel_setting_value(getattr(channel, field_name))}.",
+            )
+            await self._show_channel_menu(message.chat.id, channel_id)
+            return True
+
         if action == "await_add_paste":
             body_text = text_value
             if not body_text:
@@ -907,6 +1189,17 @@ class MasterBot:
                 await self.main_bot.send_message(message.chat.id, f"Не удалось отправить сообщение: {ex}")
                 return True
             await self.main_bot.send_message(message.chat.id, f"Ответ пользователю по сообщению {submission_id} отправлен.")
+            return True
+
+        if action == "await_sql_export":
+            if not text_value:
+                await self.main_bot.send_message(message.chat.id, "Нужен SQL-запрос.")
+                return True
+            await self._send_sql_export_result(
+                chat_id=message.chat.id,
+                query=text_value,
+                allow_mutating=bool(state.get("allow_mutating")),
+            )
             return True
 
         return False
@@ -993,8 +1286,10 @@ class MasterBot:
                 await self.main_bot.send_message(message.chat.id, "Формат команды: /add <token> @channel")
                 return
             _command, api_token, channel_username = parts
-            result_text = await self._add_subbot_from_values(api_token, channel_username)
+            result_text, channel_id = await self._add_subbot_from_values(api_token, channel_username)
             await self.main_bot.send_message(message.chat.id, result_text)
+            if channel_id is not None:
+                await self._send_channel_history_import_offer(message.chat.id, channel_id)
 
         @self.main_bot.message_handler(commands=["delete"])
         @filter_admin
@@ -1084,6 +1379,13 @@ class MasterBot:
                     case "db_export":
                         await self.main_bot.answer_callback_query(call.id)
                         await self._send_database_export(call.message.chat.id)
+                        return
+                    case "sql_export":
+                        await self.main_bot.answer_callback_query(call.id)
+                        await self._send_sql_export_prompt(
+                            chat_id=call.message.chat.id,
+                            allow_mutating=self._is_general_admin(call.from_user.id),
+                        )
                         return
                     case "admins":
                         if not self._is_general_admin(call.from_user.id):
@@ -1218,7 +1520,20 @@ class MasterBot:
 
             if data.startswith("channel:view:"):
                 channel_id = int(data.split(":")[-1])
+                await self._show_channel_menu(call.message.chat.id, channel_id)
+                await self.main_bot.answer_callback_query(call.id)
+                return
+
+            if data.startswith("channel:slots:"):
+                channel_id = int(data.split(":")[-1])
                 await self._show_channel_slots_menu(call.message.chat.id, channel_id)
+                await self.main_bot.answer_callback_query(call.id)
+                return
+
+            if data.startswith("channel:params:"):
+                channel_id = int(data.split(":")[-1])
+                self._set_user_state(call.message.chat.id, "await_update_channel_setting", channel_id=channel_id)
+                await self._send_channel_settings_prompt(call.message.chat.id, channel_id)
                 await self.main_bot.answer_callback_query(call.id)
                 return
 
@@ -1322,6 +1637,59 @@ class MasterBot:
                 _, _, username_bot, channel_id = data.split(":")
                 result_text = await self._remove_subbot_from_values(username_bot, int(channel_id))
                 await self.main_bot.send_message(call.message.chat.id, result_text)
+                await self.main_bot.answer_callback_query(call.id)
+                return
+
+            if data.startswith("channel_history:start:"):
+                channel_id = int(data.split(":")[-1])
+                self._set_user_state(
+                    call.message.chat.id,
+                    "await_import_channel_history",
+                    channel_id=channel_id,
+                    history_saved=0,
+                    history_matches=0,
+                    history_duplicates=0,
+                )
+                label = await self._get_channel_label(channel_id)
+                await self.main_bot.send_message(
+                    call.message.chat.id,
+                    (
+                        f"Импорт истории для {label} запущен.\n\n"
+                        "Теперь пересылайте сюда сообщения из этого канала. "
+                        "Когда закончите, нажмите 'Завершить импорт'."
+                    ),
+                    reply_markup=build_channel_history_import_progress_actions(channel_id),
+                )
+                await self.main_bot.answer_callback_query(call.id)
+                return
+
+            if data.startswith("channel_history:finish:"):
+                channel_id = int(data.split(":")[-1])
+                state = self.user_states.get(call.message.chat.id, {})
+                saved = int(state.get("history_saved", 0))
+                matches = int(state.get("history_matches", 0))
+                duplicates = int(state.get("history_duplicates", 0))
+                if state.get("action") == "await_import_channel_history" and state.get("channel_id") == channel_id:
+                    self._clear_user_state(call.message.chat.id)
+                label = await self._get_channel_label(channel_id)
+                await self.main_bot.send_message(
+                    call.message.chat.id,
+                    (
+                        f"Импорт истории для {label} завершён.\n"
+                        f"Сохранено сообщений: {saved}\n"
+                        f"Найдено совпадений с пастами: {matches}\n"
+                        f"Пропущено дублей: {duplicates}"
+                    ),
+                )
+                await self.main_bot.answer_callback_query(call.id)
+                return
+
+            if data.startswith("channel_history:cancel:"):
+                channel_id = int(data.split(":")[-1])
+                state = self.user_states.get(call.message.chat.id, {})
+                if state.get("action") == "await_import_channel_history" and state.get("channel_id") == channel_id:
+                    self._clear_user_state(call.message.chat.id)
+                await self.main_bot.send_message(call.message.chat.id, "Импорт истории отменён.")
                 await self.main_bot.answer_callback_query(call.id)
                 return
 

@@ -113,7 +113,9 @@ class SubBot:
             scope=BotCommandScopeAllGroupChats(),
         )
         self.bot_info = await self.sup_bot.get_me()
-        self.channel_id = (await self.sup_bot.get_chat(self.channel_username)).id
+        channel_chat = await self.sup_bot.get_chat(self.channel_username)
+        self.channel_id = channel_chat.id
+        self.channel_title = getattr(channel_chat, "title", None)
         self.chat_suggest = (await self.admins_database.get_chat_admins(bot=self.bot_info.id))
         logger.info(f"{self.chat_suggest}")
         users = await self.user_database.get_user_data(bot_username=self.bot_info.username)

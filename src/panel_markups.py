@@ -35,6 +35,7 @@ def build_main_panel(is_general_admin: bool) -> InlineKeyboardMarkup:
 def build_extra_panel() -> InlineKeyboardMarkup:
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(InlineKeyboardButton("\u0412\u044b\u0433\u0440\u0443\u0437\u043a\u0430 \u0411\u0414", callback_data="panel:db_export"))
+    markup.add(InlineKeyboardButton("SQL -> CSV", callback_data="panel:sql_export"))
     markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u0432 \u043f\u0430\u043d\u0435\u043b\u044c", callback_data="panel:main"))
     return markup
 
@@ -129,14 +130,25 @@ def build_channels_actions(channel_buttons: list[tuple[int, str]]) -> InlineKeyb
     return markup
 
 
-def build_channel_slots_actions(channel_id: int, slot_buttons: list[tuple[int, str]]) -> InlineKeyboardMarkup:
+def build_channel_actions(channel_id: int) -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0430 \u0441\u043b\u043e\u0442\u043e\u0432", callback_data=f"channel:slots:{channel_id}"),
+        InlineKeyboardButton("\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0435 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432", callback_data=f"channel:params:{channel_id}"),
+    )
+    markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u043a \u043a\u0430\u043d\u0430\u043b\u0430\u043c", callback_data="panel:channels"))
+    markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u0432 \u043f\u0430\u043d\u0435\u043b\u044c", callback_data="panel:main"))
+    return markup
+
+
+def build_channel_slots_actions(channel_id: int) -> InlineKeyboardMarkup:
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(
         InlineKeyboardButton("\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u0441\u043b\u043e\u0442", callback_data=f"channel:add_slot:{channel_id}"),
         InlineKeyboardButton("\u0423\u0434\u0430\u043b\u0438\u0442\u044c \u0441\u043b\u043e\u0442\u044b", callback_data=f"channel:delete_slots:{channel_id}"),
         InlineKeyboardButton("\u0421\u043e\u0437\u0434\u0430\u0442\u044c \u0441\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u044b\u0435 \u0441\u043b\u043e\u0442\u044b", callback_data=f"channel:seed:{channel_id}"),
     )
-    markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u043a \u043a\u0430\u043d\u0430\u043b\u0430\u043c", callback_data="panel:channels"))
+    markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u043a \u043a\u0430\u043d\u0430\u043b\u0443", callback_data=f"channel:view:{channel_id}"))
     markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u0432 \u043f\u0430\u043d\u0435\u043b\u044c", callback_data="panel:main"))
     return markup
 
@@ -175,4 +187,22 @@ def build_subbot_menu(subbot_buttons: list[tuple[str, int]]) -> InlineKeyboardMa
     for username, channel_id in subbot_buttons:
         markup.add(InlineKeyboardButton(f"\u0423\u0434\u0430\u043b\u0438\u0442\u044c @{username}", callback_data=f"subbot:remove:{username}:{channel_id}"))
     markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u0432 \u043f\u0430\u043d\u0435\u043b\u044c", callback_data="panel:main"))
+    return markup
+
+
+def build_channel_history_import_start_actions(channel_id: int) -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("\u0418\u043c\u043f\u043e\u0440\u0442 \u0438\u0441\u0442\u043e\u0440\u0438\u0438 \u043a\u0430\u043d\u0430\u043b\u0430", callback_data=f"channel_history:start:{channel_id}")
+    )
+    markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u0432 \u043f\u0430\u043d\u0435\u043b\u044c", callback_data="panel:main"))
+    return markup
+
+
+def build_channel_history_import_progress_actions(channel_id: int) -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("\u0417\u0430\u0432\u0435\u0440\u0448\u0438\u0442\u044c \u0438\u043c\u043f\u043e\u0440\u0442", callback_data=f"channel_history:finish:{channel_id}"),
+        InlineKeyboardButton("\u041e\u0442\u043c\u0435\u043d\u0438\u0442\u044c \u0438\u043c\u043f\u043e\u0440\u0442", callback_data=f"channel_history:cancel:{channel_id}"),
+    )
     return markup

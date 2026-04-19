@@ -1,4 +1,5 @@
 from src.editorial.models.channel import Channel, ChannelSlot
+from src.editorial.models.channel_history import ChannelHistoryMessage
 from src.editorial.models.content import ContentItem, ContentItemSource
 from src.editorial.models.enums import (
     ContentItemStatus,
@@ -17,6 +18,7 @@ from src.editorial.models.submission import Submission
 
 __all__ = [
     "Channel",
+    "ChannelHistoryMessage",
     "ChannelSlot",
     "ContentItem",
     "ContentItemSource",
