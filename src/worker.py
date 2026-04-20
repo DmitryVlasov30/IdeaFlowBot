@@ -13,6 +13,8 @@ from src.core_database.database import (CrudChatAdmins, CrudBannedUser,
                                         CrudServiceMessage,
                                         CrudUserData, CrudDelayedPosts,
                                         CrudAnonymMessage, CrudAdvertising)
+from src.editorial.models.enums import SubmissionStatus
+from src.editorial.services.legacy_moderation_sync import LegacyModerationSyncService
 from src.utils import Utils, filter_chats
 from config import settings
 from src.markups import MarkupButton
@@ -27,7 +29,8 @@ class SubBot:
             hello_msg: str,
             ban_usr_msg: str,
             send_post_msg: str,
-            callback_adv_action
+            callback_adv_action,
+            callback_new_submission=None,
     ):
         self.polling_task = None
         self.bot_info = None
@@ -37,6 +40,7 @@ class SubBot:
         self.send_post_msg = send_post_msg
 
         self.callback_adv_action = callback_adv_action
+        self.callback_new_submission = callback_new_submission
 
         self.main_bot_username = main_bot_username
 
@@ -58,6 +62,7 @@ class SubBot:
         self.delayed_database = CrudDelayedPosts()
         self.anonym_message_database = CrudAnonymMessage()
         self.advertising_database = CrudAdvertising()
+        self.legacy_moderation_sync = LegacyModerationSyncService()
 
         self.token = api_token_bot
         self.channel_username = channel_username
@@ -79,7 +84,8 @@ class SubBot:
                      ban_usr_msg: str,
                      send_post_msg: str,
                      main_bot_username: str,
-                     callback_adv_action
+                     callback_adv_action,
+                     callback_new_submission=None,
                      ):
         self = cls(
             main_bot_username,
@@ -88,7 +94,8 @@ class SubBot:
             hello_msg,
             ban_usr_msg,
             send_post_msg,
-            callback_adv_action
+            callback_adv_action,
+            callback_new_submission,
         )
 
         logger.info("init")
@@ -365,6 +372,15 @@ class SubBot:
                 review_chat_id=self.chat_suggest,
                 review_message_id=getattr(review_message, "message_id", None),
             )
+            if self.callback_new_submission is not None and review_message is not None:
+                try:
+                    await self.callback_new_submission(
+                        channel_tg_id=self.channel_id,
+                        review_chat_id=self.chat_suggest,
+                        review_message_id=review_message.message_id,
+                    )
+                except Exception as ex:
+                    logger.error("Failed to send moderator notifications: {}", ex)
 
         async def shift_timer():
             interval_lst = list(map(
@@ -464,6 +480,11 @@ class SubBot:
             match call.data.split(";")[0]:
                 case "banned_user":
                     await buttons_func.add_ban_user(call, self.ban_database, self.channel_id, self.bot_info, self.chat_suggest)
+                    await self._sync_editorial_submission_status(
+                        review_message_id=call.message.message_id,
+                        status=SubmissionStatus.REJECTED,
+                        moderator_note="Handled in legacy moderation: banned",
+                    )
                 case "add_info":
                     await utils_func.save_admin_action(call)
                     await buttons_func.add_info(call)
@@ -488,14 +509,25 @@ class SubBot:
                         info_sender,
                         self.bot_info.username,
                     )
-                    await buttons_func.send_suggest(
+                    legacy_sent = await buttons_func.send_suggest(
                         call,
                         self.channel_username,
                         self.channel_id,
                         is_anon,
                     )
+                    if legacy_sent:
+                        await self._sync_editorial_submission_status(
+                            review_message_id=call.message.message_id,
+                            status=SubmissionStatus.CONTENT_CREATED,
+                            moderator_note="Handled in legacy moderation: approved",
+                        )
                 case "reject":
                     await buttons_func.reject_post(call)
+                    await self._sync_editorial_submission_status(
+                        review_message_id=call.message.message_id,
+                        status=SubmissionStatus.REJECTED,
+                        moderator_note="Handled in legacy moderation: rejected",
+                    )
                 case "delayed_button":
                     if (call.message.text is not None and "Отложено" in call.message.text) or (call.message.caption is not None and "Отложено" in call.message.caption):
                         del self.delayed_message[call.message.id]
@@ -529,6 +561,11 @@ class SubBot:
                         self.bot_info.username,
                     )
                     await save_delayed_post(call)
+                    await self._sync_editorial_submission_status(
+                        review_message_id=call.message.message_id,
+                        status=SubmissionStatus.CONTENT_CREATED,
+                        moderator_note="Handled in legacy moderation: delayed",
+                    )
                     logger.debug(call.data)
                     await buttons_func.delayed_buttons_times(
                         call,
@@ -541,6 +578,11 @@ class SubBot:
                     })
                     del self.delayed_message[call.message.id]
                     await buttons_func.reject_post(call)
+                    await self._sync_editorial_submission_status(
+                        review_message_id=call.message.message_id,
+                        status=SubmissionStatus.REJECTED,
+                        moderator_note="Handled in legacy moderation: delayed rejected",
+                    )
                 case "anonym_button":
                     data = {
                         "message_id": call.message.message_id,
@@ -576,6 +618,25 @@ class SubBot:
             return True
         except ApiTelegramException:
             return False
+
+    async def _sync_editorial_submission_status(
+        self,
+        review_message_id: int,
+        status: SubmissionStatus,
+        moderator_note: str,
+    ) -> None:
+        if self.chat_suggest is None:
+            return
+        try:
+            await self.legacy_moderation_sync.set_status_for_review_message(
+                channel_tg_id=self.channel_id,
+                review_chat_id=self.chat_suggest,
+                review_message_id=review_message_id,
+                status=status,
+                moderator_note=moderator_note,
+            )
+        except Exception as ex:
+            logger.error("Failed to sync legacy moderation action to editorial submission: {}", ex)
 
     async def stop_bot(self) -> None:
         if self.polling_task:

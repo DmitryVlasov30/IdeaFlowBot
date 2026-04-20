@@ -17,6 +17,7 @@ class Channel(EditorialBase, BaseIdMixin, TimestampMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     timezone: Mapped[str] = mapped_column(String(64), default="Europe/Moscow", nullable=False)
     min_gap_minutes: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    slot_jitter_minutes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     max_posts_per_day: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
     max_generated_per_day: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     max_paste_per_day: Mapped[int] = mapped_column(Integer, default=10, nullable=False)

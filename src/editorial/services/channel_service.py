@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from datetime import time
+from calendar import monthrange
+from datetime import datetime, time, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.editorial.models.ad_blackout import ChannelAdBlackout
 from src.editorial.models.channel import Channel, ChannelSlot
 
 
@@ -16,6 +19,7 @@ class ChannelService:
         "is_active",
         "timezone",
         "min_gap_minutes",
+        "slot_jitter_minutes",
         "max_posts_per_day",
         "max_generated_per_day",
         "max_paste_per_day",
@@ -34,6 +38,7 @@ class ChannelService:
         "is_active": "bool",
         "timezone": "str",
         "min_gap_minutes": "int",
+        "slot_jitter_minutes": "int",
         "max_posts_per_day": "int",
         "max_generated_per_day": "int",
         "max_paste_per_day": "int",
@@ -141,6 +146,188 @@ class ChannelService:
             await session.delete(slot)
         await session.commit()
         return slots
+
+    async def create_ad_blackout(
+        self,
+        session: AsyncSession,
+        channel_id: int,
+        day_of_month: int,
+        start_time: str,
+        end_time: str,
+        created_by: int | None = None,
+    ) -> ChannelAdBlackout:
+        channel = await session.get(Channel, channel_id)
+        if channel is None:
+            raise ValueError(f"Channel {channel_id} not found")
+
+        if day_of_month < 1 or day_of_month > 31:
+            raise ValueError("День месяца должен быть числом от 1 до 31.")
+
+        start_value = self._parse_time_value(start_time)
+        end_value = self._parse_time_value(end_time)
+
+        tz = ZoneInfo(channel.timezone)
+        local_now = datetime.now(timezone.utc).astimezone(tz)
+        starts_at_local, ends_at_local = self._resolve_ad_blackout_window(
+            local_now=local_now,
+            day_of_month=day_of_month,
+            start_value=start_value,
+            end_value=end_value,
+        )
+
+        blackout = ChannelAdBlackout(
+            channel_id=channel_id,
+            starts_at=starts_at_local.astimezone(timezone.utc),
+            ends_at=ends_at_local.astimezone(timezone.utc),
+            created_by=created_by,
+            reason="advertising",
+        )
+        existing = await session.scalar(
+            select(ChannelAdBlackout)
+            .where(
+                ChannelAdBlackout.channel_id == channel_id,
+                ChannelAdBlackout.starts_at == blackout.starts_at,
+                ChannelAdBlackout.ends_at == blackout.ends_at,
+            )
+            .limit(1)
+        )
+        if existing is not None:
+            return existing
+
+        session.add(blackout)
+        await session.commit()
+        await session.refresh(blackout)
+        return blackout
+
+    async def list_upcoming_ad_blackouts(
+        self,
+        session: AsyncSession,
+        channel_id: int,
+        limit: int = 5,
+    ) -> list[ChannelAdBlackout]:
+        now = datetime.now(timezone.utc)
+        stmt = (
+            select(ChannelAdBlackout)
+            .where(
+                ChannelAdBlackout.channel_id == channel_id,
+                ChannelAdBlackout.ends_at > now,
+            )
+            .order_by(ChannelAdBlackout.starts_at.asc())
+            .limit(limit)
+        )
+        return list((await session.execute(stmt)).scalars().all())
+
+    async def delete_ad_blackout(
+        self,
+        session: AsyncSession,
+        channel_id: int,
+        day_of_month: int,
+        start_time: str,
+        end_time: str,
+    ) -> ChannelAdBlackout:
+        channel = await session.get(Channel, channel_id)
+        if channel is None:
+            raise ValueError(f"Channel {channel_id} not found")
+
+        if day_of_month < 1 or day_of_month > 31:
+            raise ValueError("День месяца должен быть числом от 1 до 31.")
+
+        start_value = self._parse_time_value(start_time)
+        end_value = self._parse_time_value(end_time)
+        tz = ZoneInfo(channel.timezone)
+        local_now = datetime.now(timezone.utc).astimezone(tz)
+        starts_at_local, ends_at_local = self._resolve_ad_blackout_window(
+            local_now=local_now,
+            day_of_month=day_of_month,
+            start_value=start_value,
+            end_value=end_value,
+        )
+        starts_at = starts_at_local.astimezone(timezone.utc)
+        ends_at = ends_at_local.astimezone(timezone.utc)
+
+        blackout = await session.scalar(
+            select(ChannelAdBlackout)
+            .where(
+                ChannelAdBlackout.channel_id == channel_id,
+                ChannelAdBlackout.starts_at == starts_at,
+                ChannelAdBlackout.ends_at == ends_at,
+            )
+            .limit(1)
+        )
+        if blackout is None:
+            raise ValueError("Такое рекламное окно для канала не найдено.")
+
+        await session.delete(blackout)
+        await session.commit()
+        return blackout
+
+    async def is_channel_in_ad_blackout(
+        self,
+        session: AsyncSession,
+        channel_id: int,
+        when: datetime,
+    ) -> bool:
+        when_utc = when.astimezone(timezone.utc)
+        count = await session.scalar(
+            select(ChannelAdBlackout.id)
+            .where(
+                ChannelAdBlackout.channel_id == channel_id,
+                ChannelAdBlackout.starts_at <= when_utc,
+                ChannelAdBlackout.ends_at > when_utc,
+            )
+            .limit(1)
+        )
+        return count is not None
+
+    @staticmethod
+    def _parse_time_value(raw_value: str) -> time:
+        try:
+            return datetime.strptime(raw_value.strip(), "%H:%M").time()
+        except ValueError as exc:
+            raise ValueError(f"Время '{raw_value}' должно быть в формате HH:MM.") from exc
+
+    def _resolve_ad_blackout_window(
+        self,
+        *,
+        local_now: datetime,
+        day_of_month: int,
+        start_value: time,
+        end_value: time,
+    ) -> tuple[datetime, datetime]:
+        year = local_now.year
+        month = local_now.month
+        for month_offset in range(13):
+            candidate_year, candidate_month = self._add_months(year, month, month_offset)
+            if day_of_month > monthrange(candidate_year, candidate_month)[1]:
+                continue
+
+            starts_at = datetime(
+                candidate_year,
+                candidate_month,
+                day_of_month,
+                start_value.hour,
+                start_value.minute,
+                tzinfo=local_now.tzinfo,
+            )
+            ends_at = datetime(
+                candidate_year,
+                candidate_month,
+                day_of_month,
+                end_value.hour,
+                end_value.minute,
+                tzinfo=local_now.tzinfo,
+            )
+            if ends_at <= starts_at:
+                ends_at += timedelta(days=1)
+            if ends_at > local_now:
+                return starts_at, ends_at
+
+        raise ValueError("Не удалось подобрать будущую дату для рекламного окна.")
+
+    @staticmethod
+    def _add_months(year: int, month: int, offset: int) -> tuple[int, int]:
+        month_index = (year * 12 + (month - 1)) + offset
+        return month_index // 12, month_index % 12 + 1
 
     def editable_settings_snapshot(self, channel: Channel) -> list[tuple[str, Any]]:
         return [(field_name, getattr(channel, field_name)) for field_name in self.EDITABLE_SETTINGS_ORDER]

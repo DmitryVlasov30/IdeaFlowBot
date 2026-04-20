@@ -176,6 +176,80 @@ class LegacyImporter:
         await session.flush()
         return created
 
+    def _build_submission_payload(self, row: LegacySenderRow, channel_id: int) -> dict:
+        raw_text = row.text_post or ""
+        cleaned_text = clean_text(raw_text)
+        normalized_text = normalize_text(cleaned_text)
+        text_hash = compute_text_hash(cleaned_text)
+        if not normalized_text:
+            if cleaned_text and (row.content_type or "text") == "text":
+                normalized_text = cleaned_text
+            else:
+                normalized_text = self._build_media_fingerprint(row)
+        if text_hash is None:
+            if cleaned_text and (row.content_type or "text") == "text":
+                text_hash = compute_raw_text_hash(cleaned_text) or ""
+            else:
+                text_hash = compute_text_hash(normalized_text) or ""
+        created_at = datetime.fromtimestamp(row.timestamp, tz=timezone.utc)
+
+        return {
+            "legacy_source": "sender_info",
+            "legacy_row_id": row.id,
+            "channel_id": channel_id,
+            "source_user_id": row.user_id,
+            "source_message_id": row.message_id,
+            "source_chat_id": row.chat_id,
+            "content_type": (row.content_type or "text"),
+            "media_group_id": row.media_group_id or None,
+            "bot_username": row.bot_username,
+            "username": row.username or None,
+            "first_name": row.first_name or None,
+            "raw_text": raw_text or None,
+            "cleaned_text": cleaned_text or None,
+            "normalized_text": normalized_text or None,
+            "text_hash": text_hash,
+            "detected_tags": detect_tags(cleaned_text),
+            "language_code": detect_language_code(cleaned_text),
+            "is_candidate_for_generation": len(cleaned_text) >= settings.minimum_submission_length,
+            "is_candidate_for_paste": len(cleaned_text) >= settings.minimum_submission_length,
+            "created_at": created_at,
+        }
+
+    async def ensure_submission_for_legacy_row(
+        self,
+        session: AsyncSession,
+        row: LegacySenderRow,
+    ) -> Submission | None:
+        if row.id is None or self._is_service_moderation_copy(row):
+            return None
+
+        existing = await session.scalar(
+            select(Submission)
+            .where(
+                Submission.legacy_source == "sender_info",
+                Submission.legacy_row_id == row.id,
+            )
+            .limit(1)
+        )
+        if existing is not None:
+            return existing
+
+        await self.sync_channels(session)
+        channel_id = await session.scalar(
+            select(Channel.id)
+            .where(Channel.tg_channel_id == row.channel_id)
+            .limit(1)
+        )
+        if channel_id is None:
+            logger.warning("Skipping legacy row {} because channel {} is unknown", row.id, row.channel_id)
+            return None
+
+        submission = Submission(**self._build_submission_payload(row, channel_id))
+        session.add(submission)
+        await session.flush()
+        return submission
+
     async def import_new(self, session: AsyncSession, limit: int | None = None) -> ImportLegacyResult:
         result = ImportLegacyResult()
         result.channels_created = await self.sync_channels(session)
@@ -224,44 +298,7 @@ class LegacyImporter:
                 result.skipped_duplicates += 1
                 continue
 
-            raw_text = row.text_post or ""
-            cleaned_text = clean_text(raw_text)
-            normalized_text = normalize_text(cleaned_text)
-            text_hash = compute_text_hash(cleaned_text)
-            if not normalized_text:
-                if cleaned_text and (row.content_type or "text") == "text":
-                    normalized_text = cleaned_text
-                else:
-                    normalized_text = self._build_media_fingerprint(row)
-            if text_hash is None:
-                if cleaned_text and (row.content_type or "text") == "text":
-                    text_hash = compute_raw_text_hash(cleaned_text) or ""
-                else:
-                    text_hash = compute_text_hash(normalized_text) or ""
-            created_at = datetime.fromtimestamp(row.timestamp, tz=timezone.utc)
-
-            submission = Submission(
-                legacy_source="sender_info",
-                legacy_row_id=row.id,
-                channel_id=channels[row.channel_id],
-                source_user_id=row.user_id,
-                source_message_id=row.message_id,
-                source_chat_id=row.chat_id,
-                content_type=(row.content_type or "text"),
-                media_group_id=row.media_group_id or None,
-                bot_username=row.bot_username,
-                username=row.username or None,
-                first_name=row.first_name or None,
-                raw_text=raw_text or None,
-                cleaned_text=cleaned_text or None,
-                normalized_text=normalized_text or None,
-                text_hash=text_hash,
-                detected_tags=detect_tags(cleaned_text),
-                language_code=detect_language_code(cleaned_text),
-                is_candidate_for_generation=len(cleaned_text) >= settings.minimum_submission_length,
-                is_candidate_for_paste=len(cleaned_text) >= settings.minimum_submission_length,
-                created_at=created_at,
-            )
+            submission = Submission(**self._build_submission_payload(row, channels[row.channel_id]))
             session.add(submission)
             result.imported += 1
 

@@ -1,17 +1,21 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Iterable
 
-from sqlalchemy import or_, select
+from sqlalchemy import delete as sql_delete, or_, select
 from telebot.async_telebot import AsyncTeleBot
 
 from src.core_database.database import CrudBannedUser
+from src.core_database.models.db_helper import db_helper as legacy_db_helper
+from src.core_database.models.sender_info import SenderData
 from src.editorial.db.session import session_factory
 from src.editorial.models.channel import Channel
 from src.editorial.models.content import ContentItem
-from src.editorial.models.enums import ContentItemStatus, PasteStatus, PublicationStatus, ReviewDecision, SubmissionStatus
+from src.editorial.models.enums import ContentItemStatus, ContentSourceType, PasteStatus, PublicationStatus, ReviewDecision, SubmissionStatus
+from src.editorial.models.moderation_subscription import ModerationChannelSubscription
+from src.editorial.models.notification import NotificationSubscription
 from src.editorial.models.paste import PasteLibrary
 from src.editorial.models.publication import PublicationLog
 from src.editorial.models.submission import Submission
@@ -23,6 +27,7 @@ from src.editorial.services.moderation import ModerationService
 from src.editorial.services.paste_service import PasteService
 from src.editorial.services.publisher import PublisherService
 from src.editorial.services.scheduler import SchedulerService
+from src.editorial.utils.text import clean_text, compute_raw_text_hash, compute_text_hash, detect_tags, normalize_text, pick_primary_tag
 
 
 @dataclass(slots=True)
@@ -44,6 +49,17 @@ class SubmissionBanResult:
     username: str | None
     channel_tg_id: int
     already_banned: bool
+
+
+@dataclass(slots=True)
+class ManualChannelMessageResult:
+    requested: int = 0
+    sent: int = 0
+    blocked: int = 0
+    failed: int = 0
+    content_item_ids: list[int] = field(default_factory=list)
+    publication_log_ids: list[int] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
 
 
 class TelegramEditorialActions:
@@ -71,6 +87,114 @@ class TelegramEditorialActions:
         async with session_factory() as session:
             return await self.channel_service.get_channel(session, channel_id)
 
+    async def is_channel_notifications_enabled(self, channel_id: int, user_id: int) -> bool:
+        async with session_factory() as session:
+            subscription = await session.scalar(
+                select(NotificationSubscription)
+                .where(
+                    NotificationSubscription.channel_id == channel_id,
+                    NotificationSubscription.user_id == user_id,
+                )
+                .limit(1)
+            )
+            return subscription is not None
+
+    async def toggle_channel_notifications(self, channel_id: int, user_id: int) -> bool:
+        async with session_factory() as session:
+            subscription = await session.scalar(
+                select(NotificationSubscription)
+                .where(
+                    NotificationSubscription.channel_id == channel_id,
+                    NotificationSubscription.user_id == user_id,
+                )
+                .limit(1)
+            )
+            if subscription is None:
+                session.add(
+                    NotificationSubscription(
+                        channel_id=channel_id,
+                        user_id=user_id,
+                    )
+                )
+                await session.commit()
+                return True
+
+            await session.delete(subscription)
+            await session.commit()
+            return False
+
+    async def is_channel_moderation_feed_enabled(self, channel_id: int, user_id: int) -> bool:
+        async with session_factory() as session:
+            subscription = await session.scalar(
+                select(ModerationChannelSubscription)
+                .where(
+                    ModerationChannelSubscription.channel_id == channel_id,
+                    ModerationChannelSubscription.user_id == user_id,
+                )
+                .limit(1)
+            )
+            return subscription is not None
+
+    async def toggle_channel_moderation_feed(self, channel_id: int, user_id: int) -> bool:
+        async with session_factory() as session:
+            subscription = await session.scalar(
+                select(ModerationChannelSubscription)
+                .where(
+                    ModerationChannelSubscription.channel_id == channel_id,
+                    ModerationChannelSubscription.user_id == user_id,
+                )
+                .limit(1)
+            )
+            if subscription is None:
+                session.add(
+                    ModerationChannelSubscription(
+                        channel_id=channel_id,
+                        user_id=user_id,
+                    )
+                )
+                await session.commit()
+                return True
+
+            await session.delete(subscription)
+            await session.commit()
+            return False
+
+    async def list_user_moderation_feed_channel_ids(self, user_id: int) -> list[int]:
+        async with session_factory() as session:
+            return [
+                int(channel_id)
+                for channel_id in (
+                    await session.execute(
+                        select(ModerationChannelSubscription.channel_id)
+                        .where(ModerationChannelSubscription.user_id == user_id)
+                        .order_by(ModerationChannelSubscription.channel_id.asc())
+                    )
+                ).scalars().all()
+            ]
+
+    async def list_user_moderation_feed_channels(self, user_id: int) -> list[Channel]:
+        async with session_factory() as session:
+            stmt = (
+                select(Channel)
+                .join(ModerationChannelSubscription, ModerationChannelSubscription.channel_id == Channel.id)
+                .where(ModerationChannelSubscription.user_id == user_id)
+                .order_by(Channel.id.asc())
+            )
+            return list((await session.execute(stmt)).scalars().all())
+
+    async def list_channel_notification_user_ids(self, channel_id: int) -> list[int]:
+        async with session_factory() as session:
+            return [
+                int(user_id)
+                for user_id in (
+                    await session.execute(
+                        select(NotificationSubscription.user_id)
+                        .where(NotificationSubscription.channel_id == channel_id)
+                        .order_by(NotificationSubscription.user_id.asc())
+                    )
+                ).scalars().all()
+            ]
+
     async def ensure_channel_for_tg_channel_id(self, tg_channel_id: int) -> Channel:
         async with session_factory() as session:
             await self.importer.sync_channels(session)
@@ -81,6 +205,30 @@ class TelegramEditorialActions:
                 raise ValueError(f"Channel with tg id {tg_channel_id} not found")
             await session.commit()
             return channel
+
+    async def ensure_submission_for_review_message(
+        self,
+        *,
+        channel_tg_id: int,
+        review_chat_id: int,
+        review_message_id: int,
+    ) -> Submission | None:
+        async with session_factory() as session:
+            row = await self.legacy_reader.find_sender_row_by_review_message(
+                channel_id=channel_tg_id,
+                review_chat_id=review_chat_id,
+                review_message_id=review_message_id,
+            )
+            if row is None:
+                return None
+
+            submission = await self.importer.ensure_submission_for_legacy_row(session, row)
+            if submission is None:
+                return None
+
+            await session.commit()
+            await session.refresh(submission)
+            return submission
 
     async def list_channel_slots(self, channel_id: int):
         async with session_factory() as session:
@@ -119,6 +267,50 @@ class TelegramEditorialActions:
                 weekdays=list(weekdays),
             )
             return len(removed)
+
+    async def create_channel_ad_blackout(
+        self,
+        *,
+        channel_id: int,
+        day_of_month: int,
+        start_time: str,
+        end_time: str,
+        created_by: int | None = None,
+    ):
+        async with session_factory() as session:
+            return await self.channel_service.create_ad_blackout(
+                session=session,
+                channel_id=channel_id,
+                day_of_month=day_of_month,
+                start_time=start_time,
+                end_time=end_time,
+                created_by=created_by,
+            )
+
+    async def list_channel_ad_blackouts(self, channel_id: int, limit: int = 5):
+        async with session_factory() as session:
+            return await self.channel_service.list_upcoming_ad_blackouts(
+                session=session,
+                channel_id=channel_id,
+                limit=limit,
+            )
+
+    async def delete_channel_ad_blackout(
+        self,
+        *,
+        channel_id: int,
+        day_of_month: int,
+        start_time: str,
+        end_time: str,
+    ):
+        async with session_factory() as session:
+            return await self.channel_service.delete_ad_blackout(
+                session=session,
+                channel_id=channel_id,
+                day_of_month=day_of_month,
+                start_time=start_time,
+                end_time=end_time,
+            )
 
     async def update_channel_setting(self, channel_id: int, field_name: str, raw_value: str) -> Channel:
         async with session_factory() as session:
@@ -162,7 +354,7 @@ class TelegramEditorialActions:
                 imported_by=imported_by,
             )
 
-    async def list_pending_submissions(self) -> list[Submission]:
+    async def list_pending_submissions(self, user_id: int | None = None) -> list[Submission]:
         async with session_factory() as session:
             stmt = (
                 select(Submission)
@@ -173,6 +365,19 @@ class TelegramEditorialActions:
                 .order_by(Submission.created_at.asc())
                 .limit(50)
             )
+            if user_id is not None:
+                selected_channel_ids = [
+                    int(channel_id)
+                    for channel_id in (
+                        await session.execute(
+                            select(ModerationChannelSubscription.channel_id)
+                            .where(ModerationChannelSubscription.user_id == user_id)
+                            .order_by(ModerationChannelSubscription.channel_id.asc())
+                        )
+                    ).scalars().all()
+                ]
+                if selected_channel_ids:
+                    stmt = stmt.where(Submission.channel_id.in_(selected_channel_ids))
             items = list((await session.execute(stmt)).scalars().all())
             return self.moderation.collapse_media_groups(items)
 
@@ -184,6 +389,28 @@ class TelegramEditorialActions:
     async def get_submission(self, submission_id: int) -> Submission | None:
         async with session_factory() as session:
             return await session.get(Submission, submission_id)
+
+    async def delete_submission(self, submission_id: int) -> int:
+        async with session_factory() as session:
+            submission = await session.get(Submission, submission_id)
+            if submission is None:
+                raise ValueError(f"Submission {submission_id} not found")
+
+            related_submissions = await self.moderation.get_related_submissions(session, submission)
+            legacy_row_ids = [item.legacy_row_id for item in related_submissions if item.legacy_row_id is not None]
+            deleted_count = len(related_submissions)
+
+            for item in related_submissions:
+                await session.delete(item)
+            await session.commit()
+
+        if legacy_row_ids:
+            async with legacy_db_helper.engine.begin() as conn:
+                await conn.execute(
+                    sql_delete(SenderData).where(SenderData.id.in_(legacy_row_ids))
+                )
+
+        return deleted_count
 
     async def set_submission_anonymous(self, submission_id: int, is_anonymous: bool) -> Submission:
         async with session_factory() as session:
@@ -279,6 +506,14 @@ class TelegramEditorialActions:
 
     async def publish_submission_now(self, submission_id: int, reviewer_id: int) -> PublicationLog:
         async with session_factory() as session:
+            submission = await session.get(Submission, submission_id)
+            if submission is None:
+                raise ValueError(f"Submission {submission_id} not found")
+            now = datetime.now(timezone.utc)
+            if await self.channel_service.is_channel_in_ad_blackout(session, submission.channel_id, now):
+                raise ValueError(
+                    "Сейчас для этого канала активно рекламное окно. Publish now временно заблокирован, чтобы не перебить рекламу."
+                )
             item = await self._get_or_create_content_item(session, submission_id)
             if item.status != ContentItemStatus.APPROVED:
                 item = await self.moderation.review_content_item(
@@ -419,6 +654,17 @@ class TelegramEditorialActions:
         async with session_factory() as session:
             return await session.get(PasteLibrary, paste_id)
 
+    async def delete_paste(self, paste_id: int) -> tuple[int, str]:
+        async with session_factory() as session:
+            paste = await session.get(PasteLibrary, paste_id)
+            if paste is None:
+                raise ValueError(f"Paste {paste_id} not found")
+            paste_title = paste.title
+            paste_pk = paste.id
+            await session.delete(paste)
+            await session.commit()
+            return paste_pk, paste_title
+
     async def create_manual_paste(self, body_text: str, reviewer_id: int, title: str | None = None) -> PasteLibrary:
         clean_title = (title or body_text.strip().splitlines()[0][:60] or "Manual paste").strip()
         async with session_factory() as session:
@@ -449,6 +695,11 @@ class TelegramEditorialActions:
             item = await session.get(ContentItem, content_item_id)
             if item is None:
                 raise ValueError(f"Content item {content_item_id} not found")
+            now = datetime.now(timezone.utc)
+            if await self.channel_service.is_channel_in_ad_blackout(session, item.channel_id, now):
+                raise ValueError(
+                    "Сейчас для этого канала активно рекламное окно. Publish now временно заблокирован, чтобы не перебить рекламу."
+                )
             if item.status != ContentItemStatus.APPROVED:
                 item = await self.moderation.review_content_item(
                     session=session,
@@ -480,6 +731,106 @@ class TelegramEditorialActions:
                 decision=ReviewDecision.HOLD,
                 review_note="Hold in Telegram panel",
             )
+
+    async def publish_manual_message_to_channels(
+        self,
+        *,
+        channel_ids: Iterable[int],
+        moderator_id: int,
+        body_text: str,
+    ) -> ManualChannelMessageResult:
+        cleaned_body = clean_text(body_text)
+        if not cleaned_body:
+            raise ValueError("Manual channel message text is empty")
+
+        unique_channel_ids = list(dict.fromkeys(int(channel_id) for channel_id in channel_ids))
+        result = ManualChannelMessageResult(requested=len(unique_channel_ids))
+        if not unique_channel_ids:
+            return result
+
+        normalized_text = normalize_text(cleaned_body) or cleaned_body
+        text_hash = compute_text_hash(cleaned_body) or compute_raw_text_hash(cleaned_body) or ""
+        tags = detect_tags(cleaned_body)
+        now = datetime.now(timezone.utc)
+
+        async with session_factory() as session:
+            for channel_id in unique_channel_ids:
+                channel = await session.get(Channel, channel_id)
+                if channel is None:
+                    result.failed += 1
+                    result.errors.append(f"Channel {channel_id} not found")
+                    continue
+                if not channel.is_active:
+                    result.failed += 1
+                    result.errors.append(f"Channel {channel_id} is inactive")
+                    continue
+                if await self.channel_service.is_channel_in_ad_blackout(session, channel.id, now):
+                    result.blocked += 1
+                    result.errors.append(f"Channel {channel_id} is in ad blackout")
+                    continue
+
+                item = ContentItem(
+                    channel_id=channel.id,
+                    source_type=ContentSourceType.EDITORIAL,
+                    body_text=cleaned_body,
+                    normalized_text=normalized_text,
+                    text_hash=text_hash,
+                    primary_tag=pick_primary_tag(tags),
+                    tags=tags,
+                    template_key="manual_panel_message",
+                    tone_key=f"manual:{moderator_id}",
+                    review_required=False,
+                    status=ContentItemStatus.SCHEDULED,
+                    scheduled_for=now,
+                )
+                session.add(item)
+                await session.flush()
+
+                log_item = PublicationLog(
+                    content_item_id=item.id,
+                    channel_id=channel.id,
+                    scheduled_for=now,
+                    publish_status=PublicationStatus.SCHEDULED,
+                    created_at=now,
+                )
+                session.add(log_item)
+                await session.flush()
+
+                result.content_item_ids.append(int(item.id))
+                result.publication_log_ids.append(int(log_item.id))
+
+                binding = await self.legacy_reader.get_bot_binding(channel.tg_channel_id)
+                if binding is None:
+                    item.status = ContentItemStatus.HOLD
+                    log_item.publish_status = PublicationStatus.FAILED
+                    log_item.error_text = f"Legacy bot binding for channel {channel.tg_channel_id} not found"
+                    result.failed += 1
+                    result.errors.append(log_item.error_text)
+                    continue
+
+                try:
+                    telegram_message_id = await self.publisher.telegram_adapter.send_text(
+                        bot_token=binding.bot_api_token,
+                        channel_id=channel.tg_channel_id,
+                        text=cleaned_body,
+                    )
+                except Exception as ex:
+                    item.status = ContentItemStatus.HOLD
+                    log_item.publish_status = PublicationStatus.FAILED
+                    log_item.error_text = str(ex)
+                    result.failed += 1
+                    result.errors.append(f"Channel {channel_id}: {ex}")
+                    continue
+
+                item.status = ContentItemStatus.PUBLISHED
+                log_item.publish_status = PublicationStatus.SENT
+                log_item.telegram_message_id = telegram_message_id
+                log_item.published_at = now
+                result.sent += 1
+
+            await session.commit()
+
+        return result
 
     async def run_scheduler(self):
         async with session_factory() as session:
@@ -514,6 +865,10 @@ class TelegramEditorialActions:
 
     async def _schedule_now(self, session, item: ContentItem) -> PublicationLog:
         now = datetime.now(timezone.utc)
+        if await self.channel_service.is_channel_in_ad_blackout(session, item.channel_id, now):
+            raise ValueError(
+                "Сейчас для этого канала активно рекламное окно. Publish now временно заблокирован, чтобы не перебить рекламу."
+            )
         existing = await session.scalar(
             select(PublicationLog)
             .where(

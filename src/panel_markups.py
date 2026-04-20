@@ -18,6 +18,9 @@ def build_main_panel(is_general_admin: bool) -> InlineKeyboardMarkup:
         InlineKeyboardButton("\u041a\u0430\u043d\u0430\u043b\u044b \u0438 \u0441\u043b\u043e\u0442\u044b", callback_data="panel:channels"),
     )
     markup.add(
+        InlineKeyboardButton("\u041c\u043e\u0438 \u043a\u0430\u043d\u0430\u043b\u044b", callback_data="panel:my_channels")
+    )
+    markup.add(
         InlineKeyboardButton("\u0417\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u044c scheduler", callback_data="panel:scheduler"),
         InlineKeyboardButton("\u0417\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u044c publisher", callback_data="panel:publisher"),
     )
@@ -64,7 +67,10 @@ def build_submission_actions(
             InlineKeyboardButton("\u041e\u0442\u0432\u0435\u0442\u0438\u0442\u044c", callback_data=f"submission:reply:{submission_id}"),
             InlineKeyboardButton("Ban user", callback_data=f"submission:ban:{submission_id}"),
         )
-        markup.add(InlineKeyboardButton("Reject", callback_data=f"submission:reject:{submission_id}"))
+        markup.add(
+            InlineKeyboardButton("Reject", callback_data=f"submission:reject:{submission_id}"),
+            InlineKeyboardButton("\u0423\u0434\u0430\u043b\u0438\u0442\u044c \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435", callback_data=f"submission_all:delete:{submission_id}"),
+        )
         markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u0432 \u043f\u0430\u043d\u0435\u043b\u044c", callback_data="panel:main"))
     else:
         markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u0432 \u043f\u0430\u043d\u0435\u043b\u044c", callback_data="panel:main"))
@@ -98,9 +104,8 @@ def build_submission_history_actions(
             InlineKeyboardButton("Ban user", callback_data=f"submission:ban:{submission_id}"),
         )
         markup.add(InlineKeyboardButton("Reject", callback_data=f"submission:reject:{submission_id}"))
-        markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u0432 \u043f\u0430\u043d\u0435\u043b\u044c", callback_data="panel:main"))
-    else:
-        markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u0432 \u043f\u0430\u043d\u0435\u043b\u044c", callback_data="panel:main"))
+    markup.add(InlineKeyboardButton("\u0423\u0434\u0430\u043b\u0438\u0442\u044c \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435", callback_data=f"submission_all:delete:{submission_id}"))
+    markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u0432 \u043f\u0430\u043d\u0435\u043b\u044c", callback_data="panel:main"))
     if has_next:
         markup.add(InlineKeyboardButton("\u0421\u043b\u0435\u0434\u0443\u044e\u0449\u0435\u0435 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435", callback_data=f"submission_all:next:{submission_id}"))
     return markup
@@ -130,9 +135,38 @@ def build_channels_actions(channel_buttons: list[tuple[int, str]]) -> InlineKeyb
     return markup
 
 
-def build_channel_actions(channel_id: int) -> InlineKeyboardMarkup:
+def build_my_channels_actions(channel_buttons: list[tuple[int, str]]) -> InlineKeyboardMarkup:
     markup = InlineKeyboardMarkup(row_width=1)
+    if channel_buttons:
+        markup.add(
+            InlineKeyboardButton(
+                "\u0421\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435 \u0432\u043e \u0432\u0441\u0435 \u043a\u0430\u043d\u0430\u043b\u044b",
+                callback_data="my_channels:all",
+            )
+        )
+        for channel_id, title in channel_buttons:
+            markup.add(InlineKeyboardButton(title, callback_data=f"my_channels:channel:{channel_id}"))
+    markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u0432 \u043f\u0430\u043d\u0435\u043b\u044c", callback_data="panel:main"))
+    return markup
+
+
+def build_channel_actions(
+    channel_id: int,
+    notifications_enabled: bool,
+    moderation_feed_enabled: bool,
+) -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup(row_width=1)
+    notify_label = "\u0412\u044b\u043a\u043b\u044e\u0447\u0438\u0442\u044c \u0443\u0432\u0435\u0434\u043e\u043c\u043b\u0435\u043d\u0438\u044f" if notifications_enabled else "\u0412\u043a\u043b\u044e\u0447\u0438\u0442\u044c \u0443\u0432\u0435\u0434\u043e\u043c\u043b\u0435\u043d\u0438\u044f"
+    moderation_feed_label = (
+        "\u0412\u044b\u043a\u043b\u044e\u0447\u0438\u0442\u044c \u043f\u043e\u043b\u0443\u0447\u0435\u043d\u0438\u0435 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0439"
+        if moderation_feed_enabled
+        else "\u0412\u043a\u043b\u044e\u0447\u0438\u0442\u044c \u043f\u043e\u043b\u0443\u0447\u0435\u043d\u0438\u0435 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0439"
+    )
     markup.add(
+        InlineKeyboardButton(notify_label, callback_data=f"channel:notify_toggle:{channel_id}"),
+        InlineKeyboardButton(moderation_feed_label, callback_data=f"channel:feed_toggle:{channel_id}"),
+        InlineKeyboardButton("\u041f\u043e\u0441\u0442\u0430\u0432\u0438\u0442\u044c \u0440\u0435\u043a\u043b\u0430\u043c\u043d\u043e\u0435 \u043e\u043a\u043d\u043e", callback_data=f"channel:ad_blackout:{channel_id}"),
+        InlineKeyboardButton("\u0423\u0434\u0430\u043b\u0438\u0442\u044c \u0440\u0435\u043a\u043b\u0430\u043c\u043d\u043e\u0435 \u043e\u043a\u043d\u043e", callback_data=f"channel:delete_ad_blackout:{channel_id}"),
         InlineKeyboardButton("\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0430 \u0441\u043b\u043e\u0442\u043e\u0432", callback_data=f"channel:slots:{channel_id}"),
         InlineKeyboardButton("\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0435 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432", callback_data=f"channel:params:{channel_id}"),
     )

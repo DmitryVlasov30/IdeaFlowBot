@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import aiohttp
 from loguru import logger
@@ -35,6 +36,7 @@ from src.panel_markups import (
     build_empty_paste_actions,
     build_extra_panel,
     build_main_panel,
+    build_my_channels_actions,
     build_paste_actions,
     build_submission_actions,
     build_submission_history_actions,
@@ -385,6 +387,7 @@ class MasterBot:
             ban_usr_msg=settings.ban_msg,
             send_post_msg=settings.send_post_msg,
             callback_adv_action=self.callback_adv_send_message,
+            callback_new_submission=self.callback_new_submission_notification,
         )
         is_admin = await bot.check_admin(channel_id)
         if not is_admin:
@@ -542,6 +545,30 @@ class MasterBot:
             raise ValueError("Нужен формат: <параметр> <значение>")
         return parts[0].strip(), parts[1].strip()
 
+    def _parse_ad_blackout_input(self, raw_value: str) -> tuple[int, str, str]:
+        text = raw_value.strip()
+        if not text:
+            raise ValueError("Пустой ввод.")
+
+        parts = text.split()
+        if len(parts) != 3:
+            raise ValueError("Нужен формат: <день месяца> <с HH:MM> <до HH:MM>.")
+
+        try:
+            day_of_month = int(parts[0])
+        except ValueError as exc:
+            raise ValueError("День месяца должен быть числом.") from exc
+        if day_of_month < 1 or day_of_month > 31:
+            raise ValueError("День месяца должен быть от 1 до 31.")
+
+        for time_value in parts[1:]:
+            try:
+                datetime.strptime(time_value, "%H:%M")
+            except ValueError as exc:
+                raise ValueError(f"Время '{time_value}' должно быть в формате HH:MM.") from exc
+
+        return day_of_month, parts[1], parts[2]
+
     async def _send_channel_settings_prompt(self, chat_id: int, channel_id: int) -> None:
         label = await self._get_channel_label(channel_id)
         settings_snapshot = await self.editorial_actions.get_channel_settings_snapshot(channel_id)
@@ -629,22 +656,95 @@ class MasterBot:
             reply_markup=build_channels_actions(buttons),
         )
 
+    async def _show_my_channels_menu(self, chat_id: int, user_id: int) -> None:
+        channels = await self.editorial_actions.list_user_moderation_feed_channels(user_id)
+        if not channels:
+            await self.main_bot.send_message(
+                chat_id,
+                (
+                    "\u0423 \u0432\u0430\u0441 \u043f\u043e\u043a\u0430 \u043d\u0435 \u0432\u044b\u0431\u0440\u0430\u043d\u044b \u043a\u0430\u043d\u0430\u043b\u044b.\n\n"
+                    "\u041e\u0442\u043a\u0440\u043e\u0439\u0442\u0435 '\u041a\u0430\u043d\u0430\u043b\u044b \u0438 \u0441\u043b\u043e\u0442\u044b', "
+                    "\u0432\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043a\u0430\u043d\u0430\u043b \u0438 \u0432\u043a\u043b\u044e\u0447\u0438\u0442\u0435 "
+                    "'\u043f\u043e\u043b\u0443\u0447\u0435\u043d\u0438\u0435 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0439'."
+                ),
+                reply_markup=build_my_channels_actions([]),
+            )
+            return
+
+        buttons = []
+        lines = [
+            "\u041c\u043e\u0438 \u043a\u0430\u043d\u0430\u043b\u044b.",
+            "\u042d\u0442\u043e \u043a\u0430\u043d\u0430\u043b\u044b, \u0434\u043b\u044f \u043a\u043e\u0442\u043e\u0440\u044b\u0445 \u0443 \u0432\u0430\u0441 \u0432\u043a\u043b\u044e\u0447\u0435\u043d\u043e \u043f\u043e\u043b\u0443\u0447\u0435\u043d\u0438\u0435 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0439.",
+            "",
+            "\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435, \u043a\u0443\u0434\u0430 \u043e\u0442\u043f\u0440\u0430\u0432\u0438\u0442\u044c \u0440\u0443\u0447\u043d\u043e\u0435 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435:",
+        ]
+        for channel in channels:
+            label = self._compose_channel_display_label(
+                self._channel_title_from_runtime(channel.tg_channel_id) or channel.title,
+                self._channel_label_from_runtime(channel.tg_channel_id),
+                channel.short_code,
+            )
+            buttons.append((channel.id, label))
+            lines.append(f"{len(buttons)}. {label}")
+
+        await self.main_bot.send_message(
+            chat_id,
+            "\n".join(lines),
+            reply_markup=build_my_channels_actions(buttons),
+        )
+
+    @staticmethod
+    def _format_manual_channel_message_result(result) -> str:
+        lines = [
+            "\u0420\u0443\u0447\u043d\u043e\u0435 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435 \u043e\u0431\u0440\u0430\u0431\u043e\u0442\u0430\u043d\u043e.",
+            f"\u041a\u0430\u043d\u0430\u043b\u043e\u0432 \u0432\u044b\u0431\u0440\u0430\u043d\u043e: {result.requested}",
+            f"\u041e\u043f\u0443\u0431\u043b\u0438\u043a\u043e\u0432\u0430\u043d\u043e: {result.sent}",
+        ]
+        if result.blocked:
+            lines.append(f"\u0417\u0430\u0431\u043b\u043e\u043a\u0438\u0440\u043e\u0432\u0430\u043d\u043e \u0440\u0435\u043a\u043b\u0430\u043c\u043d\u044b\u043c \u043e\u043a\u043d\u043e\u043c: {result.blocked}")
+        if result.failed:
+            lines.append(f"\u041e\u0448\u0438\u0431\u043e\u043a: {result.failed}")
+        if result.content_item_ids:
+            ids = ", ".join(map(str, result.content_item_ids))
+            lines.append(f"Content items: {ids}")
+        if result.publication_log_ids:
+            ids = ", ".join(map(str, result.publication_log_ids))
+            lines.append(f"Publication logs: {ids}")
+        if result.errors:
+            lines.append("")
+            lines.append("\u0414\u0435\u0442\u0430\u043b\u0438:")
+            lines.extend(result.errors[:5])
+        return "\n".join(lines)
+
     @staticmethod
     def _format_channel_setting_value(value: Any) -> str:
         if isinstance(value, bool):
             return "true" if value else "false"
         return str(value)
 
-    async def _show_channel_menu(self, chat_id: int, channel_id: int) -> None:
+    async def _format_ad_blackout(self, channel_id: int, blackout) -> str:
+        channel = await self.editorial_actions.get_channel(channel_id)
+        timezone_name = channel.timezone if channel is not None else "Europe/Moscow"
+        tz = ZoneInfo(timezone_name)
+        starts_at = blackout.starts_at.astimezone(tz)
+        ends_at = blackout.ends_at.astimezone(tz)
+        return f"{starts_at.strftime('%d.%m %H:%M')} - {ends_at.strftime('%d.%m %H:%M')}"
+
+    async def _show_channel_menu(self, chat_id: int, channel_id: int, user_id: int | None = None) -> None:
         channel = await self.editorial_actions.get_channel(channel_id)
         if channel is None:
             await self.main_bot.send_message(chat_id, f"Канал {channel_id} не найден.")
             return
 
+        effective_user_id = user_id if user_id is not None else chat_id
         label = await self._get_channel_label(channel_id)
+        notifications_enabled = await self.editorial_actions.is_channel_notifications_enabled(channel_id, effective_user_id)
+        moderation_feed_enabled = await self.editorial_actions.is_channel_moderation_feed_enabled(channel_id, effective_user_id)
         settings_snapshot = await self.editorial_actions.get_channel_settings_snapshot(channel_id)
+        ad_blackouts = await self.editorial_actions.list_channel_ad_blackouts(channel_id)
         summary_fields = {
             "min_gap_minutes",
+            "slot_jitter_minutes",
             "max_posts_per_day",
             "max_paste_per_day",
             "same_tag_cooldown_hours",
@@ -666,11 +766,61 @@ class MasterBot:
             "Ключевые параметры:",
             *summary_lines,
         ]
+        if ad_blackouts:
+            text_lines.extend(["", "Рекламные окна:"])
+            for blackout in ad_blackouts:
+                text_lines.append(await self._format_ad_blackout(channel_id, blackout))
         await self.main_bot.send_message(
             chat_id,
             "\n".join(text_lines),
-            reply_markup=build_channel_actions(channel_id),
+            reply_markup=build_channel_actions(channel_id, notifications_enabled, moderation_feed_enabled),
         )
+
+    @staticmethod
+    def _build_submission_open_markup(submission_id: int) -> InlineKeyboardMarkup:
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("Открыть в панели", callback_data=f"submission:view:{submission_id}"))
+        return markup
+
+    async def callback_new_submission_notification(
+        self,
+        *,
+        channel_tg_id: int,
+        review_chat_id: int,
+        review_message_id: int,
+    ) -> None:
+        submission = await self.editorial_actions.ensure_submission_for_review_message(
+            channel_tg_id=channel_tg_id,
+            review_chat_id=review_chat_id,
+            review_message_id=review_message_id,
+        )
+        if submission is None:
+            return
+
+        recipient_ids = await self.editorial_actions.list_channel_notification_user_ids(submission.channel_id)
+        if not recipient_ids:
+            return
+
+        channel_label = await self._get_channel_label(submission.channel_id)
+        excerpt = self._submission_notification_excerpt(submission)
+        notification_text = (
+            f"Новое сообщение в канале {channel_label}\n"
+            f"Тип: {self._submission_type_label(submission)}\n\n"
+            f"{excerpt}"
+        )
+        reply_markup = self._build_submission_open_markup(submission.id)
+
+        for recipient_id in recipient_ids:
+            if not self._is_admin(recipient_id):
+                continue
+            try:
+                await self.main_bot.send_message(
+                    recipient_id,
+                    notification_text,
+                    reply_markup=reply_markup,
+                )
+            except Exception as ex:
+                logger.error("Failed to deliver submission notification to {}: {}", recipient_id, ex)
 
     async def _show_channel_slots_menu(self, chat_id: int, channel_id: int) -> None:
         channel = await self.editorial_actions.get_channel(channel_id)
@@ -733,6 +883,57 @@ class MasterBot:
 
     def _submission_author_tag(self, submission) -> str:
         return f"@{submission.username}" if submission.username else "@None"
+
+    def _submission_notification_excerpt(self, submission) -> str:
+        body = (submission.cleaned_text or submission.raw_text or "").strip()
+        if not body:
+            if getattr(submission, "media_group_id", None):
+                body = "<медиа-группа без подписи>"
+            elif getattr(submission, "content_type", "text") != "text":
+                body = f"<{self._submission_type_label(submission)} без подписи>"
+            else:
+                body = "<без текста>"
+
+        lines = [line.strip() for line in body.splitlines() if line.strip()]
+        excerpt = "\n".join(lines[:2]) if lines else body
+        if len(excerpt) > 220:
+            excerpt = excerpt[:217].rstrip() + "..."
+        return excerpt
+
+    async def _send_submission_card(
+        self,
+        chat_id: int,
+        submission_id: int,
+        *,
+        history_mode: bool,
+        has_next: bool = False,
+    ) -> None:
+        submission = await self.editorial_actions.get_submission(submission_id)
+        if submission is None:
+            await self.main_bot.send_message(chat_id, f"Сообщение {submission_id} не найдено.")
+            return
+
+        await self._send_submission_preview(chat_id, submission.id)
+        markup = (
+            build_submission_history_actions(
+                submission.id,
+                has_next,
+                submission.is_anonymous,
+                allow_moderation=self._submission_moderation_allowed(str(submission.status)),
+            )
+            if history_mode
+            else build_submission_actions(
+                submission.id,
+                has_next,
+                submission.is_anonymous,
+                allow_moderation=True,
+            )
+        )
+        await self.main_bot.send_message(
+            chat_id,
+            await self._format_submission(submission),
+            reply_markup=markup,
+        )
 
     async def _format_submission(self, submission) -> str:
         body = submission.cleaned_text or submission.raw_text
@@ -924,10 +1125,20 @@ class MasterBot:
         if not result.get("ok"):
             raise RuntimeError(result.get("description", str(result)))
 
-    async def _show_first_pending_submission(self, chat_id: int, current_id: int | None = None) -> None:
-        submissions = await self.editorial_actions.list_pending_submissions()
+    async def _show_first_pending_submission(
+        self,
+        chat_id: int,
+        current_id: int | None = None,
+        user_id: int | None = None,
+    ) -> None:
+        effective_user_id = user_id if user_id is not None else chat_id
+        submissions = await self.editorial_actions.list_pending_submissions(user_id=effective_user_id)
         if not submissions:
-            await self.main_bot.send_message(chat_id, "Новых сообщений для review нет.")
+            selected_channel_ids = await self.editorial_actions.list_user_moderation_feed_channel_ids(effective_user_id)
+            if selected_channel_ids:
+                await self.main_bot.send_message(chat_id, "Новых сообщений для выбранных каналов нет.")
+            else:
+                await self.main_bot.send_message(chat_id, "Новых сообщений для review нет.")
             return
 
         index = 0
@@ -938,16 +1149,11 @@ class MasterBot:
                     break
 
         submission = submissions[index]
-        await self._send_submission_preview(chat_id, submission.id)
-        await self.main_bot.send_message(
+        await self._send_submission_card(
             chat_id,
-            await self._format_submission(submission),
-            reply_markup=build_submission_actions(
-                submission.id,
-                len(submissions) > index + 1,
-                submission.is_anonymous,
-                allow_moderation=True,
-            ),
+            submission.id,
+            history_mode=False,
+            has_next=len(submissions) > index + 1,
         )
 
     async def _show_submission_history(self, chat_id: int, current_id: int | None = None) -> None:
@@ -964,16 +1170,11 @@ class MasterBot:
                     break
 
         submission = submissions[index]
-        await self._send_submission_preview(chat_id, submission.id)
-        await self.main_bot.send_message(
+        await self._send_submission_card(
             chat_id,
-            await self._format_submission(submission),
-            reply_markup=build_submission_history_actions(
-                submission.id,
-                len(submissions) > index + 1,
-                submission.is_anonymous,
-                allow_moderation=self._submission_moderation_allowed(str(submission.status)),
-            ),
+            submission.id,
+            history_mode=True,
+            has_next=len(submissions) > index + 1,
         )
 
     async def _show_first_pending_content(self, chat_id: int, current_id: int | None = None) -> None:
@@ -1135,6 +1336,65 @@ class MasterBot:
             await self._show_channel_slots_menu(message.chat.id, channel_id)
             return True
 
+        if action == "await_add_ad_blackout":
+            channel_id = state["channel_id"]
+            try:
+                day_of_month, start_time, end_time = self._parse_ad_blackout_input(text_value)
+                blackout = await self.editorial_actions.create_channel_ad_blackout(
+                    channel_id=channel_id,
+                    day_of_month=day_of_month,
+                    start_time=start_time,
+                    end_time=end_time,
+                    created_by=message.from_user.id if message.from_user else message.chat.id,
+                )
+            except ValueError as exc:
+                await self.main_bot.send_message(
+                    message.chat.id,
+                    f"{exc}\n\nПример:\n21 15:00 18:00",
+                )
+                return True
+
+            label = await self._get_channel_label(channel_id)
+            await self.main_bot.send_message(
+                message.chat.id,
+                f"Для {label} добавлено рекламное окно:\n{await self._format_ad_blackout(channel_id, blackout)}",
+            )
+            await self._show_channel_menu(
+                message.chat.id,
+                channel_id,
+                user_id=message.from_user.id if message.from_user else message.chat.id,
+            )
+            return True
+
+        if action == "await_delete_ad_blackout":
+            channel_id = state["channel_id"]
+            try:
+                day_of_month, start_time, end_time = self._parse_ad_blackout_input(text_value)
+                blackout = await self.editorial_actions.delete_channel_ad_blackout(
+                    channel_id=channel_id,
+                    day_of_month=day_of_month,
+                    start_time=start_time,
+                    end_time=end_time,
+                )
+            except ValueError as exc:
+                await self.main_bot.send_message(
+                    message.chat.id,
+                    f"{exc}\n\n\u041f\u0440\u0438\u043c\u0435\u0440:\n21 15:00 18:00",
+                )
+                return True
+
+            label = await self._get_channel_label(channel_id)
+            await self.main_bot.send_message(
+                message.chat.id,
+                f"\u0414\u043b\u044f {label} \u0443\u0434\u0430\u043b\u0435\u043d\u043e \u0440\u0435\u043a\u043b\u0430\u043c\u043d\u043e\u0435 \u043e\u043a\u043d\u043e:\n{await self._format_ad_blackout(channel_id, blackout)}",
+            )
+            await self._show_channel_menu(
+                message.chat.id,
+                channel_id,
+                user_id=message.from_user.id if message.from_user else message.chat.id,
+            )
+            return True
+
         if action == "await_update_channel_setting":
             channel_id = state["channel_id"]
             try:
@@ -1155,7 +1415,7 @@ class MasterBot:
                 message.chat.id,
                 f"Параметр {field_name} обновлён: {self._format_channel_setting_value(getattr(channel, field_name))}.",
             )
-            await self._show_channel_menu(message.chat.id, channel_id)
+            await self._show_channel_menu(message.chat.id, channel_id, user_id=message.from_user.id if message.from_user else message.chat.id)
             return True
 
         if action == "await_add_paste":
@@ -1176,6 +1436,37 @@ class MasterBot:
             )
             await self.main_bot.send_message(message.chat.id, f"Паста #{paste.id} добавлена: {paste.title}")
             await self._show_first_paste(message.chat.id, current_id=paste.id)
+            return True
+
+        if action == "await_manual_channel_message":
+            channel_ids = [int(channel_id) for channel_id in state.get("channel_ids", [])]
+            if not text_value:
+                self._set_user_state(message.chat.id, "await_manual_channel_message", channel_ids=channel_ids)
+                await self.main_bot.send_message(
+                    message.chat.id,
+                    "\u041d\u0443\u0436\u0435\u043d \u0442\u0435\u043a\u0441\u0442, \u043a\u043e\u0442\u043e\u0440\u044b\u0439 \u043d\u0443\u0436\u043d\u043e \u043e\u043f\u0443\u0431\u043b\u0438\u043a\u043e\u0432\u0430\u0442\u044c.",
+                )
+                return True
+            try:
+                result = await self.editorial_actions.publish_manual_message_to_channels(
+                    channel_ids=channel_ids,
+                    moderator_id=message.from_user.id if message.from_user else message.chat.id,
+                    body_text=text_value,
+                )
+            except Exception as ex:
+                await self.main_bot.send_message(
+                    message.chat.id,
+                    f"\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043e\u0442\u043f\u0440\u0430\u0432\u0438\u0442\u044c \u0440\u0443\u0447\u043d\u043e\u0435 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435: {ex}",
+                )
+                return True
+            await self.main_bot.send_message(
+                message.chat.id,
+                self._format_manual_channel_message_result(result),
+            )
+            await self._show_my_channels_menu(
+                message.chat.id,
+                user_id=message.from_user.id if message.from_user else message.chat.id,
+            )
             return True
 
         if action == "await_reply_submission":
@@ -1351,7 +1642,7 @@ class MasterBot:
                         )
                     case "submissions":
                         await self.editorial_actions.import_new()
-                        await self._show_first_pending_submission(call.message.chat.id)
+                        await self._show_first_pending_submission(call.message.chat.id, user_id=call.from_user.id)
                     case "all_submissions":
                         await self._show_submission_history(call.message.chat.id)
                     case "content":
@@ -1360,6 +1651,8 @@ class MasterBot:
                         await self._show_first_paste(call.message.chat.id)
                     case "channels":
                         await self._show_channels_menu(call.message.chat.id)
+                    case "my_channels":
+                        await self._show_my_channels_menu(call.message.chat.id, user_id=call.from_user.id)
                     case "scheduler":
                         result = await self.editorial_actions.run_scheduler()
                         await self.main_bot.send_message(
@@ -1400,7 +1693,7 @@ class MasterBot:
                 await self.main_bot.answer_callback_query(call.id)
                 return
 
-            if data.startswith("submission:"):
+            if data.startswith("submission:") and not data.startswith("submission:view:"):
                 _prefix, action, value = data.split(":")
                 submission_id = int(value)
                 reviewer_id = call.from_user.id
@@ -1408,23 +1701,28 @@ class MasterBot:
                     case "approve":
                         item = await self.editorial_actions.approve_submission(submission_id, reviewer_id)
                         await self.main_bot.send_message(call.message.chat.id, f"Сообщение {submission_id} одобрено. Content item #{item.id}.")
-                        await self._show_first_pending_submission(call.message.chat.id, current_id=submission_id)
+                        await self._show_first_pending_submission(call.message.chat.id, current_id=submission_id, user_id=call.from_user.id)
                     case "publish":
-                        log_item = await self.editorial_actions.publish_submission_now(submission_id, reviewer_id)
+                        try:
+                            log_item = await self.editorial_actions.publish_submission_now(submission_id, reviewer_id)
+                        except ValueError as exc:
+                            await self.main_bot.send_message(call.message.chat.id, str(exc))
+                            await self.main_bot.answer_callback_query(call.id)
+                            return
                         await self.main_bot.send_message(call.message.chat.id, f"Сообщение {submission_id} отправлено в publish pipeline. Log #{log_item.id}.")
-                        await self._show_first_pending_submission(call.message.chat.id, current_id=submission_id)
+                        await self._show_first_pending_submission(call.message.chat.id, current_id=submission_id, user_id=call.from_user.id)
                     case "paste":
                         paste = await self.editorial_actions.paste_submission(submission_id, reviewer_id)
                         await self.main_bot.send_message(call.message.chat.id, f"Создана паста #{paste.id}: {paste.title}")
-                        await self._show_first_pending_submission(call.message.chat.id, current_id=submission_id)
+                        await self._show_first_pending_submission(call.message.chat.id, current_id=submission_id, user_id=call.from_user.id)
                     case "hold":
                         await self.editorial_actions.hold_submission(submission_id)
                         await self.main_bot.send_message(call.message.chat.id, f"Сообщение {submission_id} отправлено в hold.")
-                        await self._show_first_pending_submission(call.message.chat.id, current_id=submission_id)
+                        await self._show_first_pending_submission(call.message.chat.id, current_id=submission_id, user_id=call.from_user.id)
                     case "reject":
                         await self.editorial_actions.reject_submission(submission_id)
                         await self.main_bot.send_message(call.message.chat.id, f"Сообщение {submission_id} отклонено.")
-                        await self._show_first_pending_submission(call.message.chat.id, current_id=submission_id)
+                        await self._show_first_pending_submission(call.message.chat.id, current_id=submission_id, user_id=call.from_user.id)
                     case "ban":
                         result = await self.editorial_actions.ban_submission_author(submission_id, reviewer_id)
                         author_label = f"@{result.username}" if result.username else str(result.user_id)
@@ -1438,7 +1736,7 @@ class MasterBot:
                                 call.message.chat.id,
                                 f"РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ {author_label} Р·Р°Р±Р°РЅРµРЅ. РЎРѕРѕР±С‰РµРЅРёРµ {submission_id} РѕС‚РєР»РѕРЅРµРЅРѕ.",
                             )
-                        await self._show_first_pending_submission(call.message.chat.id, current_id=submission_id)
+                        await self._show_first_pending_submission(call.message.chat.id, current_id=submission_id, user_id=call.from_user.id)
                     case "toggle_anon":
                         submission = await self.editorial_actions.get_submission(submission_id)
                         if submission is None:
@@ -1482,13 +1780,35 @@ class MasterBot:
                             "Отправьте одним сообщением текст, который нужно переслать автору предложки.",
                         )
                     case "next":
-                        await self._show_first_pending_submission(call.message.chat.id, current_id=submission_id)
+                        await self._show_first_pending_submission(call.message.chat.id, current_id=submission_id, user_id=call.from_user.id)
                 await self.main_bot.answer_callback_query(call.id)
                 return
 
             if data.startswith("submission_all:next:"):
                 submission_id = int(data.split(":")[-1])
                 await self._show_submission_history(call.message.chat.id, current_id=submission_id)
+                await self.main_bot.answer_callback_query(call.id)
+                return
+
+            if data.startswith("submission_all:delete:"):
+                submission_id = int(data.split(":")[-1])
+                deleted_count = await self.editorial_actions.delete_submission(submission_id)
+                await self.main_bot.send_message(
+                    call.message.chat.id,
+                    f"Удалено сообщений: {deleted_count}. Submission #{submission_id} убран из базы.",
+                )
+                await self._show_submission_history(call.message.chat.id, current_id=submission_id)
+                await self.main_bot.answer_callback_query(call.id)
+                return
+
+            if data.startswith("submission:view:"):
+                submission_id = int(data.split(":")[-1])
+                await self._send_submission_card(
+                    call.message.chat.id,
+                    submission_id,
+                    history_mode=True,
+                    has_next=False,
+                )
                 await self.main_bot.answer_callback_query(call.id)
                 return
 
@@ -1502,7 +1822,12 @@ class MasterBot:
                         await self.main_bot.send_message(call.message.chat.id, f"Контент {content_item_id} одобрен.")
                         await self._show_first_pending_content(call.message.chat.id, current_id=content_item_id)
                     case "publish":
-                        log_item = await self.editorial_actions.publish_content_item_now(content_item_id, reviewer_id)
+                        try:
+                            log_item = await self.editorial_actions.publish_content_item_now(content_item_id, reviewer_id)
+                        except ValueError as exc:
+                            await self.main_bot.send_message(call.message.chat.id, str(exc))
+                            await self.main_bot.answer_callback_query(call.id)
+                            return
                         await self.main_bot.send_message(call.message.chat.id, f"Контент {content_item_id} поставлен в публикацию. Log #{log_item.id}.")
                         await self._show_first_pending_content(call.message.chat.id, current_id=content_item_id)
                     case "hold":
@@ -1518,9 +1843,107 @@ class MasterBot:
                 await self.main_bot.answer_callback_query(call.id)
                 return
 
+            if data == "my_channels:all":
+                channels = await self.editorial_actions.list_user_moderation_feed_channels(call.from_user.id)
+                channel_ids = [int(channel.id) for channel in channels]
+                if not channel_ids:
+                    await self.main_bot.send_message(
+                        call.message.chat.id,
+                        "\u0423 \u0432\u0430\u0441 \u043f\u043e\u043a\u0430 \u043d\u0435 \u0432\u044b\u0431\u0440\u0430\u043d\u044b \u043a\u0430\u043d\u0430\u043b\u044b \u0434\u043b\u044f \u043f\u043e\u043b\u0443\u0447\u0435\u043d\u0438\u044f \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0439.",
+                    )
+                    await self.main_bot.answer_callback_query(call.id)
+                    return
+                self._set_user_state(
+                    call.message.chat.id,
+                    "await_manual_channel_message",
+                    channel_ids=channel_ids,
+                )
+                await self.main_bot.send_message(
+                    call.message.chat.id,
+                    (
+                        "\u041e\u0442\u043f\u0440\u0430\u0432\u044c\u0442\u0435 \u043e\u0434\u043d\u0438\u043c \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435\u043c \u0442\u0435\u043a\u0441\u0442, "
+                        f"\u043a\u043e\u0442\u043e\u0440\u044b\u0439 \u043d\u0443\u0436\u043d\u043e \u043e\u043f\u0443\u0431\u043b\u0438\u043a\u043e\u0432\u0430\u0442\u044c \u0432\u043e \u0432\u0441\u0435 \u0432\u044b\u0431\u0440\u0430\u043d\u043d\u044b\u0435 \u043a\u0430\u043d\u0430\u043b\u044b ({len(channel_ids)})."
+                    ),
+                )
+                await self.main_bot.answer_callback_query(call.id)
+                return
+
+            if data.startswith("my_channels:channel:"):
+                channel_id = int(data.split(":")[-1])
+                selected_channel_ids = set(await self.editorial_actions.list_user_moderation_feed_channel_ids(call.from_user.id))
+                if channel_id not in selected_channel_ids:
+                    await self.main_bot.answer_callback_query(
+                        call.id,
+                        "\u042d\u0442\u043e\u0442 \u043a\u0430\u043d\u0430\u043b \u043d\u0435 \u0432\u043a\u043b\u044e\u0447\u0451\u043d \u0432 \u0432\u0430\u0448\u0438 '\u043f\u043e\u0441\u0442\u0443\u043f\u0438\u0432\u0448\u0438\u0435 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u044f'.",
+                        show_alert=True,
+                    )
+                    return
+                label = await self._get_channel_label(channel_id)
+                self._set_user_state(
+                    call.message.chat.id,
+                    "await_manual_channel_message",
+                    channel_ids=[channel_id],
+                )
+                await self.main_bot.send_message(
+                    call.message.chat.id,
+                    (
+                        f"\u041e\u0442\u043f\u0440\u0430\u0432\u044c\u0442\u0435 \u0442\u0435\u043a\u0441\u0442, "
+                        f"\u043a\u043e\u0442\u043e\u0440\u044b\u0439 \u043d\u0443\u0436\u043d\u043e \u043e\u043f\u0443\u0431\u043b\u0438\u043a\u043e\u0432\u0430\u0442\u044c \u0432 {label}."
+                    ),
+                )
+                await self.main_bot.answer_callback_query(call.id)
+                return
+
             if data.startswith("channel:view:"):
                 channel_id = int(data.split(":")[-1])
-                await self._show_channel_menu(call.message.chat.id, channel_id)
+                await self._show_channel_menu(call.message.chat.id, channel_id, user_id=call.from_user.id)
+                await self.main_bot.answer_callback_query(call.id)
+                return
+
+            if data.startswith("channel:notify_toggle:"):
+                channel_id = int(data.split(":")[-1])
+                enabled = await self.editorial_actions.toggle_channel_notifications(channel_id, call.from_user.id)
+                await self.main_bot.send_message(
+                    call.message.chat.id,
+                    "Уведомления включены." if enabled else "Уведомления выключены.",
+                )
+                await self._show_channel_menu(call.message.chat.id, channel_id, user_id=call.from_user.id)
+                await self.main_bot.answer_callback_query(call.id)
+                return
+
+            if data.startswith("channel:feed_toggle:"):
+                channel_id = int(data.split(":")[-1])
+                enabled = await self.editorial_actions.toggle_channel_moderation_feed(channel_id, call.from_user.id)
+                await self.main_bot.send_message(
+                    call.message.chat.id,
+                    "Получение сообщений из канала включено." if enabled else "Получение сообщений из канала выключено.",
+                )
+                await self._show_channel_menu(call.message.chat.id, channel_id, user_id=call.from_user.id)
+                await self.main_bot.answer_callback_query(call.id)
+                return
+
+            if data.startswith("channel:ad_blackout:"):
+                channel_id = int(data.split(":")[-1])
+                self._set_user_state(call.message.chat.id, "await_add_ad_blackout", channel_id=channel_id)
+                await self.main_bot.send_message(
+                    call.message.chat.id,
+                    "Отправьте рекламное окно в формате:\n"
+                    "21 15:00 18:00\n\n"
+                    "Это значит: 21 числа с 15:00 до 18:00 канал будет защищён от публикаций. "
+                    "Если такая дата в текущем месяце уже прошла, будет выбран следующий месяц.",
+                )
+                await self.main_bot.answer_callback_query(call.id)
+                return
+
+            if data.startswith("channel:delete_ad_blackout:"):
+                channel_id = int(data.split(":")[-1])
+                self._set_user_state(call.message.chat.id, "await_delete_ad_blackout", channel_id=channel_id)
+                await self.main_bot.send_message(
+                    call.message.chat.id,
+                    "\u041e\u0442\u043f\u0440\u0430\u0432\u044c\u0442\u0435 \u0440\u0435\u043a\u043b\u0430\u043c\u043d\u043e\u0435 \u043e\u043a\u043d\u043e, \u043a\u043e\u0442\u043e\u0440\u043e\u0435 \u043d\u0443\u0436\u043d\u043e \u0443\u0434\u0430\u043b\u0438\u0442\u044c, \u0432 \u0444\u043e\u0440\u043c\u0430\u0442\u0435:\n"
+                    "21 15:00 18:00\n\n"
+                    "\u0412\u0432\u043e\u0434 \u0434\u043e\u043b\u0436\u0435\u043d \u0441\u043e\u0432\u043f\u0430\u0434\u0430\u0442\u044c \u0441 \u0442\u0435\u043c \u043e\u043a\u043d\u043e\u043c, \u043a\u043e\u0442\u043e\u0440\u043e\u0435 \u0431\u044b\u043b\u043e \u0434\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u043e.",
+                )
                 await self.main_bot.answer_callback_query(call.id)
                 return
 
@@ -1588,7 +2011,18 @@ class MasterBot:
 
             if data.startswith("paste:delete:"):
                 paste_id = int(data.split(":")[-1])
-                paste = await self.editorial_actions.archive_paste(paste_id)
+                deleted_paste_id, deleted_paste_title = await self.editorial_actions.delete_paste(paste_id)
+                await self.main_bot.send_message(
+                    call.message.chat.id,
+                    f"Паста #{deleted_paste_id} удалена: {deleted_paste_title}",
+                )
+                await self._show_first_paste(call.message.chat.id, current_id=paste_id)
+                await self.main_bot.answer_callback_query(call.id)
+                return
+
+            if data.startswith("paste:delete:legacy_disabled:"):
+                paste_id = int(data.split(":")[-1])
+                deleted_paste_id, deleted_paste_title = await self.editorial_actions.delete_paste(paste_id)
                 await self.main_bot.send_message(call.message.chat.id, f"Паста #{paste.id} переведена в archived.")
                 await self._show_first_paste(call.message.chat.id, current_id=paste_id)
                 await self.main_bot.answer_callback_query(call.id)
@@ -1723,6 +2157,7 @@ class MasterBot:
                         ban_usr_msg=settings.ban_msg,
                         send_post_msg=settings.send_post_msg,
                         callback_adv_action=self.callback_adv_send_message,
+                        callback_new_submission=self.callback_new_submission_notification,
                     )
                     await bot.run_bot()
                     self.bots_work.append(bot)

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import case, desc, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.editorial.config import settings
+from src.editorial.models.ad_blackout import ChannelAdBlackout
 from src.editorial.models.channel import Channel, ChannelSlot
 from src.editorial.models.content import ContentItem
 from src.editorial.models.enums import ContentItemStatus, ContentSourceType, PublicationStatus
@@ -22,6 +25,13 @@ class SchedulerRunResult:
     channels_checked: int = 0
     slots_checked: int = 0
     scheduled_items: int = 0
+
+
+@dataclass(slots=True)
+class DueSlot:
+    slot_id: int
+    slot_date: date
+    scheduled_for: datetime
 
 
 class SchedulerService:
@@ -39,29 +49,37 @@ class SchedulerService:
 
         for channel in channels:
             result.channels_checked += 1
-            for slot_dt in await self._get_due_slots(session, channel, now):
+            for due_slot in await self._get_due_slots(session, channel, now):
                 result.slots_checked += 1
-                if await self._slot_already_used(session, channel.id, slot_dt):
+                if await self._slot_already_used(session, channel.id, due_slot.slot_id, due_slot.slot_date):
                     continue
-                if not await self._channel_can_publish(session, channel, slot_dt):
+                if not await self._channel_can_publish(session, channel, due_slot.scheduled_for):
                     continue
 
-                candidate = await self._pick_candidate(session, channel, slot_dt)
+                candidate = await self._pick_candidate(session, channel, due_slot.scheduled_for)
                 if candidate is None:
                     continue
 
                 candidate.status = ContentItemStatus.SCHEDULED
-                candidate.scheduled_for = slot_dt
+                candidate.scheduled_for = due_slot.scheduled_for
                 session.add(
                     PublicationLog(
                         content_item_id=candidate.id,
                         channel_id=channel.id,
-                        scheduled_for=slot_dt,
+                        slot_id=due_slot.slot_id,
+                        slot_date=due_slot.slot_date,
+                        scheduled_for=due_slot.scheduled_for,
                         publish_status=PublicationStatus.SCHEDULED,
                         created_at=now,
                     )
                 )
+                try:
+                    await session.flush()
+                except IntegrityError:
+                    await session.rollback()
+                    continue
                 result.scheduled_items += 1
+                await session.commit()
 
         await session.commit()
         return result
@@ -71,7 +89,7 @@ class SchedulerService:
         session: AsyncSession,
         channel: Channel,
         now: datetime,
-    ) -> list[datetime]:
+    ) -> list[DueSlot]:
         local_now = now.astimezone(ZoneInfo(channel.timezone))
         slots = list(
             (
@@ -80,35 +98,105 @@ class SchedulerService:
                     .where(
                         ChannelSlot.channel_id == channel.id,
                         ChannelSlot.is_active.is_(True),
-                        ChannelSlot.weekday == local_now.weekday(),
                     )
-                    .order_by(ChannelSlot.slot_time.asc())
+                    .order_by(ChannelSlot.weekday.asc(), ChannelSlot.slot_time.asc())
                 )
             ).scalars().all()
         )
 
-        due_slots: list[datetime] = []
-        for slot in slots:
-            slot_local = datetime.combine(local_now.date(), slot.slot_time, tzinfo=ZoneInfo(channel.timezone))
-            if slot_local > local_now:
-                continue
-            if local_now - slot_local > timedelta(minutes=settings.scheduler_window_minutes):
-                continue
-            due_slots.append(slot_local.astimezone(timezone.utc))
+        due_slots: list[DueSlot] = []
+        candidate_dates = [
+            local_now.date() - timedelta(days=1),
+            local_now.date(),
+            local_now.date() + timedelta(days=1),
+        ]
+        for slot_date in candidate_dates:
+            for slot in slots:
+                if slot.weekday != slot_date.weekday():
+                    continue
+                slot_local = datetime.combine(slot_date, slot.slot_time, tzinfo=ZoneInfo(channel.timezone))
+                jitter_minutes = max(channel.slot_jitter_minutes, 0)
+                window_start = slot_local - timedelta(minutes=jitter_minutes)
+                planning_deadline = slot_local + timedelta(
+                    minutes=max(jitter_minutes, settings.scheduler_window_minutes)
+                )
+                if local_now < window_start:
+                    continue
+                if local_now > planning_deadline:
+                    continue
+                if await self._slot_already_used(session, channel.id, slot.id, slot_date):
+                    continue
+
+                scheduled_for = await self._choose_scheduled_time(
+                    session=session,
+                    channel=channel,
+                    slot_local=slot_local,
+                    now=now,
+                )
+                if scheduled_for is None:
+                    continue
+                due_slots.append(
+                    DueSlot(
+                        slot_id=slot.id,
+                        slot_date=slot_date,
+                        scheduled_for=scheduled_for,
+                    )
+                )
         return due_slots
+
+    async def _choose_scheduled_time(
+        self,
+        session: AsyncSession,
+        channel: Channel,
+        slot_local: datetime,
+        now: datetime,
+    ) -> datetime | None:
+        jitter_minutes = max(channel.slot_jitter_minutes, 0)
+        local_now = now.astimezone(slot_local.tzinfo)
+
+        if jitter_minutes <= 0:
+            scheduled_for = slot_local.astimezone(timezone.utc)
+            if not await self._channel_can_publish(session, channel, scheduled_for):
+                return None
+            return scheduled_for
+
+        window_start = slot_local - timedelta(minutes=jitter_minutes)
+        window_end = slot_local + timedelta(minutes=jitter_minutes)
+        local_start = max(window_start, self._ceil_to_minute(local_now))
+
+        if local_start > window_end:
+            if local_now - slot_local <= timedelta(minutes=settings.scheduler_window_minutes):
+                fallback_time = self._ceil_to_minute(local_now).astimezone(timezone.utc)
+                if await self._channel_can_publish(session, channel, fallback_time):
+                    return fallback_time
+            return None
+
+        candidate_times: list[datetime] = []
+        cursor = local_start.replace(second=0, microsecond=0)
+        while cursor <= window_end:
+            candidate_times.append(cursor.astimezone(timezone.utc))
+            cursor += timedelta(minutes=1)
+
+        random.shuffle(candidate_times)
+        for candidate_time in candidate_times:
+            if await self._channel_can_publish(session, channel, candidate_time):
+                return candidate_time
+        return None
 
     async def _slot_already_used(
         self,
         session: AsyncSession,
         channel_id: int,
-        slot_dt: datetime,
+        slot_id: int,
+        slot_date: date,
     ) -> bool:
         count = await session.scalar(
             select(func.count())
             .select_from(PublicationLog)
             .where(
                 PublicationLog.channel_id == channel_id,
-                PublicationLog.scheduled_for == slot_dt,
+                PublicationLog.slot_id == slot_id,
+                PublicationLog.slot_date == slot_date,
                 PublicationLog.publish_status.in_([PublicationStatus.SCHEDULED, PublicationStatus.SENT]),
             )
         )
@@ -120,6 +208,9 @@ class SchedulerService:
         channel: Channel,
         slot_dt: datetime,
     ) -> bool:
+        if await self._is_channel_in_ad_blackout(session, channel.id, slot_dt):
+            return False
+
         day_start_utc, day_end_utc = self._channel_day_bounds(channel.timezone, slot_dt)
 
         total_for_day = await session.scalar(
@@ -135,18 +226,46 @@ class SchedulerService:
         if (total_for_day or 0) >= channel.max_posts_per_day:
             return False
 
-        latest_publication = await session.scalar(
-            select(PublicationLog)
+        if channel.min_gap_minutes <= 0:
+            return True
+
+        nearby_publications = await session.scalar(
+            select(func.count())
+            .select_from(PublicationLog)
             .where(
                 PublicationLog.channel_id == channel.id,
                 PublicationLog.publish_status.in_([PublicationStatus.SCHEDULED, PublicationStatus.SENT]),
+                PublicationLog.scheduled_for > slot_dt - timedelta(minutes=channel.min_gap_minutes),
+                PublicationLog.scheduled_for < slot_dt + timedelta(minutes=channel.min_gap_minutes),
             )
-            .order_by(desc(PublicationLog.scheduled_for))
-            .limit(1)
         )
-        if latest_publication and latest_publication.scheduled_for >= slot_dt - timedelta(minutes=channel.min_gap_minutes):
+        if nearby_publications:
             return False
         return True
+
+    async def _is_channel_in_ad_blackout(
+        self,
+        session: AsyncSession,
+        channel_id: int,
+        when: datetime,
+    ) -> bool:
+        when_utc = when.astimezone(timezone.utc)
+        blackout_id = await session.scalar(
+            select(ChannelAdBlackout.id)
+            .where(
+                ChannelAdBlackout.channel_id == channel_id,
+                ChannelAdBlackout.starts_at <= when_utc,
+                ChannelAdBlackout.ends_at > when_utc,
+            )
+            .limit(1)
+        )
+        return blackout_id is not None
+
+    @staticmethod
+    def _ceil_to_minute(value: datetime) -> datetime:
+        if value.second == 0 and value.microsecond == 0:
+            return value
+        return (value + timedelta(minutes=1)).replace(second=0, microsecond=0)
 
     async def _pick_candidate(
         self,

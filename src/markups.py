@@ -334,6 +334,7 @@ class MarkupButton:
                 reply_markup=markup,
             )
             logger.info("send post success")
+            return True
         except Exception as ex:
             logger.error(ex)
             await self.bot.send_message(chat_id=call.message.chat.id, text=f"Произошла ошибка при обработки: {ex}")

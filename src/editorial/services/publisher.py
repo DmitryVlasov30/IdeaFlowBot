@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.editorial.config import settings
+from src.editorial.models.ad_blackout import ChannelAdBlackout
 from src.editorial.models.channel import Channel
 from src.editorial.models.content import ContentItem
 from src.editorial.models.enums import ContentItemStatus, PublicationStatus
@@ -279,6 +280,24 @@ class PublisherService:
         )
         return telegram_message_id
 
+    async def _is_channel_in_ad_blackout(
+        self,
+        session: AsyncSession,
+        channel_id: int,
+        when: datetime,
+    ) -> bool:
+        when_utc = when.astimezone(timezone.utc)
+        blackout_id = await session.scalar(
+            select(ChannelAdBlackout.id)
+            .where(
+                ChannelAdBlackout.channel_id == channel_id,
+                ChannelAdBlackout.starts_at <= when_utc,
+                ChannelAdBlackout.ends_at > when_utc,
+            )
+            .limit(1)
+        )
+        return blackout_id is not None
+
     async def run(
         self,
         session: AsyncSession,
@@ -306,14 +325,24 @@ class PublisherService:
         )
 
         for log_item in scheduled_logs:
-            result.attempted += 1
             content_item = await session.get(ContentItem, log_item.content_item_id)
             channel = await session.get(Channel, log_item.channel_id)
             if content_item is None or channel is None:
+                result.attempted += 1
                 log_item.publish_status = PublicationStatus.FAILED
                 log_item.error_text = "Missing content item or channel"
                 result.failed += 1
                 continue
+
+            if await self._is_channel_in_ad_blackout(session, channel.id, now):
+                logger.info(
+                    "Skipping publication log {} for channel {} because an ad blackout is active",
+                    log_item.id,
+                    channel.id,
+                )
+                continue
+
+            result.attempted += 1
 
             binding = await self.legacy_reader.get_bot_binding(channel.tg_channel_id)
             if binding is None:
