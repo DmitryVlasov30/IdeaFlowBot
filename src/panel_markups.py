@@ -121,6 +121,7 @@ def build_content_actions(content_item_id: int, has_next: bool) -> InlineKeyboar
         InlineKeyboardButton("Hold", callback_data=f"content:hold:{content_item_id}"),
         InlineKeyboardButton("Reject", callback_data=f"content:reject:{content_item_id}"),
     )
+    markup.add(InlineKeyboardButton("\u0418\u0437\u043c\u0435\u043d\u0438\u0442\u044c", callback_data=f"content:edit:{content_item_id}"))
     markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u0432 \u043f\u0430\u043d\u0435\u043b\u044c", callback_data="panel:main"))
     if has_next:
         markup.add(InlineKeyboardButton("\u0421\u043b\u0435\u0434\u0443\u044e\u0449\u0438\u0439 \u0447\u0435\u0440\u043d\u043e\u0432\u0438\u043a", callback_data=f"content:next:{content_item_id}"))
@@ -167,6 +168,7 @@ def build_channel_actions(
         InlineKeyboardButton(moderation_feed_label, callback_data=f"channel:feed_toggle:{channel_id}"),
         InlineKeyboardButton("\u041f\u043e\u0441\u0442\u0430\u0432\u0438\u0442\u044c \u0440\u0435\u043a\u043b\u0430\u043c\u043d\u043e\u0435 \u043e\u043a\u043d\u043e", callback_data=f"channel:ad_blackout:{channel_id}"),
         InlineKeyboardButton("\u0423\u0434\u0430\u043b\u0438\u0442\u044c \u0440\u0435\u043a\u043b\u0430\u043c\u043d\u043e\u0435 \u043e\u043a\u043d\u043e", callback_data=f"channel:delete_ad_blackout:{channel_id}"),
+        InlineKeyboardButton("\u0421\u0433\u0435\u043d\u0435\u0440\u0438\u0440\u043e\u0432\u0430\u0442\u044c \u043f\u043e\u0441\u0442\u044b", callback_data=f"channel:generate:{channel_id}"),
         InlineKeyboardButton("\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0430 \u0441\u043b\u043e\u0442\u043e\u0432", callback_data=f"channel:slots:{channel_id}"),
         InlineKeyboardButton("\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0435 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432", callback_data=f"channel:params:{channel_id}"),
     )

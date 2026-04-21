@@ -21,6 +21,7 @@ from src.editorial.models.publication import PublicationLog
 from src.editorial.models.submission import Submission
 from src.editorial.services.channel_history_service import ChannelHistoryImportResult, ChannelHistoryService
 from src.editorial.services.channel_service import ChannelService
+from src.editorial.services.generation.service import GenerationService
 from src.editorial.services.import_legacy import LegacyImporter
 from src.editorial.services.legacy_source import LegacyCollectorReader
 from src.editorial.services.moderation import ModerationService
@@ -646,6 +647,28 @@ class TelegramEditorialActions:
         async with session_factory() as session:
             return await session.get(ContentItem, content_item_id)
 
+    async def update_content_item_text(self, content_item_id: int, body_text: str) -> ContentItem:
+        cleaned_body = clean_text(body_text)
+        if not cleaned_body:
+            raise ValueError("Content item text is empty")
+
+        async with session_factory() as session:
+            item = await session.get(ContentItem, content_item_id)
+            if item is None:
+                raise ValueError(f"Content item {content_item_id} not found")
+            if item.status not in {ContentItemStatus.PENDING_REVIEW, ContentItemStatus.HOLD}:
+                raise ValueError("Only pending or held content items can be edited")
+
+            tags = detect_tags(cleaned_body)
+            item.body_text = cleaned_body
+            item.normalized_text = normalize_text(cleaned_body)
+            item.text_hash = compute_text_hash(cleaned_body) or compute_raw_text_hash(cleaned_body) or ""
+            item.tags = tags
+            item.primary_tag = pick_primary_tag(tags)
+            await session.commit()
+            await session.refresh(item)
+            return item
+
     async def list_pastes(self, limit: int | None = None) -> list[PasteLibrary]:
         async with session_factory() as session:
             return await self.paste_service.list_pastes(session=session, status=None, limit=limit)
@@ -839,6 +862,24 @@ class TelegramEditorialActions:
     async def run_publisher(self):
         async with session_factory() as session:
             return await self.publisher.run(session)
+
+    async def run_generation(
+        self,
+        *,
+        channel_id: int,
+        variant_count: int = 3,
+        source_count: int = 5,
+    ):
+        async with session_factory() as session:
+            channel = await session.get(Channel, channel_id)
+            if channel is None:
+                raise ValueError(f"Channel {channel_id} not found")
+            return await GenerationService().generate_for_channel(
+                session=session,
+                channel_id=channel_id,
+                variant_count=variant_count,
+                source_count=source_count,
+            )
 
     async def _get_or_create_content_item(self, session, submission_id: int) -> ContentItem:
         submission = await session.get(Submission, submission_id)

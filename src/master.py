@@ -1418,6 +1418,106 @@ class MasterBot:
             await self._show_channel_menu(message.chat.id, channel_id, user_id=message.from_user.id if message.from_user else message.chat.id)
             return True
 
+        if action == "await_generate_posts":
+            channel_id = state["channel_id"]
+            try:
+                variant_count = int(text_value)
+            except ValueError:
+                await self.main_bot.send_message(
+                    message.chat.id,
+                    "\u041d\u0443\u0436\u043d\u043e \u0447\u0438\u0441\u043b\u043e \u0432\u0430\u0440\u0438\u0430\u043d\u0442\u043e\u0432. \u041d\u0430\u043f\u0440\u0438\u043c\u0435\u0440: 3",
+                )
+                return True
+            if variant_count < 1 or variant_count > 10:
+                await self.main_bot.send_message(
+                    message.chat.id,
+                    "\u041c\u043e\u0436\u043d\u043e \u0441\u0433\u0435\u043d\u0435\u0440\u0438\u0440\u043e\u0432\u0430\u0442\u044c \u043e\u0442 1 \u0434\u043e 10 \u0447\u0435\u0440\u043d\u043e\u0432\u0438\u043a\u043e\u0432 \u0437\u0430 \u043e\u0434\u0438\u043d \u0437\u0430\u043f\u0443\u0441\u043a.",
+                )
+                return True
+
+            label = await self._get_channel_label(channel_id)
+            status_message = await self.main_bot.send_message(
+                message.chat.id,
+                f"\u0413\u0435\u043d\u0435\u0440\u0438\u0440\u0443\u044e {variant_count} \u0447\u0435\u0440\u043d\u043e\u0432\u0438\u043a\u043e\u0432 \u0434\u043b\u044f {label}. \u042d\u0442\u043e \u043c\u043e\u0436\u0435\u0442 \u0437\u0430\u043d\u044f\u0442\u044c \u0434\u043e \u043c\u0438\u043d\u0443\u0442\u044b.",
+            )
+            try:
+                run = await self.editorial_actions.run_generation(
+                    channel_id=channel_id,
+                    variant_count=variant_count,
+                    source_count=max(8, variant_count * 3),
+                )
+            except Exception as ex:
+                await self.main_bot.send_message(
+                    message.chat.id,
+                    f"\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0437\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u044c \u0433\u0435\u043d\u0435\u0440\u0430\u0446\u0438\u044e: {ex}",
+                )
+                return True
+            finally:
+                try:
+                    await self.main_bot.delete_message(message.chat.id, status_message.message_id)
+                except Exception:
+                    pass
+
+            if run.generated_count:
+                await self.main_bot.send_message(
+                    message.chat.id,
+                    (
+                        f"\u0413\u0435\u043d\u0435\u0440\u0430\u0446\u0438\u044f \u0433\u043e\u0442\u043e\u0432\u0430.\n"
+                        f"Generation run #{run.id}\n"
+                        f"\u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a\u043e\u0432: {run.source_count}\n"
+                        f"\u0421\u043e\u0437\u0434\u0430\u043d\u043e \u0447\u0435\u0440\u043d\u043e\u0432\u0438\u043a\u043e\u0432: {run.generated_count}\n\n"
+                        "\u0421\u0435\u0439\u0447\u0430\u0441 \u043e\u043d\u0438 \u043b\u0435\u0436\u0430\u0442 \u0432 '\u0427\u0435\u0440\u043d\u043e\u0432\u0438\u043a\u0438 \u043d\u0430 review'."
+                    ),
+                )
+                await self._show_first_pending_content(message.chat.id)
+                return True
+
+            error_text = f"\n\u041e\u0448\u0438\u0431\u043a\u0430: {run.error_text}" if run.error_text else ""
+            await self.main_bot.send_message(
+                message.chat.id,
+                (
+                    f"\u0413\u0435\u043d\u0435\u0440\u0430\u0446\u0438\u044f \u043d\u0435 \u0441\u043e\u0437\u0434\u0430\u043b\u0430 \u0447\u0435\u0440\u043d\u043e\u0432\u0438\u043a\u0438.\n"
+                    f"Generation run #{run.id}\n"
+                    f"\u0421\u0442\u0430\u0442\u0443\u0441: {run.status}\n"
+                    f"\u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a\u043e\u0432: {run.source_count}"
+                    f"{error_text}"
+                ),
+            )
+            await self._show_channel_menu(
+                message.chat.id,
+                channel_id,
+                user_id=message.from_user.id if message.from_user else message.chat.id,
+            )
+            return True
+
+        if action == "await_edit_content_item":
+            content_item_id = int(state["content_item_id"])
+            if not text_value:
+                self._set_user_state(message.chat.id, "await_edit_content_item", content_item_id=content_item_id)
+                await self.main_bot.send_message(
+                    message.chat.id,
+                    "\u041d\u0443\u0436\u0435\u043d \u043d\u043e\u0432\u044b\u0439 \u0442\u0435\u043a\u0441\u0442 \u0447\u0435\u0440\u043d\u043e\u0432\u0438\u043a\u0430.",
+                )
+                return True
+            try:
+                item = await self.editorial_actions.update_content_item_text(content_item_id, text_value)
+            except Exception as ex:
+                await self.main_bot.send_message(
+                    message.chat.id,
+                    f"\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0438\u0437\u043c\u0435\u043d\u0438\u0442\u044c \u0447\u0435\u0440\u043d\u043e\u0432\u0438\u043a: {ex}",
+                )
+                return True
+            await self.main_bot.send_message(
+                message.chat.id,
+                f"\u0427\u0435\u0440\u043d\u043e\u0432\u0438\u043a #{content_item_id} \u043e\u0431\u043d\u043e\u0432\u043b\u0451\u043d.",
+            )
+            await self.main_bot.send_message(
+                message.chat.id,
+                await self._format_content_item(item),
+                reply_markup=build_content_actions(item.id, has_next=False),
+            )
+            return True
+
         if action == "await_add_paste":
             body_text = text_value
             if not body_text:
@@ -1830,6 +1930,26 @@ class MasterBot:
                             return
                         await self.main_bot.send_message(call.message.chat.id, f"Контент {content_item_id} поставлен в публикацию. Log #{log_item.id}.")
                         await self._show_first_pending_content(call.message.chat.id, current_id=content_item_id)
+                    case "edit":
+                        item = await self.editorial_actions.get_content_item(content_item_id)
+                        if item is None:
+                            await self.main_bot.send_message(
+                                call.message.chat.id,
+                                f"\u0427\u0435\u0440\u043d\u043e\u0432\u0438\u043a #{content_item_id} \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d.",
+                            )
+                        else:
+                            self._set_user_state(
+                                call.message.chat.id,
+                                "await_edit_content_item",
+                                content_item_id=content_item_id,
+                            )
+                            await self.main_bot.send_message(
+                                call.message.chat.id,
+                                (
+                                    f"\u041e\u0442\u043f\u0440\u0430\u0432\u044c\u0442\u0435 \u043d\u043e\u0432\u044b\u0439 \u0442\u0435\u043a\u0441\u0442 \u0434\u043b\u044f \u0447\u0435\u0440\u043d\u043e\u0432\u0438\u043a\u0430 #{content_item_id}.\n"
+                                    "\u041e\u043d \u043f\u0440\u043e\u0441\u0442\u043e \u0437\u0430\u043c\u0435\u043d\u0438\u0442 \u0442\u0435\u043a\u0443\u0449\u0438\u0439 \u0442\u0435\u043a\u0441\u0442, \u0442\u0438\u043f \u043a\u043e\u043d\u0442\u0435\u043d\u0442\u0430 \u043d\u0435 \u0438\u0437\u043c\u0435\u043d\u0438\u0442\u0441\u044f."
+                                ),
+                            )
                     case "hold":
                         await self.editorial_actions.hold_content_item(content_item_id, reviewer_id)
                         await self.main_bot.send_message(call.message.chat.id, f"Контент {content_item_id} отправлен в hold.")
@@ -1943,6 +2063,20 @@ class MasterBot:
                     "\u041e\u0442\u043f\u0440\u0430\u0432\u044c\u0442\u0435 \u0440\u0435\u043a\u043b\u0430\u043c\u043d\u043e\u0435 \u043e\u043a\u043d\u043e, \u043a\u043e\u0442\u043e\u0440\u043e\u0435 \u043d\u0443\u0436\u043d\u043e \u0443\u0434\u0430\u043b\u0438\u0442\u044c, \u0432 \u0444\u043e\u0440\u043c\u0430\u0442\u0435:\n"
                     "21 15:00 18:00\n\n"
                     "\u0412\u0432\u043e\u0434 \u0434\u043e\u043b\u0436\u0435\u043d \u0441\u043e\u0432\u043f\u0430\u0434\u0430\u0442\u044c \u0441 \u0442\u0435\u043c \u043e\u043a\u043d\u043e\u043c, \u043a\u043e\u0442\u043e\u0440\u043e\u0435 \u0431\u044b\u043b\u043e \u0434\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u043e.",
+                )
+                await self.main_bot.answer_callback_query(call.id)
+                return
+
+            if data.startswith("channel:generate:"):
+                channel_id = int(data.split(":")[-1])
+                label = await self._get_channel_label(channel_id)
+                self._set_user_state(call.message.chat.id, "await_generate_posts", channel_id=channel_id)
+                await self.main_bot.send_message(
+                    call.message.chat.id,
+                    (
+                        f"\u0421\u043a\u043e\u043b\u044c\u043a\u043e \u0447\u0435\u0440\u043d\u043e\u0432\u0438\u043a\u043e\u0432 \u0441\u0433\u0435\u043d\u0435\u0440\u0438\u0440\u043e\u0432\u0430\u0442\u044c \u0434\u043b\u044f {label}?\n\n"
+                        "\u041e\u0442\u043f\u0440\u0430\u0432\u044c\u0442\u0435 \u0447\u0438\u0441\u043b\u043e \u043e\u0442 1 \u0434\u043e 10. \u041e\u0431\u044b\u0447\u043d\u043e \u0445\u0432\u0430\u0442\u0430\u0435\u0442 3."
+                    ),
                 )
                 await self.main_bot.answer_callback_query(call.id)
                 return

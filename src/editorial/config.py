@@ -40,7 +40,11 @@ class EditorialSettings:
     generation_openrouter_api_key: str | None = os.getenv("OPENROUTER_API_KEY")
     generation_model_name: str = os.getenv(
         "EDITORIAL_GENERATION_MODEL",
-        "openrouter/auto",
+        "z-ai/glm-4.5-air:free",
+    )
+    generation_fallback_models: str = os.getenv(
+        "EDITORIAL_GENERATION_FALLBACK_MODELS",
+        "minimax/minimax-m2.5:free,google/gemma-4-31b-it:free,google/gemma-4-26b-a4b-it:free",
     )
     generation_enabled: bool = _get_bool("EDITORIAL_GENERATION_ENABLED", True)
     similarity_threshold: float = float(os.getenv("EDITORIAL_SIMILARITY_THRESHOLD", "0.82"))
