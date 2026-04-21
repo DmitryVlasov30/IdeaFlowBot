@@ -54,11 +54,37 @@ class ChannelService:
     BOOL_TRUE_VALUES = {"true", "yes", "on", "да"}
     BOOL_FALSE_VALUES = {"false", "no", "off", "нет"}
 
-    async def list_channels(self, session: AsyncSession) -> list[Channel]:
-        return list((await session.execute(select(Channel).order_by(Channel.id.asc()))).scalars().all())
+    async def list_channels(self, session: AsyncSession, include_inactive: bool = False) -> list[Channel]:
+        stmt = select(Channel).order_by(Channel.id.asc())
+        if not include_inactive:
+            stmt = stmt.where(Channel.is_active.is_(True))
+        return list((await session.execute(stmt)).scalars().all())
 
     async def get_channel(self, session: AsyncSession, channel_id: int) -> Channel | None:
         return await session.get(Channel, channel_id)
+
+    async def set_channel_active_by_tg_id(
+        self,
+        session: AsyncSession,
+        tg_channel_id: int,
+        is_active: bool,
+        title: str | None = None,
+        short_code: str | None = None,
+    ) -> Channel | None:
+        channel = await session.scalar(
+            select(Channel).where(Channel.tg_channel_id == tg_channel_id).limit(1)
+        )
+        if channel is None:
+            return None
+
+        channel.is_active = is_active
+        if title:
+            channel.title = title
+        if short_code:
+            channel.short_code = short_code
+        await session.commit()
+        await session.refresh(channel)
+        return channel
 
     async def list_channel_slots(self, session: AsyncSession, channel_id: int) -> list[ChannelSlot]:
         stmt = (

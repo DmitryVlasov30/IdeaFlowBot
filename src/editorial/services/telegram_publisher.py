@@ -22,6 +22,14 @@ class TelegramPublisherAdapter:
         message = await bot.send_message(chat_id=channel_id, text=text)
         return int(message.message_id)
 
+    async def get_chat_tag(self, bot_token: str, channel_id: int) -> str | None:
+        bot = AsyncTeleBot(bot_token)
+        chat = await bot.get_chat(channel_id)
+        username = getattr(chat, "username", None)
+        if username:
+            return f"@{username}"
+        return None
+
     async def send_text_with_entities(
         self,
         bot_token: str,

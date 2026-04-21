@@ -374,7 +374,8 @@ class MasterBot:
     async def _add_subbot_from_values(self, api_token: str, channel_username: str) -> tuple[str, int | None]:
         channel_username = await self._normalize_channel_username(channel_username)
         try:
-            channel_id = (await self.main_bot.get_chat(channel_username)).id
+            channel_chat = await self.main_bot.get_chat(channel_username)
+            channel_id = channel_chat.id
         except Exception:
             logger.error("channel not found: {}", channel_username)
             return f"Канал {channel_username} не найден.", None
@@ -389,18 +390,43 @@ class MasterBot:
             callback_adv_action=self.callback_adv_send_message,
             callback_new_submission=self.callback_new_submission_notification,
         )
-        is_admin = await bot.check_admin(channel_id)
-        if not is_admin:
-            return f"Сначала добавьте саббота в администраторы канала {channel_username}.", None
+        if bot.bot_info is None:
+            return "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043f\u043e\u043b\u0443\u0447\u0438\u0442\u044c \u0438\u043d\u0444\u043e \u043e \u0441\u0430\u0431\u0431\u043e\u0442\u0435. \u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 token.", None
+
+        channel_id = int(getattr(bot, "channel_id", channel_id))
+        bot_username = bot.bot_info.username.replace("@", "")
+        main_bot_username = (self.bot_info.username if self.bot_info else "").replace("@", "")
+        if bot_username == main_bot_username:
+            return (
+                f"Token принадлежит general-боту @{bot_username}. "
+                "Его нельзя привязывать как саббота: возьмите token именно отдельного бота-предложки из BotFather.",
+                None,
+            )
 
         for item in await self.bots_database.get_bots_info():
-            if item[1] == bot.bot_info.username.replace("@", ""):
-                return "Этот саббот уже привязан к каналу.", None
+            existing_username = str(item[1]).replace("@", "")
+            existing_channel_id = int(item[2])
+            if existing_username != bot_username:
+                continue
+            if existing_channel_id != channel_id:
+                return "\u042d\u0442\u043e\u0442 \u0441\u0430\u0431\u0431\u043e\u0442 \u0443\u0436\u0435 \u043f\u0440\u0438\u0432\u044f\u0437\u0430\u043d \u043a \u0434\u0440\u0443\u0433\u043e\u043c\u0443 \u043a\u0430\u043d\u0430\u043b\u0443.", None
+            editorial_channel = await self.editorial_actions.ensure_channel_for_tg_channel_id(channel_id)
+            if not self._is_subbot_running(bot_username, channel_id):
+                await bot.run_bot()
+                self.bots_work.append(bot)
+            return "\u041f\u0440\u0438\u0432\u044f\u0437\u043a\u0430 \u0441\u0430\u0431\u0431\u043e\u0442\u0430 \u0443\u0436\u0435 \u0431\u044b\u043b\u0430 \u0432 \u0431\u0430\u0437\u0435; \u043a\u0430\u043d\u0430\u043b \u0440\u0435\u0430\u043a\u0442\u0438\u0432\u0438\u0440\u043e\u0432\u0430\u043d.", editorial_channel.id
+        is_admin = await bot.check_admin(channel_id)
+        if not is_admin:
+            return (
+                f"Token принадлежит @{bot_username}, но Telegram не видит этого бота админом канала {channel_username}. "
+                f"Добавьте именно @{bot_username} в администраторы канала и попробуйте ещё раз.",
+                None,
+            )
 
         await self.bots_database.add_bots_info(
             {
                 "channel_id": channel_id,
-                "bot_username": bot.bot_info.username,
+                "bot_username": bot_username,
                 "bot_api_token": api_token,
             }
         )
@@ -426,6 +452,7 @@ class MasterBot:
 
         if index_bot != -1:
             del self.bots_work[index_bot]
+        await self.editorial_actions.deactivate_channel_by_tg_channel_id(channel_id)
         return f"Саббот {username_bot} отвязан."
 
     async def _get_dynamic_moderators(self) -> list[int]:
@@ -446,6 +473,17 @@ class MasterBot:
             await self._list_subbots_text(),
             reply_markup=build_subbot_menu(buttons),
         )
+
+    def _is_subbot_running(self, username_bot: str, channel_id: int | None = None) -> bool:
+        target_username = username_bot.replace("@", "")
+        for bot in self.bots_work:
+            bot_info = getattr(bot, "bot_info", None)
+            running_username = (getattr(bot_info, "username", "") or "").replace("@", "")
+            if running_username != target_username:
+                continue
+            if channel_id is None or getattr(bot, "channel_id", None) == channel_id:
+                return True
+        return False
 
     def _channel_label_from_runtime(self, tg_channel_id: int) -> str | None:
         for bot in self.bots_work:
@@ -570,6 +608,15 @@ class MasterBot:
         return day_of_month, parts[1], parts[2]
 
     async def _send_channel_settings_prompt(self, chat_id: int, channel_id: int) -> None:
+        await self.editorial_actions.sync_channel_activity_from_bindings()
+        channel = await self.editorial_actions.get_channel(channel_id)
+        if channel is None:
+            await self.main_bot.send_message(chat_id, f"РљР°РЅР°Р» {channel_id} РЅРµ РЅР°Р№РґРµРЅ.")
+            return
+        if not channel.is_active:
+            await self.main_bot.send_message(chat_id, "\u041a\u0430\u043d\u0430\u043b \u043e\u0442\u0432\u044f\u0437\u0430\u043d \u0438 \u0441\u043a\u0440\u044b\u0442 \u0438\u0437 \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u0439 \u043f\u0430\u043d\u0435\u043b\u0438.")
+            return
+
         label = await self._get_channel_label(channel_id)
         settings_snapshot = await self.editorial_actions.get_channel_settings_snapshot(channel_id)
         lines = [
@@ -731,9 +778,14 @@ class MasterBot:
         return f"{starts_at.strftime('%d.%m %H:%M')} - {ends_at.strftime('%d.%m %H:%M')}"
 
     async def _show_channel_menu(self, chat_id: int, channel_id: int, user_id: int | None = None) -> None:
+        await self.editorial_actions.sync_channel_activity_from_bindings()
         channel = await self.editorial_actions.get_channel(channel_id)
         if channel is None:
             await self.main_bot.send_message(chat_id, f"Канал {channel_id} не найден.")
+            return
+
+        if not channel.is_active:
+            await self.main_bot.send_message(chat_id, "\u041a\u0430\u043d\u0430\u043b \u043e\u0442\u0432\u044f\u0437\u0430\u043d \u0438 \u0441\u043a\u0440\u044b\u0442 \u0438\u0437 \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u0439 \u043f\u0430\u043d\u0435\u043b\u0438.")
             return
 
         effective_user_id = user_id if user_id is not None else chat_id
@@ -823,9 +875,14 @@ class MasterBot:
                 logger.error("Failed to deliver submission notification to {}: {}", recipient_id, ex)
 
     async def _show_channel_slots_menu(self, chat_id: int, channel_id: int) -> None:
+        await self.editorial_actions.sync_channel_activity_from_bindings()
         channel = await self.editorial_actions.get_channel(channel_id)
         if channel is None:
             await self.main_bot.send_message(chat_id, f"Канал {channel_id} не найден.")
+            return
+
+        if not channel.is_active:
+            await self.main_bot.send_message(chat_id, "\u041a\u0430\u043d\u0430\u043b \u043e\u0442\u0432\u044f\u0437\u0430\u043d \u0438 \u0441\u043a\u0440\u044b\u0442 \u0438\u0437 \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u0439 \u043f\u0430\u043d\u0435\u043b\u0438.")
             return
 
         label = await self._get_channel_label(channel_id)
@@ -1609,6 +1666,8 @@ class MasterBot:
                     public_data.append((message_id, sender_id, bot))
 
         for message_id, sender_id, bot in public_data:
+            if await bots_data[bot].reschedule_delayed_if_publication_blocked(message_id, sender_id):
+                continue
             await self.delayed_database.delete_delayed_posts(
                 {
                     "bot_id": bot,

@@ -18,7 +18,7 @@ from src.editorial.models.submission import Submission
 from src.editorial.services.legacy_source import LegacyCollectorReader, LegacySenderRow
 from src.editorial.services.paste_service import PasteService
 from src.editorial.services.telegram_publisher import TelegramPublisherAdapter
-from src.editorial.utils.text import clean_text, normalize_text
+from src.editorial.utils.text import clean_text
 
 
 @dataclass(slots=True)
@@ -43,11 +43,41 @@ class PublisherService:
     def _submission_author_signature(submission: Submission) -> str:
         return f"@{submission.username}" if submission.username else "@None"
 
-    def _append_author_signature(self, text: str, submission: Submission) -> str:
-        if submission.is_anonymous:
-            return text
-        signature = self._submission_author_signature(submission)
-        return f"{text}\n\n{signature}" if text else signature
+    @staticmethod
+    def _channel_signature(channel: Channel, resolved_tag: str | None = None) -> str:
+        if resolved_tag:
+            return resolved_tag
+        short_code = (channel.short_code or "").strip()
+        if short_code:
+            return short_code if short_code.startswith("@") else f"@{short_code}"
+        return f"channel {channel.id}"
+
+    async def resolve_channel_signature(self, bot_token: str, channel: Channel) -> str:
+        try:
+            resolved_tag = await self.telegram_adapter.get_chat_tag(
+                bot_token=bot_token,
+                channel_id=channel.tg_channel_id,
+            )
+        except Exception as ex:
+            logger.warning("Failed to resolve Telegram username for channel {}: {}", channel.id, ex)
+            resolved_tag = None
+        return self._channel_signature(channel, resolved_tag)
+
+    def format_publication_text(
+        self,
+        text: str | None,
+        channel: Channel,
+        submission: Submission | None = None,
+        channel_signature: str | None = None,
+    ) -> str:
+        parts: list[str] = []
+        cleaned_text = (text or "").strip()
+        if cleaned_text:
+            parts.append(cleaned_text)
+        if submission is not None and not submission.is_anonymous:
+            parts.append(self._submission_author_signature(submission))
+        parts.append(self._channel_signature(channel, channel_signature))
+        return "\n\n".join(parts)
 
     @staticmethod
     def _can_copy_submission_verbatim(
@@ -115,11 +145,16 @@ class PublisherService:
         channel: Channel,
         bot_token: str,
     ) -> int:
+        channel_signature = await self.resolve_channel_signature(bot_token, channel)
         if content_item.origin_submission_id is None:
             return await self.telegram_adapter.send_text(
                 bot_token=bot_token,
                 channel_id=channel.tg_channel_id,
-                text=content_item.body_text,
+                text=self.format_publication_text(
+                    content_item.body_text,
+                    channel,
+                    channel_signature=channel_signature,
+                ),
             )
 
         submission = await session.get(Submission, content_item.origin_submission_id)
@@ -158,19 +193,30 @@ class PublisherService:
                 if submission.source_chat_id is None or not message_ids:
                     raise ValueError("Media group submission has no source chat or message ids")
                 from_chat_id = int(submission.source_chat_id)
-            telegram_message_id = await self.telegram_adapter.copy_messages(
-                bot_token=bot_token,
-                channel_id=channel.tg_channel_id,
-                from_chat_id=from_chat_id,
-                message_ids=message_ids,
-            )
-            if not submission.is_anonymous:
-                await self.telegram_adapter.send_text(
+            source_text = self._get_related_submission_source_text(related_rows)
+            first_message_id: int | None = None
+            for index, message_id in enumerate(message_ids):
+                copied_id = await self.telegram_adapter.copy_message(
                     bot_token=bot_token,
                     channel_id=channel.tg_channel_id,
-                    text=self._submission_author_signature(submission),
+                    from_chat_id=from_chat_id,
+                    message_id=message_id,
+                    caption=(
+                        self.format_publication_text(
+                            source_text,
+                            channel,
+                            submission,
+                            channel_signature=channel_signature,
+                        )
+                        if index == 0
+                        else None
+                    ),
                 )
-            return telegram_message_id
+                if first_message_id is None:
+                    first_message_id = copied_id
+            if first_message_id is None:
+                raise RuntimeError("Telegram returned no copied media group messages")
+            return first_message_id
 
         if submission.content_type in {"photo", "video", "animation"}:
             source_text = self._get_related_submission_source_text(related_rows)
@@ -184,6 +230,12 @@ class PublisherService:
                     channel_id=channel.tg_channel_id,
                     from_chat_id=from_chat_id,
                     message_id=message_id,
+                    caption=self.format_publication_text(
+                        source_text,
+                        channel,
+                        submission,
+                        channel_signature=channel_signature,
+                    ),
                 )
                 logger.info(
                     "Published content item {} via copy_message from {}:{}",
@@ -191,12 +243,6 @@ class PublisherService:
                     from_chat_id,
                     message_id,
                 )
-                if not submission.is_anonymous:
-                    await self.telegram_adapter.send_text(
-                        bot_token=bot_token,
-                        channel_id=channel.tg_channel_id,
-                        text=self._submission_author_signature(submission),
-                    )
                 return telegram_message_id
             caption_text = content_item.body_text.strip()
             if not source_text and caption_text.startswith("<") and caption_text.endswith(">"):
@@ -208,7 +254,12 @@ class PublisherService:
                 channel_id=channel.tg_channel_id,
                 from_chat_id=int(submission.source_chat_id),
                 message_id=int(submission.source_message_id),
-                caption=self._append_author_signature(caption_text, submission) or None,
+                caption=self.format_publication_text(
+                    caption_text,
+                    channel,
+                    submission,
+                    channel_signature=channel_signature,
+                ),
             )
 
         source_text = self._get_related_submission_source_text(related_rows)
@@ -216,63 +267,43 @@ class PublisherService:
             legacy_row = related_legacy_rows[0] if related_legacy_rows else None
             entities = self._parse_entities_json(legacy_row)
             source_text_value = (legacy_row.text_post if legacy_row and legacy_row.text_post is not None else source_text)
-            from_chat_id, message_id = self._pick_single_copy_source(
-                submission=submission,
-                legacy_row=legacy_row,
+            text_to_send = self.format_publication_text(
+                source_text_value,
+                channel,
+                submission,
+                channel_signature=channel_signature,
             )
-            try:
-                telegram_message_id = await self.telegram_adapter.copy_message(
+            if entities:
+                telegram_message_id = await self.telegram_adapter.send_text_with_entities(
                     bot_token=bot_token,
                     channel_id=channel.tg_channel_id,
-                    from_chat_id=from_chat_id,
-                    message_id=message_id,
+                    text=text_to_send,
+                    entities=entities,
                 )
                 logger.info(
-                    "Published content item {} via text copy_message from {}:{}",
+                    "Published content item {} via send_text_with_entities (entities={}, legacy_row={})",
                     content_item.id,
-                    from_chat_id,
-                    message_id,
+                    len(entities),
+                    legacy_row.id if legacy_row else None,
                 )
-                if not submission.is_anonymous:
-                    await self.telegram_adapter.send_text(
-                        bot_token=bot_token,
-                        channel_id=channel.tg_channel_id,
-                        text=self._submission_author_signature(submission),
-                    )
                 return telegram_message_id
-            except Exception as ex:
-                logger.warning(
-                    "Text copy_message failed for content item {} from {}:{}: {}",
-                    content_item.id,
-                    from_chat_id,
-                    message_id,
-                    ex,
-                )
-                if entities:
-                    telegram_message_id = await self.telegram_adapter.send_text_with_entities(
-                        bot_token=bot_token,
-                        channel_id=channel.tg_channel_id,
-                        text=source_text_value,
-                        entities=entities,
-                    )
-                    logger.info(
-                        "Published content item {} via send_text_with_entities fallback (entities={}, legacy_row={})",
-                        content_item.id,
-                        len(entities),
-                        legacy_row.id if legacy_row else None,
-                    )
-                    if not submission.is_anonymous:
-                        await self.telegram_adapter.send_text(
-                            bot_token=bot_token,
-                            channel_id=channel.tg_channel_id,
-                            text=self._submission_author_signature(submission),
-                        )
-                    return telegram_message_id
+            telegram_message_id = await self.telegram_adapter.send_text(
+                bot_token=bot_token,
+                channel_id=channel.tg_channel_id,
+                text=text_to_send,
+            )
+            logger.info("Published content item {} via send_text from source text", content_item.id)
+            return telegram_message_id
 
         telegram_message_id = await self.telegram_adapter.send_text(
             bot_token=bot_token,
             channel_id=channel.tg_channel_id,
-            text=self._append_author_signature(content_item.body_text, submission),
+            text=self.format_publication_text(
+                content_item.body_text,
+                channel,
+                submission,
+                channel_signature=channel_signature,
+            ),
         )
         logger.info(
             "Published content item {} via plain send_text fallback",
@@ -332,6 +363,19 @@ class PublisherService:
                 log_item.publish_status = PublicationStatus.FAILED
                 log_item.error_text = "Missing content item or channel"
                 result.failed += 1
+                continue
+
+            if not channel.is_active:
+                log_item.publish_status = PublicationStatus.CANCELLED
+                log_item.error_text = "Channel is inactive or unlinked"
+                if content_item.status == ContentItemStatus.SCHEDULED:
+                    content_item.status = ContentItemStatus.APPROVED
+                    content_item.scheduled_for = None
+                logger.info(
+                    "Cancelled publication log {} for inactive channel {}",
+                    log_item.id,
+                    channel.id,
+                )
                 continue
 
             if await self._is_channel_in_ad_blackout(session, channel.id, now):

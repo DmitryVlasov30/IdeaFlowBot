@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 
 from loguru import logger
 
@@ -15,6 +16,7 @@ from src.core_database.database import (CrudChatAdmins, CrudBannedUser,
                                         CrudAnonymMessage, CrudAdvertising)
 from src.editorial.models.enums import SubmissionStatus
 from src.editorial.services.legacy_moderation_sync import LegacyModerationSyncService
+from src.editorial.services.legacy_publication_guard import LegacyPublicationGuard
 from src.utils import Utils, filter_chats
 from config import settings
 from src.markups import MarkupButton
@@ -63,6 +65,7 @@ class SubBot:
         self.anonym_message_database = CrudAnonymMessage()
         self.advertising_database = CrudAdvertising()
         self.legacy_moderation_sync = LegacyModerationSyncService()
+        self.publication_guard = LegacyPublicationGuard()
 
         self.token = api_token_bot
         self.channel_username = channel_username
@@ -123,6 +126,9 @@ class SubBot:
         channel_chat = await self.sup_bot.get_chat(self.channel_username)
         self.channel_id = channel_chat.id
         self.channel_title = getattr(channel_chat, "title", None)
+        channel_username = getattr(channel_chat, "username", None)
+        if channel_username:
+            self.channel_username = f"@{channel_username}"
         self.chat_suggest = (await self.admins_database.get_chat_admins(bot=self.bot_info.id))
         logger.info(f"{self.chat_suggest}")
         users = await self.user_database.get_user_data(bot_username=self.bot_info.username)
@@ -439,12 +445,17 @@ class SubBot:
                 await shift_timer()
 
         @logger.catch
-        async def save_delayed_post(call: CallbackQuery) -> None:
+        async def save_delayed_post(call: CallbackQuery) -> bool:
             command, day_div, time, message_id, sender_id = call.data.split(";")
             time_public = await Utils.get_timestamp_public(time)
             logger.info(f"command: {command}, time: {time}, sender_id: {sender_id}")
 
             message_id = int(message_id)
+            blocked_until = await self._get_publication_blocked_until(float(time_public))
+            if blocked_until is not None:
+                await self._warn_publication_blocked(call, blocked_until)
+                return False
+
             logger.info(self.delayed_message)
             logger.info(message_id)
             if message_id in self.delayed_message:
@@ -458,7 +469,7 @@ class SubBot:
                     new_time_seconds=int(time_public),
                 )
                 logger.info("time post set")
-                return
+                return True
             await self.delayed_database.add_delayed_posts({
                 "bot_id": self.bot_info.id,
                 "time_seconds": int(time_public),
@@ -470,6 +481,7 @@ class SubBot:
 
             logger.debug(old_time)
             logger.info("post delayed")
+            return True
 
         @logger.catch
         @self.sup_bot.callback_query_handler(func=lambda call: True)
@@ -491,6 +503,10 @@ class SubBot:
                 case "send_suggest":
                     is_anon = call.message.message_id in self.anonym_send
                     sender_id = int(call.data.split(";")[1])
+                    blocked_until = await self._get_publication_blocked_until(datetime.now(timezone.utc).timestamp())
+                    if blocked_until is not None:
+                        await self._warn_publication_blocked(call, blocked_until)
+                        return
                     logger.debug(sender_id)
                     info_sender = await self.sup_bot.get_chat(sender_id)
                     logger.debug(info_sender)
@@ -553,6 +569,11 @@ class SubBot:
                         is_send=False
                     )
                 case "day_choice":
+                    time_public = await Utils.get_timestamp_public(call.data.split(";")[2])
+                    blocked_until = await self._get_publication_blocked_until(float(time_public))
+                    if blocked_until is not None:
+                        await self._warn_publication_blocked(call, blocked_until)
+                        return
                     sender_info = await self.sup_bot.get_chat(int(call.data.split(";")[4]))
                     await utils_func.save_post(
                         call,
@@ -560,7 +581,8 @@ class SubBot:
                         sender_info,
                         self.bot_info.username,
                     )
-                    await save_delayed_post(call)
+                    if not await save_delayed_post(call):
+                        return
                     await self._sync_editorial_submission_status(
                         review_message_id=call.message.message_id,
                         status=SubmissionStatus.CONTENT_CREATED,
@@ -614,10 +636,20 @@ class SubBot:
     @logger.catch
     async def check_admin(self, channel_id) -> bool:
         try:
-            await self.sup_bot.get_chat_member(channel_id, self.bot_info.id)
-            return True
-        except ApiTelegramException:
-            return False
+            member = await self.sup_bot.get_chat_member(chat_id=channel_id, user_id=self.bot_info.id)
+            return member.status in ("administrator", "creator")
+        except ApiTelegramException as ex:
+            logger.warning("Failed to check subbot admin by channel id {}: {}", channel_id, ex)
+
+        for chat_ref in (channel_id, self.channel_username):
+            try:
+                admins = await self.sup_bot.get_chat_administrators(chat_ref)
+            except ApiTelegramException as retry_ex:
+                logger.warning("Failed to check subbot admins by chat {}: {}", chat_ref, retry_ex)
+                continue
+            if any(getattr(admin.user, "id", None) == self.bot_info.id for admin in admins):
+                return True
+        return False
 
     async def _sync_editorial_submission_status(
         self,
@@ -637,6 +669,72 @@ class SubBot:
             )
         except Exception as ex:
             logger.error("Failed to sync legacy moderation action to editorial submission: {}", ex)
+
+    async def _get_publication_blocked_until(self, timestamp: float) -> float | None:
+        legacy_until = self.publication_guard.next_timestamp_after_legacy_ad_window(
+            timestamp,
+            self.advertising_data,
+            settings.shift_time_seconds,
+        )
+        try:
+            blackout = await self.publication_guard.get_blackout_for_telegram_channel(
+                tg_channel_id=self.channel_id,
+                when=datetime.fromtimestamp(timestamp, tz=timezone.utc),
+            )
+        except Exception as ex:
+            logger.error("Failed to check editorial ad blackout for legacy publication: {}", ex)
+            blackout = None
+        blackout_until = blackout.ends_at.timestamp() if blackout is not None else None
+        candidates = [item for item in (legacy_until, blackout_until) if item is not None]
+        if not candidates:
+            return None
+        return max(candidates)
+
+    async def _warn_publication_blocked(self, call: CallbackQuery, blocked_until: float) -> None:
+        until_text = await Utils.get_timestamp_to_time(blocked_until)
+        text = (
+            f"Ad window is active until {until_text}. "
+            "Legacy publication is blocked; choose another time or try later."
+        )
+        try:
+            await self.sup_bot.answer_callback_query(
+                callback_query_id=call.id,
+                text=text[:200],
+                show_alert=True,
+            )
+        except Exception as ex:
+            logger.debug("Failed to answer blocked legacy publication callback: {}", ex)
+        await self.sup_bot.send_message(call.message.chat.id, text)
+
+    async def reschedule_delayed_if_publication_blocked(self, message_id: int, sender_id: int | str) -> bool:
+        now_timestamp = datetime.now(timezone.utc).timestamp()
+        blocked_until = await self._get_publication_blocked_until(now_timestamp)
+        if blocked_until is None:
+            return False
+
+        new_time = int(max(blocked_until, now_timestamp + settings.const_time_sleep))
+        self.delayed_message[message_id] = [new_time, sender_id]
+        await self.delayed_database.setter_post(
+            bot_id=self.bot_info.id,
+            message_id=message_id,
+            new_time_seconds=new_time,
+        )
+        try:
+            markup = await MarkupButton(self.sup_bot).get_markup(new_time, sender_id)
+            await self.sup_bot.edit_message_reply_markup(
+                chat_id=self.chat_suggest,
+                message_id=message_id,
+                reply_markup=markup,
+            )
+        except Exception as ex:
+            logger.error("Failed to refresh delayed post markup after ad-window reschedule: {}", ex)
+        logger.info(
+            "Rescheduled delayed message {} for channel {} because an ad window is active until {}",
+            message_id,
+            self.channel_username,
+            new_time,
+        )
+        return True
 
     async def stop_bot(self) -> None:
         if self.polling_task:

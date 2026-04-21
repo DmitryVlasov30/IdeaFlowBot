@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Iterable
 
-from sqlalchemy import delete as sql_delete, or_, select
+from sqlalchemy import delete as sql_delete, or_, select, update as sql_update
 from telebot.async_telebot import AsyncTeleBot
 
 from src.core_database.database import CrudBannedUser
@@ -80,7 +80,29 @@ class TelegramEditorialActions:
         async with session_factory() as session:
             return await self.importer.import_new(session)
 
+    async def sync_channel_activity_from_bindings(self) -> None:
+        bindings = await self.legacy_reader.fetch_all_bot_bindings()
+        active_tg_channel_ids = [int(binding.channel_id) for binding in bindings]
+
+        async with session_factory() as session:
+            await self.importer.sync_channels(session)
+            if active_tg_channel_ids:
+                await session.execute(
+                    sql_update(Channel)
+                    .where(Channel.tg_channel_id.in_(active_tg_channel_ids))
+                    .values(is_active=True)
+                )
+                await session.execute(
+                    sql_update(Channel)
+                    .where(~Channel.tg_channel_id.in_(active_tg_channel_ids))
+                    .values(is_active=False)
+                )
+            else:
+                await session.execute(sql_update(Channel).values(is_active=False))
+            await session.commit()
+
     async def list_channels(self) -> list[Channel]:
+        await self.sync_channel_activity_from_bindings()
         async with session_factory() as session:
             return await self.channel_service.list_channels(session)
 
@@ -161,24 +183,29 @@ class TelegramEditorialActions:
             return False
 
     async def list_user_moderation_feed_channel_ids(self, user_id: int) -> list[int]:
+        await self.sync_channel_activity_from_bindings()
         async with session_factory() as session:
             return [
                 int(channel_id)
                 for channel_id in (
                     await session.execute(
                         select(ModerationChannelSubscription.channel_id)
+                        .join(Channel, Channel.id == ModerationChannelSubscription.channel_id)
                         .where(ModerationChannelSubscription.user_id == user_id)
+                        .where(Channel.is_active.is_(True))
                         .order_by(ModerationChannelSubscription.channel_id.asc())
                     )
                 ).scalars().all()
             ]
 
     async def list_user_moderation_feed_channels(self, user_id: int) -> list[Channel]:
+        await self.sync_channel_activity_from_bindings()
         async with session_factory() as session:
             stmt = (
                 select(Channel)
                 .join(ModerationChannelSubscription, ModerationChannelSubscription.channel_id == Channel.id)
                 .where(ModerationChannelSubscription.user_id == user_id)
+                .where(Channel.is_active.is_(True))
                 .order_by(Channel.id.asc())
             )
             return list((await session.execute(stmt)).scalars().all())
@@ -204,8 +231,45 @@ class TelegramEditorialActions:
             )
             if channel is None:
                 raise ValueError(f"Channel with tg id {tg_channel_id} not found")
+            channel.is_active = True
             await session.commit()
+            await session.refresh(channel)
             return channel
+
+    async def deactivate_channel_by_tg_channel_id(self, tg_channel_id: int) -> bool:
+        async with session_factory() as session:
+            channel = await self.channel_service.set_channel_active_by_tg_id(
+                session=session,
+                tg_channel_id=tg_channel_id,
+                is_active=False,
+            )
+            if channel is None:
+                return False
+
+            await session.execute(
+                sql_update(PublicationLog)
+                .where(
+                    PublicationLog.channel_id == channel.id,
+                    PublicationLog.publish_status == PublicationStatus.SCHEDULED,
+                )
+                .values(
+                    publish_status=PublicationStatus.CANCELLED,
+                    error_text="Channel was unlinked from the panel",
+                )
+            )
+            await session.execute(
+                sql_update(ContentItem)
+                .where(
+                    ContentItem.channel_id == channel.id,
+                    ContentItem.status == ContentItemStatus.SCHEDULED,
+                )
+                .values(
+                    status=ContentItemStatus.APPROVED,
+                    scheduled_for=None,
+                )
+            )
+            await session.commit()
+            return True
 
     async def ensure_submission_for_review_message(
         self,
@@ -494,6 +558,12 @@ class TelegramEditorialActions:
 
     async def approve_submission(self, submission_id: int, reviewer_id: int) -> ContentItem:
         async with session_factory() as session:
+            submission = await session.get(Submission, submission_id)
+            if submission is None:
+                raise ValueError(f"Submission {submission_id} not found")
+            channel = await session.get(Channel, submission.channel_id)
+            if channel is None or not channel.is_active:
+                raise ValueError("Channel is inactive or unlinked")
             item = await self._get_or_create_content_item(session, submission_id)
             if item.status != ContentItemStatus.APPROVED:
                 item = await self.moderation.review_content_item(
@@ -510,6 +580,9 @@ class TelegramEditorialActions:
             submission = await session.get(Submission, submission_id)
             if submission is None:
                 raise ValueError(f"Submission {submission_id} not found")
+            channel = await session.get(Channel, submission.channel_id)
+            if channel is None or not channel.is_active:
+                raise ValueError("Channel is inactive or unlinked")
             now = datetime.now(timezone.utc)
             if await self.channel_service.is_channel_in_ad_blackout(session, submission.channel_id, now):
                 raise ValueError(
@@ -634,10 +707,15 @@ class TelegramEditorialActions:
         )
 
     async def list_pending_content_items(self) -> list[ContentItem]:
+        await self.sync_channel_activity_from_bindings()
         async with session_factory() as session:
             stmt = (
                 select(ContentItem)
-                .where(ContentItem.status == ContentItemStatus.PENDING_REVIEW)
+                .join(Channel, Channel.id == ContentItem.channel_id)
+                .where(
+                    ContentItem.status == ContentItemStatus.PENDING_REVIEW,
+                    Channel.is_active.is_(True),
+                )
                 .order_by(ContentItem.created_at.asc())
                 .limit(50)
             )
@@ -705,6 +783,12 @@ class TelegramEditorialActions:
 
     async def approve_content_item(self, content_item_id: int, reviewer_id: int) -> ContentItem:
         async with session_factory() as session:
+            item = await session.get(ContentItem, content_item_id)
+            if item is None:
+                raise ValueError(f"Content item {content_item_id} not found")
+            channel = await session.get(Channel, item.channel_id)
+            if channel is None or not channel.is_active:
+                raise ValueError("Channel is inactive or unlinked")
             return await self.moderation.review_content_item(
                 session=session,
                 content_item_id=content_item_id,
@@ -718,6 +802,9 @@ class TelegramEditorialActions:
             item = await session.get(ContentItem, content_item_id)
             if item is None:
                 raise ValueError(f"Content item {content_item_id} not found")
+            channel = await session.get(Channel, item.channel_id)
+            if channel is None or not channel.is_active:
+                raise ValueError("Channel is inactive or unlinked")
             now = datetime.now(timezone.utc)
             if await self.channel_service.is_channel_in_ad_blackout(session, item.channel_id, now):
                 raise ValueError(
@@ -832,10 +919,18 @@ class TelegramEditorialActions:
                     continue
 
                 try:
+                    channel_signature = await self.publisher.resolve_channel_signature(
+                        binding.bot_api_token,
+                        channel,
+                    )
                     telegram_message_id = await self.publisher.telegram_adapter.send_text(
                         bot_token=binding.bot_api_token,
                         channel_id=channel.tg_channel_id,
-                        text=cleaned_body,
+                        text=self.publisher.format_publication_text(
+                            cleaned_body,
+                            channel,
+                            channel_signature=channel_signature,
+                        ),
                     )
                 except Exception as ex:
                     item.status = ContentItemStatus.HOLD

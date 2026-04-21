@@ -44,6 +44,8 @@ POSTGRES_BIGINT_COLUMNS = {
     "users": ["user_id"],
 }
 
+LEGACY_SQLITE_IMPORT_MARKER_TABLE = "legacy_sqlite_import_marker"
+
 
 async def create_table():
     async with db_helper.engine.begin() as conn:
@@ -56,6 +58,7 @@ async def ensure_legacy_schema() -> None:
     async with db_helper.engine.begin() as conn:
         if conn.dialect.name != "sqlite":
             await conn.run_sync(Base.metadata.create_all)
+            await _ensure_legacy_sqlite_import_marker_table(conn)
             await _ensure_postgres_bigint_columns(conn)
             should_migrate_from_sqlite = True
         else:
@@ -198,6 +201,49 @@ async def _legacy_source_needs_sync(conn, sqlite_conn: sqlite3.Connection) -> bo
     return False
 
 
+async def _ensure_legacy_sqlite_import_marker_table(conn) -> None:
+    await conn.exec_driver_sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {LEGACY_SQLITE_IMPORT_MARKER_TABLE} (
+            id INTEGER PRIMARY KEY,
+            imported_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+        )
+        """
+    )
+
+
+async def _legacy_sqlite_import_was_marked(conn) -> bool:
+    row = await conn.exec_driver_sql(
+        f"SELECT 1 FROM {LEGACY_SQLITE_IMPORT_MARKER_TABLE} WHERE id = 1 LIMIT 1"
+    )
+    return row.first() is not None
+
+
+async def _mark_legacy_sqlite_imported(conn) -> None:
+    await conn.exec_driver_sql(
+        f"""
+        INSERT INTO {LEGACY_SQLITE_IMPORT_MARKER_TABLE} (id)
+        VALUES (1)
+        ON CONFLICT (id) DO NOTHING
+        """
+    )
+
+
+async def _current_postgres_legacy_tables_have_data(conn) -> bool:
+    for table in Base.metadata.sorted_tables:
+        target_rows = await conn.scalar(select(func.count()).select_from(table))
+        if int(target_rows or 0) > 0:
+            return True
+    return False
+
+
+def _sqlite_source_has_rows(sqlite_conn: sqlite3.Connection) -> bool:
+    for table in Base.metadata.sorted_tables:
+        if _sqlite_table_row_count(sqlite_conn, table.name) > 0:
+            return True
+    return False
+
+
 async def migrate_legacy_sqlite_to_current_db() -> None:
     source_path = settings.legacy_sqlite_path
     if not source_path.exists():
@@ -207,9 +253,21 @@ async def migrate_legacy_sqlite_to_current_db() -> None:
         if conn.dialect.name == "sqlite":
             return
 
+        await _ensure_legacy_sqlite_import_marker_table(conn)
+        if await _legacy_sqlite_import_was_marked(conn):
+            return
+
         with sqlite3.connect(source_path) as sqlite_conn:
             sqlite_conn.row_factory = sqlite3.Row
-            if not await _legacy_source_needs_sync(conn, sqlite_conn):
+            if not _sqlite_source_has_rows(sqlite_conn):
+                await _mark_legacy_sqlite_imported(conn)
+                return
+
+            if await _current_postgres_legacy_tables_have_data(conn):
+                logger.info(
+                    "Skipping legacy SQLite import because PostgreSQL already has data; marking import as completed"
+                )
+                await _mark_legacy_sqlite_imported(conn)
                 return
 
             for table in Base.metadata.sorted_tables:
@@ -225,6 +283,7 @@ async def migrate_legacy_sqlite_to_current_db() -> None:
 
             for table in Base.metadata.sorted_tables:
                 await _set_postgres_sequence(conn, table.name)
+            await _mark_legacy_sqlite_imported(conn)
 
 
 async def drop_table():
@@ -327,12 +386,13 @@ class CrudBotsData:
 
     @staticmethod
     async def delete_bots_info(data: dict) -> None:
+        bot_username = str(data["bot_username"]).replace("@", "")
         async with db_helper.engine.connect() as conn:
             await conn.execute(
                 delete(BotsData)
                 .filter(and_(
                     BotsData.channel_id == data["channel_id"],
-                    BotsData.bot_username == data["bot_username"],
+                    BotsData.bot_username.in_([bot_username, f"@{bot_username}"]),
                 ))
             )
             await conn.commit()
