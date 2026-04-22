@@ -15,6 +15,7 @@ from src.editorial.models.content import ContentItem
 from src.editorial.models.enums import ContentItemStatus, PublicationStatus
 from src.editorial.models.publication import PublicationLog
 from src.editorial.models.submission import Submission
+from src.editorial.services.legacy_audit import LEGACY_DELAYED_AUDIT_TEMPLATE_KEY
 from src.editorial.services.legacy_source import LegacyCollectorReader, LegacySenderRow
 from src.editorial.services.paste_service import PasteService
 from src.editorial.services.telegram_publisher import TelegramPublisherAdapter
@@ -345,6 +346,11 @@ class PublisherService:
                     .where(
                         PublicationLog.publish_status == PublicationStatus.SCHEDULED,
                         PublicationLog.scheduled_for <= now,
+                        PublicationLog.content_item_id.not_in(
+                            select(ContentItem.id).where(
+                                ContentItem.template_key == LEGACY_DELAYED_AUDIT_TEMPLATE_KEY
+                            )
+                        ),
                     )
                     .order_by(PublicationLog.scheduled_for.asc())
                     .limit(limit or settings.publisher_batch_size)

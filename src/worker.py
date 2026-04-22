@@ -394,7 +394,7 @@ class SubBot:
                 self.advertising_data
             ))
             flag_interval = False
-            for message_id in self.delayed_message.keys():
+            for message_id in list(self.delayed_message.keys()):
                 for interval_down, interval_up in interval_lst:
                     if interval_down <= self.delayed_message[message_id][0] <= interval_up:
                         flag_interval = True
@@ -408,10 +408,20 @@ class SubBot:
                     old_time = await Utils.get_timestamp_to_time(self.delayed_message[message_id][0])
                     logger.debug(old_time)
                     self.delayed_message[message_id][0] += settings.shift_time_seconds
-                    await self.delayed_database.setter_post(
-                        bot_id=self.bot_info.id,
-                        new_time_seconds=self.delayed_message[message_id][0],
-                        message_id=message_id
+                    await self.delayed_database.upsert_delayed_post({
+                        "bot_id": self.bot_info.id,
+                        "time_seconds": int(self.delayed_message[message_id][0]),
+                        "message_id": int(message_id),
+                        "sender_id": int(self.delayed_message[message_id][1]),
+                    })
+                    await self._sync_editorial_submission_status(
+                        review_message_id=message_id,
+                        status=SubmissionStatus.CONTENT_CREATED,
+                        moderator_note="Handled in legacy moderation: delayed shifted by ad",
+                        legacy_scheduled_for=datetime.fromtimestamp(
+                            float(self.delayed_message[message_id][0]),
+                            tz=timezone.utc,
+                        ),
                     )
                     new_time = await Utils.get_timestamp_to_time(self.delayed_message[message_id][0])
                     logger.debug(new_time)
@@ -458,29 +468,18 @@ class SubBot:
 
             logger.info(self.delayed_message)
             logger.info(message_id)
-            if message_id in self.delayed_message:
-                self.delayed_message[message_id] = [int(time_public), sender_id]
-                old_time = await Utils.get_timestamp_to_time(self.delayed_message[message_id][0])
-
-                logger.debug(old_time)
-                await self.delayed_database.setter_post(
-                    bot_id=self.bot_info.id,
-                    message_id=message_id,
-                    new_time_seconds=int(time_public),
-                )
-                logger.info("time post set")
-                return True
-            await self.delayed_database.add_delayed_posts({
+            already_delayed = message_id in self.delayed_message
+            self.delayed_message[message_id] = [int(time_public), int(sender_id)]
+            await self.delayed_database.upsert_delayed_post({
                 "bot_id": self.bot_info.id,
                 "time_seconds": int(time_public),
                 "message_id": message_id,
-                "sender_id": sender_id
+                "sender_id": int(sender_id)
             })
-            self.delayed_message[message_id] = [int(time_public), sender_id]
             old_time = await Utils.get_timestamp_to_time(self.delayed_message[message_id][0])
 
             logger.debug(old_time)
-            logger.info("post delayed")
+            logger.info("time post set" if already_delayed else "post delayed")
             return True
 
         @logger.catch
@@ -545,13 +544,6 @@ class SubBot:
                         moderator_note="Handled in legacy moderation: rejected",
                     )
                 case "delayed_button":
-                    if (call.message.text is not None and "Отложено" in call.message.text) or (call.message.caption is not None and "Отложено" in call.message.caption):
-                        del self.delayed_message[call.message.id]
-                        await self.delayed_database.delete_delayed_posts({
-                            "bot_id": self.bot_info.id,
-                            "message_id": call.message.id,
-                        })
-                    # logger.info("delayed_button")
                     await buttons_func.delayed_post(call)
                 case "morning" | "dinner" | "evening" | "night":
                     await buttons_func.delayed_day(
@@ -587,6 +579,7 @@ class SubBot:
                         review_message_id=call.message.message_id,
                         status=SubmissionStatus.CONTENT_CREATED,
                         moderator_note="Handled in legacy moderation: delayed",
+                        legacy_scheduled_for=datetime.fromtimestamp(float(time_public), tz=timezone.utc),
                     )
                     logger.debug(call.data)
                     await buttons_func.delayed_buttons_times(
@@ -594,14 +587,15 @@ class SubBot:
                         int(call.data.split(";")[4])
                     )
                 case "reject_delayed":
+                    review_message_id = call.message.message_id
                     await self.delayed_database.delete_delayed_posts({
                         "bot_id": self.bot_info.id,
-                        "message_id": call.message.id,
+                        "message_id": review_message_id,
                     })
-                    del self.delayed_message[call.message.id]
+                    self.delayed_message.pop(review_message_id, None)
                     await buttons_func.reject_post(call)
                     await self._sync_editorial_submission_status(
-                        review_message_id=call.message.message_id,
+                        review_message_id=review_message_id,
                         status=SubmissionStatus.REJECTED,
                         moderator_note="Handled in legacy moderation: delayed rejected",
                     )
@@ -656,6 +650,7 @@ class SubBot:
         review_message_id: int,
         status: SubmissionStatus,
         moderator_note: str,
+        legacy_scheduled_for: datetime | None = None,
     ) -> None:
         if self.chat_suggest is None:
             return
@@ -666,6 +661,7 @@ class SubBot:
                 review_message_id=review_message_id,
                 status=status,
                 moderator_note=moderator_note,
+                legacy_scheduled_for=legacy_scheduled_for,
             )
         except Exception as ex:
             logger.error("Failed to sync legacy moderation action to editorial submission: {}", ex)
@@ -713,11 +709,18 @@ class SubBot:
             return False
 
         new_time = int(max(blocked_until, now_timestamp + settings.const_time_sleep))
-        self.delayed_message[message_id] = [new_time, sender_id]
-        await self.delayed_database.setter_post(
-            bot_id=self.bot_info.id,
-            message_id=message_id,
-            new_time_seconds=new_time,
+        self.delayed_message[message_id] = [new_time, int(sender_id)]
+        await self.delayed_database.upsert_delayed_post({
+            "bot_id": self.bot_info.id,
+            "time_seconds": new_time,
+            "message_id": int(message_id),
+            "sender_id": int(sender_id),
+        })
+        await self._sync_editorial_submission_status(
+            review_message_id=message_id,
+            status=SubmissionStatus.CONTENT_CREATED,
+            moderator_note="Handled in legacy moderation: delayed rescheduled by ad window",
+            legacy_scheduled_for=datetime.fromtimestamp(float(new_time), tz=timezone.utc),
         )
         try:
             markup = await MarkupButton(self.sup_bot).get_markup(new_time, sender_id)
@@ -751,7 +754,7 @@ class SubBot:
         return self.delayed_message
 
     async def send_delayed_message(self, message_id, sender_id) -> None:
-        del self.delayed_message[message_id]
+        self.delayed_message.pop(message_id, None)
         markup = None
 
         if message_id in self.anonym_send:
@@ -762,13 +765,22 @@ class SubBot:
                 markup = InlineKeyboardMarkup()
                 markup.add(button)
 
-        await self.sup_bot.copy_message(
+        copied_message = await self.sup_bot.copy_message(
             from_chat_id=self.chat_suggest,
             chat_id=self.channel_id,
             message_id=message_id,
             reply_markup=markup,
         )
         logger.info(f"send delayed message: {message_id}, username_channel: {self.channel_username}")
+        try:
+            await self.legacy_moderation_sync.mark_legacy_delayed_published(
+                channel_tg_id=self.channel_id,
+                review_chat_id=self.chat_suggest,
+                review_message_id=message_id,
+                telegram_message_id=getattr(copied_message, "message_id", None),
+            )
+        except Exception as ex:
+            logger.error("Failed to mark legacy delayed audit as published: {}", ex)
         await MarkupButton(self.sup_bot).push_post_button(self.chat_suggest, message_id, sender_id)
 
     async def run_bot(self) -> None:

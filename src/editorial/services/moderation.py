@@ -159,6 +159,10 @@ class ModerationService:
         channel_id: int | None = None,
         body_text: str | None = None,
         status: ContentItemStatus = ContentItemStatus.PENDING_REVIEW,
+        review_required: bool = True,
+        template_key: str | None = None,
+        tone_key: str = "community",
+        scheduled_for: datetime | None = None,
     ) -> ContentItem:
         submission = await session.get(Submission, submission_id)
         if submission is None:
@@ -186,10 +190,11 @@ class ModerationService:
             text_hash=text_hash,
             primary_tag=pick_primary_tag(tags),
             tags=tags,
-            template_key=self._template_key_for_submission(submission),
-            tone_key="community",
-            review_required=True,
+            template_key=template_key or self._template_key_for_submission(submission),
+            tone_key=tone_key,
+            review_required=review_required,
             status=status,
+            scheduled_for=scheduled_for,
         )
         session.add(item)
         reviewed_at = datetime.now(timezone.utc)

@@ -487,6 +487,16 @@ class CrudDelayedPosts:
             await conn.commit()
 
     @staticmethod
+    async def upsert_delayed_post(data: dict) -> None:
+        async with db_helper.engine.connect() as conn:
+            await conn.execute(
+                delete(DelayedPost)
+                .filter(and_(DelayedPost.bot_id == data["bot_id"], DelayedPost.message_id == data["message_id"]))
+            )
+            await conn.execute(insert(DelayedPost).values(data))
+            await conn.commit()
+
+    @staticmethod
     async def setter_post(bot_id: int, new_time_seconds: int, message_id: int) -> None:
         async with db_helper.engine.connect() as conn:
             await conn.execute(
