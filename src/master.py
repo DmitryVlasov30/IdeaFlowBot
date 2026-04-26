@@ -21,6 +21,7 @@ from telebot.types import (
 from config import settings
 from src.core_database.database import CrudBotAdmins, CrudBotsData, CrudDelayedPosts
 from src.editorial.models.enums import SubmissionStatus
+from src.editorial.services.advertising import send_advertising_flow
 from src.editorial.services.db_export import DatabaseExportService
 from src.editorial.services.legacy_source import LegacyCollectorReader
 from src.editorial.services.sql_export import SqlExportService
@@ -388,7 +389,7 @@ class MasterBot:
             hello_msg=settings.hello_msg,
             ban_usr_msg=settings.ban_msg,
             send_post_msg=settings.send_post_msg,
-            callback_adv_action=self.callback_adv_send_message,
+            callback_adv_action=self.callback_adv_send_message_v2,
             callback_new_submission=self.callback_new_submission_notification,
         )
         if bot.bot_info is None:
@@ -1707,6 +1708,24 @@ class MasterBot:
             except Exception as ex:
                 logger.error(ex)
 
+    @logger.catch
+    async def callback_adv_send_message_v2(
+        self,
+        call: CallbackQuery,
+        source_bot: AsyncTeleBot,
+        channel_label: str,
+        info_sender: User,
+        source_text: str | None = None,
+    ) -> None:
+        await send_advertising_flow(
+            bot=source_bot,
+            recipient_user_id=info_sender.id,
+            channel_label=channel_label,
+            source_text=source_text or call.message.text or call.message.caption,
+            sender_username=info_sender.username,
+            sender_first_name=info_sender.first_name,
+        )
+
     def __setup_handlers(self) -> None:
         @self.main_bot.message_handler(commands=["start", "panel"])
         async def start(message: Message) -> None:
@@ -1927,7 +1946,7 @@ class MasterBot:
                             )
                     case "advertise":
                         try:
-                            await self.editorial_actions.send_submission_advertising_reply(submission_id)
+                            await self.editorial_actions.send_submission_advertising_reply_v2(submission_id)
                             await self.main_bot.send_message(
                                 call.message.chat.id,
                                 f"Пользователю по сообщению {submission_id} отправлена инструкция по рекламе.",
@@ -2407,7 +2426,7 @@ class MasterBot:
                         hello_msg=settings.hello_msg,
                         ban_usr_msg=settings.ban_msg,
                         send_post_msg=settings.send_post_msg,
-                        callback_adv_action=self.callback_adv_send_message,
+                        callback_adv_action=self.callback_adv_send_message_v2,
                         callback_new_submission=self.callback_new_submission_notification,
                     )
                     await bot.run_bot()

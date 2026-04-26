@@ -36,6 +36,11 @@ class Settings:
     sup_bot_limit: int = int(os.getenv("SUP_BOT_LIMIT", "20"))
     media_preview_max_mb: int = int(os.getenv("MEDIA_PREVIEW_MAX_MB", "20"))
     advertiser: list[int] = field(default_factory=lambda: _split_int_collection(os.getenv("ADVERTISER_IDS", "")))
+    advertising_manager_username: str = os.getenv("ADVERTISING_MANAGER_USERNAME", "@ivanblk")
+    advertising_bot_token: str = os.getenv(
+        "ADVERTISING_BOT_TOKEN",
+        "8150027786:AAFvsKzexPaJ6YCEWlHkKgoFtv3giN7rubk",
+    )
     advertising_text: str = os.getenv(
         "ADVERTISING_TEXT",
         "Спасибо! Ваш запрос передан рекламному менеджеру. С вами свяжутся отдельно.",

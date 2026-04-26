@@ -402,7 +402,6 @@ class MarkupButton:
             callback_data=f"add_info;{sender_id}"
         )
         markup.add(button_info)
-        await self.bot.send_message(text=settings.advertising_text, chat_id=sender_id)
         await self.bot.edit_message_reply_markup(
             chat_id=call.message.chat.id,
             message_id=call.message.message_id,

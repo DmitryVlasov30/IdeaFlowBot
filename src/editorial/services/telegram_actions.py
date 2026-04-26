@@ -19,6 +19,7 @@ from src.editorial.models.notification import NotificationSubscription
 from src.editorial.models.paste import PasteLibrary
 from src.editorial.models.publication import PublicationLog
 from src.editorial.models.submission import Submission
+from src.editorial.services.advertising import send_advertising_flow
 from src.editorial.services.channel_history_service import ChannelHistoryImportResult, ChannelHistoryService
 from src.editorial.services.channel_service import ChannelService
 from src.editorial.services.generation.service import GenerationService
@@ -654,6 +655,42 @@ class TelegramEditorialActions:
         await self.reply_to_submission_author(
             submission_id,
             "По рекламе напишите пожалуйста @ivanblk, сразу укажите, что вы хотите рекламировать",
+        )
+
+    async def send_submission_advertising_reply_v2(self, submission_id: int) -> None:
+        async with session_factory() as session:
+            submission = await session.get(Submission, submission_id)
+            if submission is None:
+                raise ValueError(f"Submission {submission_id} not found")
+            if submission.source_user_id is None:
+                raise ValueError("Submission has no source user id")
+            channel = await session.get(Channel, submission.channel_id)
+            if channel is None:
+                raise ValueError(f"Channel {submission.channel_id} not found")
+
+        binding = await self.legacy_reader.get_bot_binding(channel.tg_channel_id)
+        if binding is None:
+            raise ValueError(f"Legacy bot binding for channel {channel.tg_channel_id} not found")
+
+        bot = AsyncTeleBot(binding.bot_api_token)
+        channel_label = channel.title or str(channel.tg_channel_id)
+        try:
+            telegram_channel = await bot.get_chat(channel.tg_channel_id)
+            channel_username = getattr(telegram_channel, "username", None)
+            if channel_username:
+                channel_label = f"@{channel_username}"
+            else:
+                channel_label = getattr(telegram_channel, "title", None) or channel_label
+        except Exception:
+            pass
+
+        await send_advertising_flow(
+            bot=bot,
+            recipient_user_id=int(submission.source_user_id),
+            channel_label=channel_label,
+            source_text=submission.raw_text or submission.cleaned_text,
+            sender_username=submission.username,
+            sender_first_name=submission.first_name,
         )
 
     async def ban_submission_author(

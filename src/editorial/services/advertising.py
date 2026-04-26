@@ -1,0 +1,107 @@
+from __future__ import annotations
+
+from html import escape
+
+from loguru import logger
+from telebot.async_telebot import AsyncTeleBot
+
+from config import settings
+
+
+ADVERTISING_REPLY_TEXT = (
+    "По рекламе напишите пожалуйста @ivanblk, "
+    "сразу укажите, что вы хотите рекламировать"
+)
+
+
+def _normalize_channel_label(channel_label: str | None) -> str:
+    value = (channel_label or "").strip()
+    return value or "@unknown_channel"
+
+
+def _sender_tag(username: str | None) -> str:
+    return f"@{username}" if username else "@None"
+
+
+def _sender_nick(first_name: str | None) -> str:
+    value = (first_name or "").strip()
+    return value or "None"
+
+
+def build_advertising_alert_text(
+    *,
+    channel_label: str | None,
+    source_text: str | None,
+    sender_username: str | None,
+    sender_first_name: str | None,
+) -> str:
+    safe_channel = escape(_normalize_channel_label(channel_label))
+    safe_text = escape((source_text or "").strip() or "текста нет")
+    safe_sender_tag = escape(_sender_tag(sender_username))
+    safe_sender_nick = escape(_sender_nick(sender_first_name))
+    return (
+        f"реклама: {safe_channel}\n"
+        f"<blockquote>{safe_text}</blockquote>\n"
+        f"отправитель: {safe_sender_tag}, ник: {safe_sender_nick}"
+    )
+
+
+def resolve_advertising_targets() -> list[int | str]:
+    targets: list[int | str] = []
+    seen: set[str] = set()
+
+    for advertiser_id in settings.advertiser:
+        key = f"id:{advertiser_id}"
+        if key in seen:
+            continue
+        seen.add(key)
+        targets.append(int(advertiser_id))
+
+    username = (settings.advertising_manager_username or "").strip()
+    if username:
+        if not username.startswith("@"):
+            username = f"@{username}"
+        key = f"user:{username.lower()}"
+        if key not in seen:
+            seen.add(key)
+            targets.append(username)
+
+    return targets
+
+
+def _build_advertising_alert_bot() -> AsyncTeleBot | None:
+    token = (settings.advertising_bot_token or "").strip()
+    if not token:
+        return None
+    return AsyncTeleBot(token)
+
+
+async def send_advertising_flow(
+    *,
+    bot: AsyncTeleBot,
+    recipient_user_id: int,
+    channel_label: str | None,
+    source_text: str | None,
+    sender_username: str | None,
+    sender_first_name: str | None,
+) -> None:
+    await bot.send_message(chat_id=recipient_user_id, text=ADVERTISING_REPLY_TEXT)
+
+    advertiser_message = build_advertising_alert_text(
+        channel_label=channel_label,
+        source_text=source_text,
+        sender_username=sender_username,
+        sender_first_name=sender_first_name,
+    )
+
+    alert_bot = _build_advertising_alert_bot() or bot
+
+    for target in resolve_advertising_targets():
+        try:
+            await alert_bot.send_message(
+                chat_id=target,
+                text=advertiser_message,
+                parse_mode="HTML",
+            )
+        except Exception as ex:
+            logger.error("Failed to send advertising alert to {}: {}", target, ex)

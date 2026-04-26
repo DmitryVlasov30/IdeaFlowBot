@@ -625,7 +625,13 @@ class SubBot:
                     sender_id = call.data.split(";")[1]
                     info_sender = await self.sup_bot.get_chat(sender_id)
                     await buttons_func.advertising_button(call)
-                    await self.callback_adv_action(call, self.channel_username, info_sender)
+                    await self.callback_adv_action(
+                        call,
+                        self.sup_bot,
+                        self.channel_username or self.channel_title or str(self.channel_id),
+                        info_sender,
+                        call.message.text or call.message.caption,
+                    )
 
     @logger.catch
     async def check_admin(self, channel_id) -> bool:
