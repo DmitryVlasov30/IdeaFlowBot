@@ -226,6 +226,15 @@ def build_subbot_menu(subbot_buttons: list[tuple[str, int]]) -> InlineKeyboardMa
     return markup
 
 
+def build_subbot_remove_confirm(username: str, channel_id: int) -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton("\u0414\u0430", callback_data=f"subbot:remove_confirm:{username}:{channel_id}"),
+        InlineKeyboardButton("\u041d\u0435\u0442", callback_data="subbot:remove_cancel"),
+    )
+    return markup
+
+
 def build_channel_history_import_start_actions(channel_id: int) -> InlineKeyboardMarkup:
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(

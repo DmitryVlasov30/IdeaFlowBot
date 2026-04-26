@@ -23,6 +23,7 @@ from src.editorial.services.channel_history_service import ChannelHistoryImportR
 from src.editorial.services.channel_service import ChannelService
 from src.editorial.services.generation.service import GenerationService
 from src.editorial.services.import_legacy import LegacyImporter
+from src.editorial.services.legacy_moderation_sync import LegacyModerationSyncService
 from src.editorial.services.legacy_source import LegacyCollectorReader
 from src.editorial.services.moderation import ModerationService
 from src.editorial.services.paste_service import PasteService
@@ -67,6 +68,10 @@ class TelegramEditorialActions:
     def __init__(self) -> None:
         self.importer = LegacyImporter()
         self.legacy_reader = LegacyCollectorReader()
+        self.legacy_moderation_sync = LegacyModerationSyncService(
+            legacy_reader=self.legacy_reader,
+            importer=self.importer,
+        )
         self.moderation = ModerationService()
         self.paste_service = PasteService()
         self.channel_history_service = ChannelHistoryService()
@@ -796,6 +801,15 @@ class TelegramEditorialActions:
                 decision=ReviewDecision.APPROVE,
                 review_note="Approved in Telegram panel",
             )
+
+    async def sync_panel_submission_approved(self, submission_id: int) -> int:
+        return await self.legacy_moderation_sync.mark_panel_submission_approved(submission_id)
+
+    async def sync_panel_submission_rejected(self, submission_id: int) -> int:
+        return await self.legacy_moderation_sync.mark_panel_submission_rejected(submission_id)
+
+    async def sync_panel_submission_banned(self, submission_id: int) -> int:
+        return await self.legacy_moderation_sync.mark_panel_submission_banned(submission_id)
 
     async def publish_content_item_now(self, content_item_id: int, reviewer_id: int) -> PublicationLog:
         async with session_factory() as session:

@@ -41,6 +41,7 @@ from src.panel_markups import (
     build_submission_actions,
     build_submission_history_actions,
     build_subbot_menu,
+    build_subbot_remove_confirm,
 )
 from src.utils import filter_admin
 from src.worker import SubBot
@@ -1859,6 +1860,7 @@ class MasterBot:
                 match action:
                     case "approve":
                         item = await self.editorial_actions.approve_submission(submission_id, reviewer_id)
+                        await self.editorial_actions.sync_panel_submission_approved(submission_id)
                         await self.main_bot.send_message(call.message.chat.id, f"Сообщение {submission_id} одобрено. Content item #{item.id}.")
                         await self._show_first_pending_submission(call.message.chat.id, current_id=submission_id, user_id=call.from_user.id)
                     case "publish":
@@ -1868,6 +1870,7 @@ class MasterBot:
                             await self.main_bot.send_message(call.message.chat.id, str(exc))
                             await self.main_bot.answer_callback_query(call.id)
                             return
+                        await self.editorial_actions.sync_panel_submission_approved(submission_id)
                         await self.main_bot.send_message(call.message.chat.id, f"Сообщение {submission_id} отправлено в publish pipeline. Log #{log_item.id}.")
                         await self._show_first_pending_submission(call.message.chat.id, current_id=submission_id, user_id=call.from_user.id)
                     case "paste":
@@ -1880,10 +1883,12 @@ class MasterBot:
                         await self._show_first_pending_submission(call.message.chat.id, current_id=submission_id, user_id=call.from_user.id)
                     case "reject":
                         await self.editorial_actions.reject_submission(submission_id)
+                        await self.editorial_actions.sync_panel_submission_rejected(submission_id)
                         await self.main_bot.send_message(call.message.chat.id, f"Сообщение {submission_id} отклонено.")
                         await self._show_first_pending_submission(call.message.chat.id, current_id=submission_id, user_id=call.from_user.id)
                     case "ban":
                         result = await self.editorial_actions.ban_submission_author(submission_id, reviewer_id)
+                        await self.editorial_actions.sync_panel_submission_banned(submission_id)
                         author_label = f"@{result.username}" if result.username else str(result.user_id)
                         if result.already_banned:
                             await self.main_bot.send_message(
@@ -2254,6 +2259,59 @@ class MasterBot:
                     return
                 self._set_user_state(call.message.chat.id, "await_add_subbot")
                 await self.main_bot.send_message(call.message.chat.id, "Отправьте строку: <api_token> @channel_username")
+                await self.main_bot.answer_callback_query(call.id)
+                return
+
+            if data == "subbot:remove_cancel":
+                if not self._is_general_admin(call.message.chat.id):
+                    await self.main_bot.answer_callback_query(call.id, "\u0422\u043e\u043b\u044c\u043a\u043e \u0434\u043b\u044f \u0433\u0435\u043d\u0435\u0440\u0430\u043b\u044c\u043d\u043e\u0433\u043e \u0430\u0434\u043c\u0438\u043d\u0430.", show_alert=True)
+                    return
+                await self.main_bot.send_message(call.message.chat.id, "\u0423\u0434\u0430\u043b\u0435\u043d\u0438\u0435 \u0441\u0430\u0431\u0431\u043e\u0442\u0430 \u043e\u0442\u043c\u0435\u043d\u0435\u043d\u043e.")
+                await self._show_subbots_menu(call.message.chat.id)
+                await self.main_bot.answer_callback_query(call.id)
+                return
+
+            if data.startswith("subbot:remove_confirm:"):
+                if not self._is_general_admin(call.message.chat.id):
+                    await self.main_bot.answer_callback_query(call.id, "\u0422\u043e\u043b\u044c\u043a\u043e \u0434\u043b\u044f \u0433\u0435\u043d\u0435\u0440\u0430\u043b\u044c\u043d\u043e\u0433\u043e \u0430\u0434\u043c\u0438\u043d\u0430.", show_alert=True)
+                    return
+                _, _, _, username_bot, channel_id = data.split(":")
+                result_text = await self._remove_subbot_from_values(username_bot, int(channel_id))
+                await self.main_bot.send_message(call.message.chat.id, result_text)
+                await self._show_subbots_menu(call.message.chat.id)
+                await self.main_bot.answer_callback_query(call.id)
+                return
+
+            if data.startswith("subbot:remove:"):
+                if not self._is_general_admin(call.message.chat.id):
+                    await self.main_bot.answer_callback_query(call.id, "\u0422\u043e\u043b\u044c\u043a\u043e \u0434\u043b\u044f \u0433\u0435\u043d\u0435\u0440\u0430\u043b\u044c\u043d\u043e\u0433\u043e \u0430\u0434\u043c\u0438\u043d\u0430.", show_alert=True)
+                    return
+                _, _, username_bot, channel_id = data.split(":")
+                await self.main_bot.send_message(
+                    call.message.chat.id,
+                    f"\u0412\u044b \u0442\u043e\u0447\u043d\u043e \u0445\u043e\u0442\u0438\u0442\u0435 \u0443\u0434\u0430\u043b\u0438\u0442\u044c \u0441\u0430\u0431\u0431\u043e\u0442\u0430 @{username_bot}?",
+                    reply_markup=build_subbot_remove_confirm(username_bot, int(channel_id)),
+                )
+                await self.main_bot.answer_callback_query(call.id)
+                return
+
+            if data == "subbot:remove_cancel":
+                if not self._is_general_admin(call.message.chat.id):
+                    await self.main_bot.answer_callback_query(call.id, "РўРѕР»СЊРєРѕ РґР»СЏ РіРµРЅРµСЂР°Р»СЊРЅРѕРіРѕ Р°РґРјРёРЅР°.", show_alert=True)
+                    return
+                await self.main_bot.send_message(call.message.chat.id, "РЈРґР°Р»РµРЅРёРµ СЃР°Р±Р±РѕС‚Р° РѕС‚РјРµРЅРµРЅРѕ.")
+                await self._show_subbots_menu(call.message.chat.id)
+                await self.main_bot.answer_callback_query(call.id)
+                return
+
+            if data.startswith("subbot:remove_confirm:"):
+                if not self._is_general_admin(call.message.chat.id):
+                    await self.main_bot.answer_callback_query(call.id, "РўРѕР»СЊРєРѕ РґР»СЏ РіРµРЅРµСЂР°Р»СЊРЅРѕРіРѕ Р°РґРјРёРЅР°.", show_alert=True)
+                    return
+                _, _, _, username_bot, channel_id = data.split(":")
+                result_text = await self._remove_subbot_from_values(username_bot, int(channel_id))
+                await self.main_bot.send_message(call.message.chat.id, result_text)
+                await self._show_subbots_menu(call.message.chat.id)
                 await self.main_bot.answer_callback_query(call.id)
                 return
 
