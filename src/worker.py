@@ -672,7 +672,7 @@ class SubBot:
             return None
 
         for row in candidates:
-            candidate_chat_id = row[2]
+            candidate_chat_id = row.chat_id
             if await self._is_active_legacy_chat(candidate_chat_id):
                 return candidate_chat_id
             await self._drop_invalid_chat_suggest(candidate_chat_id)

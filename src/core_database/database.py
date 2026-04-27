@@ -409,12 +409,14 @@ class CrudChatAdmins:
                         .filter(ChatAdmins.bot_id == bot)
                         .order_by(ChatAdmins.id.desc())
                     )
-                ).fetchall()
-                return result[0][1] if result else None
+                ).scalars().all()
+                return result[0].chat_id if result else None
             if bot is None and chat is None:
-                return (await conn.execute(select(ChatAdmins))).fetchall()
+                return (await conn.execute(select(ChatAdmins))).scalars().all()
             elif bot is None:
-                return (await conn.execute(select(ChatAdmins).filter(ChatAdmins.chat_id == chat))).fetchall()
+                return (
+                    await conn.execute(select(ChatAdmins).filter(ChatAdmins.chat_id == chat))
+                ).scalars().all()
             elif chat is None:
                 return (
                     await conn.execute(
@@ -422,15 +424,17 @@ class CrudChatAdmins:
                         .filter(ChatAdmins.bot_id == bot)
                         .order_by(ChatAdmins.id.desc())
                     )
-                ).fetchall()
+                ).scalars().all()
             else:
-                return (await conn.execute(
-                    select(ChatAdmins)
-                    .filter(and_(
-                        ChatAdmins.chat_id == chat,
-                        ChatAdmins.bot_id == bot
-                    ))
-                )).fetchall()
+                return (
+                    await conn.execute(
+                        select(ChatAdmins)
+                        .filter(and_(
+                            ChatAdmins.chat_id == chat,
+                            ChatAdmins.bot_id == bot
+                        ))
+                    )
+                ).scalars().all()
 
     @staticmethod
     async def add_chat_admins(data: dict) -> None:
@@ -447,7 +451,7 @@ class CrudChatAdmins:
                     .filter(ChatAdmins.bot_id == bot_id)
                     .order_by(ChatAdmins.id.desc())
                 )
-            ).fetchall()
+            ).scalars().all()
 
     @staticmethod
     async def delete_chat_admins(data: dict) -> None:
