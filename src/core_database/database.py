@@ -403,14 +403,26 @@ class CrudChatAdmins:
     async def get_chat_admins(bot: int = None, chat: int = None) -> list | int:
         async with db_helper.engine.connect() as conn:
             if bot is not None and chat is None:
-                result = (await conn.execute(select(ChatAdmins).filter(ChatAdmins.bot_id == bot))).fetchall()
+                result = (
+                    await conn.execute(
+                        select(ChatAdmins)
+                        .filter(ChatAdmins.bot_id == bot)
+                        .order_by(ChatAdmins.id.desc())
+                    )
+                ).fetchall()
                 return result[0][1] if result else None
             if bot is None and chat is None:
                 return (await conn.execute(select(ChatAdmins))).fetchall()
             elif bot is None:
                 return (await conn.execute(select(ChatAdmins).filter(ChatAdmins.chat_id == chat))).fetchall()
             elif chat is None:
-                return (await conn.execute(select(ChatAdmins).filter(ChatAdmins.bot_id == bot))).fetchall()
+                return (
+                    await conn.execute(
+                        select(ChatAdmins)
+                        .filter(ChatAdmins.bot_id == bot)
+                        .order_by(ChatAdmins.id.desc())
+                    )
+                ).fetchall()
             else:
                 return (await conn.execute(
                     select(ChatAdmins)
@@ -425,6 +437,17 @@ class CrudChatAdmins:
         async with db_helper.engine.connect() as conn:
             await conn.execute(insert(ChatAdmins).values(data))
             await conn.commit()
+
+    @staticmethod
+    async def get_chat_admin_rows(bot_id: int) -> list:
+        async with db_helper.engine.connect() as conn:
+            return (
+                await conn.execute(
+                    select(ChatAdmins)
+                    .filter(ChatAdmins.bot_id == bot_id)
+                    .order_by(ChatAdmins.id.desc())
+                )
+            ).fetchall()
 
     @staticmethod
     async def delete_chat_admins(data: dict) -> None:

@@ -129,7 +129,7 @@ class SubBot:
         channel_username = getattr(channel_chat, "username", None)
         if channel_username:
             self.channel_username = f"@{channel_username}"
-        self.chat_suggest = (await self.admins_database.get_chat_admins(bot=self.bot_info.id))
+        self.chat_suggest = await self._refresh_chat_suggest()
         logger.info(f"{self.chat_suggest}")
         users = await self.user_database.get_user_data(bot_username=self.bot_info.username)
         self.users_data = set(user_id for user_id, bot_username, id_el in users)
@@ -138,8 +138,11 @@ class SubBot:
         for bot_id, time_seconds, message_id, sender_id, id_item in delayed_message:
             self.delayed_message[message_id] = [time_seconds, sender_id]
 
-        anonym_data = await self.anonym_message_database.get_posts(chat_id=self.chat_suggest)
-        self.anonym_send = set(map(lambda el: el[0], anonym_data))
+        if self.chat_suggest is not None:
+            anonym_data = await self.anonym_message_database.get_posts(chat_id=self.chat_suggest)
+            self.anonym_send = set(map(lambda el: el[0], anonym_data))
+        else:
+            self.anonym_send = set()
 
         advertising_data = await self.advertising_database.get_advertising(channel_id=self.channel_id)
         self.advertising_data = set(map(lambda el: (el[1], el[2]), advertising_data))
@@ -311,7 +314,7 @@ class SubBot:
                     "bot_id": self.bot_info.id,
                     "chat_id": chat_member_info.chat.id,
                 })
-                self.chat_suggest = chat_member_info.chat.id
+                self.chat_suggest = await self._refresh_chat_suggest()
             else:
                 chats = await self.admins_database.get_chat_admins(bot=self.bot_info.id, chat=chat_member_info.chat.id)
                 if chats:
@@ -319,7 +322,7 @@ class SubBot:
                         "bot_id": self.bot_info.id,
                         "chat_id": chat_member_info.chat.id,
                     })
-                self.chat_suggest = None
+                self.chat_suggest = await self._refresh_chat_suggest()
 
         @logger.catch
         @self.sup_bot.message_handler(
@@ -359,6 +362,7 @@ class SubBot:
                 logger.info("user banned")
                 return
 
+            self.chat_suggest = await self._refresh_chat_suggest()
             if self.chat_suggest is None:
                 await self.sup_bot.send_message(
                     chat_id=settings.general_admin,
@@ -367,10 +371,7 @@ class SubBot:
                 logger.info("bot not chat")
                 return
 
-            review_message = await (
-                MarkupButton(self.sup_bot)
-                .main_menu(message.chat.id, message.chat.id, message.message_id, self.chat_suggest)
-            )
+            review_message = await self._send_review_message_to_legacy_chat(message)
             await Utils().save_incoming_message_with_review(
                 message=message,
                 channel_id=self.channel_id,
@@ -632,6 +633,84 @@ class SubBot:
                         info_sender,
                         call.message.text or call.message.caption,
                     )
+
+    async def _send_review_message_to_legacy_chat(self, message: Message):
+        try:
+            return await (
+                MarkupButton(self.sup_bot)
+                .main_menu(message.chat.id, message.chat.id, message.message_id, self.chat_suggest)
+            )
+        except ApiTelegramException as ex:
+            if ex.error_code != 403:
+                raise
+            logger.warning(
+                "Failed to forward submission for bot @{} to legacy chat {}: {}. Refreshing chat binding.",
+                self.bot_info.username,
+                self.chat_suggest,
+                ex,
+            )
+            await self._drop_invalid_chat_suggest(self.chat_suggest)
+            self.chat_suggest = await self._refresh_chat_suggest()
+            if self.chat_suggest is None:
+                await self.sup_bot.send_message(
+                    chat_id=settings.general_admin,
+                    text=(
+                        f"Битая привязка легаси-чата у @{self.bot_info.username} была очищена. "
+                        f"Добавьте саббота заново в нужный модер-чат для канала "
+                        f"{self.channel_username or self.channel_title or self.channel_id}."
+                    ),
+                )
+                return None
+            return await (
+                MarkupButton(self.sup_bot)
+                .main_menu(message.chat.id, message.chat.id, message.message_id, self.chat_suggest)
+            )
+
+    async def _refresh_chat_suggest(self) -> int | None:
+        candidates = await self.admins_database.get_chat_admin_rows(self.bot_info.id)
+        if not candidates:
+            return None
+
+        for row in candidates:
+            candidate_chat_id = row[2]
+            if await self._is_active_legacy_chat(candidate_chat_id):
+                return candidate_chat_id
+            await self._drop_invalid_chat_suggest(candidate_chat_id)
+        return None
+
+    async def _is_active_legacy_chat(self, chat_id: int) -> bool:
+        try:
+            member = await self.sup_bot.get_chat_member(chat_id=chat_id, user_id=self.bot_info.id)
+        except ApiTelegramException as ex:
+            logger.warning(
+                "Failed to validate legacy moderation chat {} for @{}: {}",
+                chat_id,
+                self.bot_info.username,
+                ex,
+            )
+            return False
+        return member.status in ("administrator", "creator", "member")
+
+    async def _drop_invalid_chat_suggest(self, chat_id: int | None) -> None:
+        if chat_id is None:
+            return
+        try:
+            await self.admins_database.delete_chat_admins({
+                "bot_id": self.bot_info.id,
+                "chat_id": chat_id,
+            })
+            logger.warning(
+                "Removed stale legacy moderation chat {} for @{}",
+                chat_id,
+                self.bot_info.username,
+            )
+        except Exception as ex:
+            logger.error(
+                "Failed to delete stale legacy moderation chat {} for @{}: {}",
+                chat_id,
+                self.bot_info.username,
+                ex,
+            )
 
     @logger.catch
     async def check_admin(self, channel_id) -> bool:
