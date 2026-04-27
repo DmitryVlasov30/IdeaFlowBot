@@ -8,15 +8,23 @@ from telebot.async_telebot import AsyncTeleBot
 from config import settings
 
 
-ADVERTISING_REPLY_TEXT = (
-    "По рекламе напишите пожалуйста @ivanblk, "
-    "сразу укажите, что вы хотите рекламировать"
-)
-
-
 def _normalize_channel_label(channel_label: str | None) -> str:
     value = (channel_label or "").strip()
     return value or "@unknown_channel"
+
+
+def _manager_mention() -> str:
+    username = (settings.advertising_manager_username or "").strip() or "ivanblk"
+    if not username.startswith("@"):
+        username = f"@{username}"
+    return username
+
+
+def build_advertising_reply_text() -> str:
+    return (
+        f"По рекламе напишите пожалуйста {_manager_mention()}, "
+        "сразу укажите, что вы хотите рекламировать"
+    )
 
 
 def _sender_tag(username: str | None) -> str:
@@ -57,6 +65,13 @@ def resolve_advertising_targets() -> list[int | str]:
         seen.add(key)
         targets.append(int(advertiser_id))
 
+    manager_chat_id = settings.advertising_manager_chat_id
+    if manager_chat_id is not None:
+        key = f"id:{manager_chat_id}"
+        if key not in seen:
+            seen.add(key)
+            targets.append(int(manager_chat_id))
+
     username = (settings.advertising_manager_username or "").strip()
     if username:
         if not username.startswith("@"):
@@ -85,7 +100,7 @@ async def send_advertising_flow(
     sender_username: str | None,
     sender_first_name: str | None,
 ) -> None:
-    await bot.send_message(chat_id=recipient_user_id, text=ADVERTISING_REPLY_TEXT)
+    await bot.send_message(chat_id=recipient_user_id, text=build_advertising_reply_text())
 
     advertiser_message = build_advertising_alert_text(
         channel_label=channel_label,

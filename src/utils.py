@@ -88,8 +88,13 @@ class Utils:
         tz = timezone(timedelta(hours=3))
         hour, minute = map(int, time.split(':'))
         now = datetime.now(tz)
-        target = now.replace(hour=hour, minute=minute)
-        if now >= target:
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+        # If the moderator taps the current visible minute, publish immediately
+        # instead of silently moving the post to the next day.
+        if target <= now and now.hour == hour and now.minute == minute:
+            target = now.replace(microsecond=0) + timedelta(seconds=1)
+        elif now >= target:
             target += timedelta(days=1)
 
         time_public = target.timestamp()

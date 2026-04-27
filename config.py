@@ -10,6 +10,13 @@ def _split_int_collection(raw: str) -> list[int]:
     return [int(item.strip()) for item in raw.split(",") if item.strip()]
 
 
+def _optional_int(raw: str) -> int | None:
+    value = (raw or "").strip()
+    if not value:
+        return None
+    return int(value)
+
+
 @dataclass
 class Settings:
     api_token_bot: str = os.getenv("BOT_API_TOKEN", "")
@@ -37,6 +44,7 @@ class Settings:
     media_preview_max_mb: int = int(os.getenv("MEDIA_PREVIEW_MAX_MB", "20"))
     advertiser: list[int] = field(default_factory=lambda: _split_int_collection(os.getenv("ADVERTISER_IDS", "")))
     advertising_manager_username: str = os.getenv("ADVERTISING_MANAGER_USERNAME", "@ivanblk")
+    advertising_manager_chat_id: int | None = _optional_int(os.getenv("ADVERTISING_MANAGER_CHAT_ID", ""))
     advertising_bot_token: str = os.getenv(
         "ADVERTISING_BOT_TOKEN",
         "8150027786:AAFvsKzexPaJ6YCEWlHkKgoFtv3giN7rubk",

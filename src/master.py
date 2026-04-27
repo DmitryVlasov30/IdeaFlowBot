@@ -1668,18 +1668,29 @@ class MasterBot:
                     public_data.append((message_id, sender_id, bot))
 
         for message_id, sender_id, bot in public_data:
-            if await bots_data[bot].reschedule_delayed_if_publication_blocked(message_id, sender_id):
-                continue
-            await self.delayed_database.delete_delayed_posts(
-                {
-                    "bot_id": bot,
-                    "message_id": message_id,
-                }
-            )
-            await bots_data[bot].send_delayed_message(message_id, sender_id)
+            try:
+                if await bots_data[bot].reschedule_delayed_if_publication_blocked(message_id, sender_id):
+                    continue
+                sent = await bots_data[bot].send_delayed_message(message_id, sender_id)
+                if not sent:
+                    continue
+                await self.delayed_database.delete_delayed_posts(
+                    {
+                        "bot_id": bot,
+                        "message_id": message_id,
+                    }
+                )
+            except Exception as ex:
+                logger.error(
+                    "Failed to publish legacy delayed message {} for bot {}: {}",
+                    message_id,
+                    bot,
+                    ex,
+                )
 
     @logger.catch
     async def __delayed_posts_checker(self) -> None:
+        poll_interval = min(settings.const_time_sleep, 5)
         while True:
             delayed_posts = {}
             for bot in self.bots_work:
@@ -1687,7 +1698,7 @@ class MasterBot:
                 info_lst = sorted(delayed_message.items(), key=lambda item: (item[1], item[0]))
                 delayed_posts[bot.bot_info.id] = info_lst
             await self.__send_post(delayed_posts)
-            await asyncio.sleep(settings.const_time_sleep)
+            await asyncio.sleep(poll_interval)
 
     @logger.catch
     async def callback_adv_send_message(self, call: CallbackQuery, channel_username: str, info_sender: User) -> None:

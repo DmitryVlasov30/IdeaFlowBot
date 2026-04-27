@@ -41,7 +41,7 @@ class MarkupButton:
             "14:00": {"hour": 14, "minute": 0},
             "14:15": {"hour": 14, "minute": 15},
             "14:30": {"hour": 14, "minute": 30},
-            "15:00": {"hour": 15, "minute": 30},
+            "15:00": {"hour": 15, "minute": 0},
             "15:15": {"hour": 15, "minute": 15},
             "15:30": {"hour": 15, "minute": 30},
             "15:45": {"hour": 15, "minute": 45},

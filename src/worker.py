@@ -759,12 +759,11 @@ class SubBot:
     async def getter_delayed_info(self) -> dict:
         return self.delayed_message
 
-    async def send_delayed_message(self, message_id, sender_id) -> None:
-        self.delayed_message.pop(message_id, None)
+    async def send_delayed_message(self, message_id, sender_id) -> bool:
         markup = None
+        is_anonymous = message_id in self.anonym_send
 
-        if message_id in self.anonym_send:
-            self.anonym_send.remove(message_id)
+        if is_anonymous:
             info_user = await self.sup_bot.get_chat(sender_id)
             if info_user.username is not None:
                 button = InlineKeyboardButton(text=f"@{info_user.username}", url=f"https://t.me/{info_user.username}")
@@ -777,6 +776,9 @@ class SubBot:
             message_id=message_id,
             reply_markup=markup,
         )
+        self.delayed_message.pop(message_id, None)
+        if is_anonymous:
+            self.anonym_send.discard(message_id)
         logger.info(f"send delayed message: {message_id}, username_channel: {self.channel_username}")
         try:
             await self.legacy_moderation_sync.mark_legacy_delayed_published(
@@ -787,7 +789,11 @@ class SubBot:
             )
         except Exception as ex:
             logger.error("Failed to mark legacy delayed audit as published: {}", ex)
-        await MarkupButton(self.sup_bot).push_post_button(self.chat_suggest, message_id, sender_id)
+        try:
+            await MarkupButton(self.sup_bot).push_post_button(self.chat_suggest, message_id, sender_id)
+        except Exception as ex:
+            logger.error("Failed to update legacy delayed markup after publish: {}", ex)
+        return True
 
     async def run_bot(self) -> None:
         self.bot_info = await self.sup_bot.get_me()
