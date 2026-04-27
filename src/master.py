@@ -449,7 +449,12 @@ class MasterBot:
             username = (await self.bots_work[idx].getter_name()).replace("@", "")
             if username == username_bot.replace("@", ""):
                 index_bot = idx
-                await self.bots_work[idx].stop_bot()
+                try:
+                    await asyncio.wait_for(self.bots_work[idx].stop_bot(), timeout=5)
+                except asyncio.TimeoutError:
+                    logger.warning("Timed out while stopping subbot {}", username_bot)
+                except Exception as ex:
+                    logger.error("Failed to stop subbot {} cleanly: {}", username_bot, ex)
                 break
 
         if index_bot != -1:
@@ -2305,8 +2310,14 @@ class MasterBot:
                 if not self._is_general_admin(call.message.chat.id):
                     await self.main_bot.answer_callback_query(call.id, "\u0422\u043e\u043b\u044c\u043a\u043e \u0434\u043b\u044f \u0433\u0435\u043d\u0435\u0440\u0430\u043b\u044c\u043d\u043e\u0433\u043e \u0430\u0434\u043c\u0438\u043d\u0430.", show_alert=True)
                     return
-                _, _, _, username_bot, channel_id = data.split(":")
-                result_text = await self._remove_subbot_from_values(username_bot, int(channel_id))
+                _, _, username_bot, channel_id = data.split(":")
+                try:
+                    result_text = await self._remove_subbot_from_values(username_bot, int(channel_id))
+                except Exception as ex:
+                    logger.exception("Failed to confirm subbot removal")
+                    await self.main_bot.send_message(call.message.chat.id, f"Не удалось удалить саббота: {ex}")
+                    await self.main_bot.answer_callback_query(call.id, "Ошибка удаления", show_alert=True)
+                    return
                 await self.main_bot.send_message(call.message.chat.id, result_text)
                 await self._show_subbots_menu(call.message.chat.id)
                 await self.main_bot.answer_callback_query(call.id)
@@ -2338,7 +2349,7 @@ class MasterBot:
                 if not self._is_general_admin(call.message.chat.id):
                     await self.main_bot.answer_callback_query(call.id, "РўРѕР»СЊРєРѕ РґР»СЏ РіРµРЅРµСЂР°Р»СЊРЅРѕРіРѕ Р°РґРјРёРЅР°.", show_alert=True)
                     return
-                _, _, _, username_bot, channel_id = data.split(":")
+                _, _, username_bot, channel_id = data.split(":")
                 result_text = await self._remove_subbot_from_values(username_bot, int(channel_id))
                 await self.main_bot.send_message(call.message.chat.id, result_text)
                 await self._show_subbots_menu(call.message.chat.id)
