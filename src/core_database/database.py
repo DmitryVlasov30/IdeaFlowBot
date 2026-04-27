@@ -405,36 +405,35 @@ class CrudChatAdmins:
             if bot is not None and chat is None:
                 result = (
                     await conn.execute(
-                        select(ChatAdmins)
+                        select(ChatAdmins.chat_id)
                         .filter(ChatAdmins.bot_id == bot)
                         .order_by(ChatAdmins.id.desc())
                     )
                 ).scalars().all()
-                return result[0].chat_id if result else None
+                return result[0] if result else None
             if bot is None and chat is None:
-                return (await conn.execute(select(ChatAdmins))).scalars().all()
-            elif bot is None:
-                return (
-                    await conn.execute(select(ChatAdmins).filter(ChatAdmins.chat_id == chat))
-                ).scalars().all()
-            elif chat is None:
                 return (
                     await conn.execute(
-                        select(ChatAdmins)
-                        .filter(ChatAdmins.bot_id == bot)
-                        .order_by(ChatAdmins.id.desc())
+                        select(ChatAdmins.id, ChatAdmins.bot_id, ChatAdmins.chat_id)
                     )
-                ).scalars().all()
+                ).fetchall()
+            elif bot is None:
+                return (
+                    await conn.execute(
+                        select(ChatAdmins.id, ChatAdmins.bot_id, ChatAdmins.chat_id)
+                        .filter(ChatAdmins.chat_id == chat)
+                    )
+                ).fetchall()
             else:
                 return (
                     await conn.execute(
-                        select(ChatAdmins)
+                        select(ChatAdmins.id, ChatAdmins.bot_id, ChatAdmins.chat_id)
                         .filter(and_(
                             ChatAdmins.chat_id == chat,
                             ChatAdmins.bot_id == bot
                         ))
                     )
-                ).scalars().all()
+                ).fetchall()
 
     @staticmethod
     async def add_chat_admins(data: dict) -> None:
@@ -447,7 +446,7 @@ class CrudChatAdmins:
         async with db_helper.engine.connect() as conn:
             return (
                 await conn.execute(
-                    select(ChatAdmins)
+                    select(ChatAdmins.chat_id)
                     .filter(ChatAdmins.bot_id == bot_id)
                     .order_by(ChatAdmins.id.desc())
                 )

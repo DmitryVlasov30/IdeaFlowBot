@@ -76,6 +76,7 @@ class SubBot:
         self.delayed_message = {}
         self.anonym_send = set()
 
+        self.chat_suggest = None
         self.chat_suggests = None
 
     @classmethod
@@ -310,10 +311,17 @@ class SubBot:
                 except:
                     return
             if chat_member_info.new_chat_member.status == "administrator":
-                await self.admins_database.add_chat_admins({
-                    "bot_id": self.bot_info.id,
-                    "chat_id": chat_member_info.chat.id,
-                })
+                try:
+                    await self.admins_database.add_chat_admins({
+                        "bot_id": self.bot_info.id,
+                        "chat_id": chat_member_info.chat.id,
+                    })
+                except IntegrityError:
+                    logger.info(
+                        "Legacy moderation chat {} already linked for @{}",
+                        chat_member_info.chat.id,
+                        self.bot_info.username,
+                    )
                 self.chat_suggest = await self._refresh_chat_suggest()
             else:
                 chats = await self.admins_database.get_chat_admins(bot=self.bot_info.id, chat=chat_member_info.chat.id)
@@ -671,8 +679,7 @@ class SubBot:
         if not candidates:
             return None
 
-        for row in candidates:
-            candidate_chat_id = row.chat_id
+        for candidate_chat_id in candidates:
             if await self._is_active_legacy_chat(candidate_chat_id):
                 return candidate_chat_id
             await self._drop_invalid_chat_suggest(candidate_chat_id)
