@@ -84,7 +84,11 @@ class MasterBot:
 
         self.api_token_bot = api_token_bot
         asyncio_helper.proxy = settings.proxies["http"]
-        asyncio_helper.REQUEST_LIMIT = settings.sup_bot_limit
+        # Bootstrap performs Telegram API calls before run_bot(), so start with
+        # a generous limit to avoid creating the shared aiohttp session with a
+        # too-small connector.
+        self._initial_request_limit = max(settings.sup_bot_limit, 100)
+        asyncio_helper.REQUEST_LIMIT = self._initial_request_limit
         self.main_bot = AsyncTeleBot(self.api_token_bot)
         self.bots_work: list[SubBot] = []
 
@@ -110,6 +114,55 @@ class MasterBot:
         await self.main_bot.set_my_commands(commands=self.commands)
         self.bot_info = await self.main_bot.get_me()
 
+    def _configure_request_limit(self, subbot_count: int) -> int:
+        # Long polling for every bot occupies a request slot almost constantly.
+        # Keep extra headroom for callback answers, send/edit message operations,
+        # and legacy moderation actions so UI interactions do not sit in queue.
+        active_bot_count = max(1, subbot_count + 1)
+        desired_limit = max(settings.sup_bot_limit, active_bot_count * 4)
+        asyncio_helper.REQUEST_LIMIT = desired_limit
+        return desired_limit
+
+    async def _reset_telegram_session(self) -> None:
+        session = getattr(asyncio_helper.session_manager, "session", None)
+        if session is None:
+            return
+        try:
+            if not session.closed:
+                await session.close()
+        except Exception as ex:
+            logger.debug("Failed to close shared Telegram aiohttp session: {}", ex)
+        finally:
+            asyncio_helper.session_manager.session = None
+
+    @staticmethod
+    def _normalize_username(value: str | None) -> str:
+        if not value:
+            return ""
+        return value.strip().lstrip("@").lower()
+
+    def _filter_enabled_subbots(self, bots_lst: list) -> list:
+        allowed = {
+            self._normalize_username(username)
+            for username in settings.enabled_subbot_usernames
+            if self._normalize_username(username)
+        }
+        if not allowed:
+            return bots_lst
+
+        filtered = []
+        for api_token, bot_username, channel_id, id_row in bots_lst:
+            if self._normalize_username(bot_username) in allowed:
+                filtered.append((api_token, bot_username, channel_id, id_row))
+
+        logger.info(
+            "Enabled subbot filter is active: {}. Selected {} of {} subbots.",
+            ", ".join(sorted(f"@{item}" for item in allowed)),
+            len(filtered),
+            len(bots_lst),
+        )
+        return filtered
+
     def _is_general_admin(self, user_id: int) -> bool:
         return user_id == settings.general_admin
 
@@ -121,6 +174,22 @@ class MasterBot:
 
     def _clear_user_state(self, user_id: int) -> None:
         self.user_states.pop(user_id, None)
+
+    async def _safe_answer_callback(
+        self,
+        bot: AsyncTeleBot,
+        callback_query_id: str,
+        text: str | None = None,
+        show_alert: bool = False,
+    ) -> None:
+        try:
+            await bot.answer_callback_query(
+                callback_query_id=callback_query_id,
+                text=text,
+                show_alert=show_alert,
+            )
+        except Exception as ex:
+            logger.debug("Failed to answer callback {}: {}", callback_query_id, ex)
 
     async def _answer_panel(self, chat_id: int, text: str | None = None) -> None:
         panel_text = text or (
@@ -1825,10 +1894,15 @@ class MasterBot:
             data = call.data
             if data.startswith("panel:"):
                 action = data.split(":")[1]
+                answered_early = False
                 match action:
                     case "main":
+                        await self._safe_answer_callback(self.main_bot, call.id)
+                        answered_early = True
                         await self._answer_panel(call.message.chat.id)
                     case "import":
+                        await self._safe_answer_callback(self.main_bot, call.id)
+                        answered_early = True
                         result = await self.editorial_actions.import_new()
                         await self.main_bot.send_message(
                             call.message.chat.id,
@@ -1836,19 +1910,33 @@ class MasterBot:
                             f"Пропущено дублей: {result.skipped_duplicates}\nСоздано каналов: {result.channels_created}",
                         )
                     case "submissions":
+                        await self._safe_answer_callback(self.main_bot, call.id)
+                        answered_early = True
                         await self.editorial_actions.import_new()
                         await self._show_first_pending_submission(call.message.chat.id, user_id=call.from_user.id)
                     case "all_submissions":
+                        await self._safe_answer_callback(self.main_bot, call.id)
+                        answered_early = True
                         await self._show_submission_history(call.message.chat.id)
                     case "content":
+                        await self._safe_answer_callback(self.main_bot, call.id)
+                        answered_early = True
                         await self._show_first_pending_content(call.message.chat.id)
                     case "pastes":
+                        await self._safe_answer_callback(self.main_bot, call.id)
+                        answered_early = True
                         await self._show_first_paste(call.message.chat.id)
                     case "channels":
+                        await self._safe_answer_callback(self.main_bot, call.id)
+                        answered_early = True
                         await self._show_channels_menu(call.message.chat.id)
                     case "my_channels":
+                        await self._safe_answer_callback(self.main_bot, call.id)
+                        answered_early = True
                         await self._show_my_channels_menu(call.message.chat.id, user_id=call.from_user.id)
                     case "scheduler":
+                        await self._safe_answer_callback(self.main_bot, call.id)
+                        answered_early = True
                         result = await self.editorial_actions.run_scheduler()
                         await self.main_bot.send_message(
                             call.message.chat.id,
@@ -1856,6 +1944,8 @@ class MasterBot:
                             f"Слотов: {result.slots_checked}\nЗапланировано: {result.scheduled_items}",
                         )
                     case "publisher":
+                        await self._safe_answer_callback(self.main_bot, call.id)
+                        answered_early = True
                         result = await self.editorial_actions.run_publisher()
                         await self.main_bot.send_message(
                             call.message.chat.id,
@@ -1863,13 +1953,15 @@ class MasterBot:
                             f"Успешно: {result.sent}\nОшибок: {result.failed}",
                         )
                     case "extra":
+                        await self._safe_answer_callback(self.main_bot, call.id)
+                        answered_early = True
                         await self._show_extra_panel(call.message.chat.id)
                     case "db_export":
-                        await self.main_bot.answer_callback_query(call.id)
+                        await self._safe_answer_callback(self.main_bot, call.id)
                         await self._send_database_export(call.message.chat.id)
                         return
                     case "sql_export":
-                        await self.main_bot.answer_callback_query(call.id)
+                        await self._safe_answer_callback(self.main_bot, call.id)
                         await self._send_sql_export_prompt(
                             chat_id=call.message.chat.id,
                             allow_mutating=self._is_general_admin(call.from_user.id),
@@ -1879,19 +1971,25 @@ class MasterBot:
                         if not self._is_general_admin(call.from_user.id):
                             await self.main_bot.answer_callback_query(call.id, "Только для генерального админа.", show_alert=True)
                             return
+                        await self._safe_answer_callback(self.main_bot, call.id)
+                        answered_early = True
                         await self._show_admins_menu(call.message.chat.id)
                     case "subbots":
                         if not self._is_general_admin(call.from_user.id):
                             await self.main_bot.answer_callback_query(call.id, "Только для генерального админа.", show_alert=True)
                             return
+                        await self._safe_answer_callback(self.main_bot, call.id)
+                        answered_early = True
                         await self._show_subbots_menu(call.message.chat.id)
-                await self.main_bot.answer_callback_query(call.id)
+                if not answered_early:
+                    await self._safe_answer_callback(self.main_bot, call.id)
                 return
 
             if data.startswith("submission:") and not data.startswith("submission:view:"):
                 _prefix, action, value = data.split(":")
                 submission_id = int(value)
                 reviewer_id = call.from_user.id
+                await self._safe_answer_callback(self.main_bot, call.id)
                 match action:
                     case "approve":
                         item = await self.editorial_actions.approve_submission(submission_id, reviewer_id)
@@ -1903,7 +2001,6 @@ class MasterBot:
                             log_item = await self.editorial_actions.publish_submission_now(submission_id, reviewer_id)
                         except ValueError as exc:
                             await self.main_bot.send_message(call.message.chat.id, str(exc))
-                            await self.main_bot.answer_callback_query(call.id)
                             return
                         await self.editorial_actions.sync_panel_submission_approved(submission_id)
                         await self.main_bot.send_message(call.message.chat.id, f"Сообщение {submission_id} отправлено в publish pipeline. Log #{log_item.id}.")
@@ -1985,36 +2082,37 @@ class MasterBot:
 
             if data.startswith("submission_all:next:"):
                 submission_id = int(data.split(":")[-1])
+                await self._safe_answer_callback(self.main_bot, call.id)
                 await self._show_submission_history(call.message.chat.id, current_id=submission_id)
-                await self.main_bot.answer_callback_query(call.id)
                 return
 
             if data.startswith("submission_all:delete:"):
                 submission_id = int(data.split(":")[-1])
+                await self._safe_answer_callback(self.main_bot, call.id)
                 deleted_count = await self.editorial_actions.delete_submission(submission_id)
                 await self.main_bot.send_message(
                     call.message.chat.id,
                     f"Удалено сообщений: {deleted_count}. Submission #{submission_id} убран из базы.",
                 )
                 await self._show_submission_history(call.message.chat.id, current_id=submission_id)
-                await self.main_bot.answer_callback_query(call.id)
                 return
 
             if data.startswith("submission:view:"):
                 submission_id = int(data.split(":")[-1])
+                await self._safe_answer_callback(self.main_bot, call.id)
                 await self._send_submission_card(
                     call.message.chat.id,
                     submission_id,
                     history_mode=True,
                     has_next=False,
                 )
-                await self.main_bot.answer_callback_query(call.id)
                 return
 
             if data.startswith("content:"):
                 _prefix, action, value = data.split(":")
                 content_item_id = int(value)
                 reviewer_id = call.from_user.id
+                await self._safe_answer_callback(self.main_bot, call.id)
                 match action:
                     case "approve":
                         await self.editorial_actions.approve_content_item(content_item_id, reviewer_id)
@@ -2025,7 +2123,6 @@ class MasterBot:
                             log_item = await self.editorial_actions.publish_content_item_now(content_item_id, reviewer_id)
                         except ValueError as exc:
                             await self.main_bot.send_message(call.message.chat.id, str(exc))
-                            await self.main_bot.answer_callback_query(call.id)
                             return
                         await self.main_bot.send_message(call.message.chat.id, f"Контент {content_item_id} поставлен в публикацию. Log #{log_item.id}.")
                         await self._show_first_pending_content(call.message.chat.id, current_id=content_item_id)
@@ -2059,10 +2156,10 @@ class MasterBot:
                         await self._show_first_pending_content(call.message.chat.id, current_id=content_item_id)
                     case "next":
                         await self._show_first_pending_content(call.message.chat.id, current_id=content_item_id)
-                await self.main_bot.answer_callback_query(call.id)
                 return
 
             if data == "my_channels:all":
+                await self._safe_answer_callback(self.main_bot, call.id)
                 channels = await self.editorial_actions.list_user_moderation_feed_channels(call.from_user.id)
                 channel_ids = [int(channel.id) for channel in channels]
                 if not channel_ids:
@@ -2070,7 +2167,6 @@ class MasterBot:
                         call.message.chat.id,
                         "\u0423 \u0432\u0430\u0441 \u043f\u043e\u043a\u0430 \u043d\u0435 \u0432\u044b\u0431\u0440\u0430\u043d\u044b \u043a\u0430\u043d\u0430\u043b\u044b \u0434\u043b\u044f \u043f\u043e\u043b\u0443\u0447\u0435\u043d\u0438\u044f \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0439.",
                     )
-                    await self.main_bot.answer_callback_query(call.id)
                     return
                 self._set_user_state(
                     call.message.chat.id,
@@ -2084,7 +2180,6 @@ class MasterBot:
                         f"\u043a\u043e\u0442\u043e\u0440\u044b\u0439 \u043d\u0443\u0436\u043d\u043e \u043e\u043f\u0443\u0431\u043b\u0438\u043a\u043e\u0432\u0430\u0442\u044c \u0432\u043e \u0432\u0441\u0435 \u0432\u044b\u0431\u0440\u0430\u043d\u043d\u044b\u0435 \u043a\u0430\u043d\u0430\u043b\u044b ({len(channel_ids)})."
                     ),
                 )
-                await self.main_bot.answer_callback_query(call.id)
                 return
 
             if data.startswith("my_channels:channel:"):
@@ -2097,6 +2192,7 @@ class MasterBot:
                         show_alert=True,
                     )
                     return
+                await self._safe_answer_callback(self.main_bot, call.id)
                 label = await self._get_channel_label(channel_id)
                 self._set_user_state(
                     call.message.chat.id,
@@ -2110,39 +2206,39 @@ class MasterBot:
                         f"\u043a\u043e\u0442\u043e\u0440\u044b\u0439 \u043d\u0443\u0436\u043d\u043e \u043e\u043f\u0443\u0431\u043b\u0438\u043a\u043e\u0432\u0430\u0442\u044c \u0432 {label}."
                     ),
                 )
-                await self.main_bot.answer_callback_query(call.id)
                 return
 
             if data.startswith("channel:view:"):
                 channel_id = int(data.split(":")[-1])
+                await self._safe_answer_callback(self.main_bot, call.id)
                 await self._show_channel_menu(call.message.chat.id, channel_id, user_id=call.from_user.id)
-                await self.main_bot.answer_callback_query(call.id)
                 return
 
             if data.startswith("channel:notify_toggle:"):
                 channel_id = int(data.split(":")[-1])
+                await self._safe_answer_callback(self.main_bot, call.id)
                 enabled = await self.editorial_actions.toggle_channel_notifications(channel_id, call.from_user.id)
                 await self.main_bot.send_message(
                     call.message.chat.id,
                     "Уведомления включены." if enabled else "Уведомления выключены.",
                 )
                 await self._show_channel_menu(call.message.chat.id, channel_id, user_id=call.from_user.id)
-                await self.main_bot.answer_callback_query(call.id)
                 return
 
             if data.startswith("channel:feed_toggle:"):
                 channel_id = int(data.split(":")[-1])
+                await self._safe_answer_callback(self.main_bot, call.id)
                 enabled = await self.editorial_actions.toggle_channel_moderation_feed(channel_id, call.from_user.id)
                 await self.main_bot.send_message(
                     call.message.chat.id,
                     "Получение сообщений из канала включено." if enabled else "Получение сообщений из канала выключено.",
                 )
                 await self._show_channel_menu(call.message.chat.id, channel_id, user_id=call.from_user.id)
-                await self.main_bot.answer_callback_query(call.id)
                 return
 
             if data.startswith("channel:ad_blackout:"):
                 channel_id = int(data.split(":")[-1])
+                await self._safe_answer_callback(self.main_bot, call.id)
                 self._set_user_state(call.message.chat.id, "await_add_ad_blackout", channel_id=channel_id)
                 await self.main_bot.send_message(
                     call.message.chat.id,
@@ -2151,11 +2247,11 @@ class MasterBot:
                     "Это значит: 21 числа с 15:00 до 18:00 канал будет защищён от публикаций. "
                     "Если такая дата в текущем месяце уже прошла, будет выбран следующий месяц.",
                 )
-                await self.main_bot.answer_callback_query(call.id)
                 return
 
             if data.startswith("channel:delete_ad_blackout:"):
                 channel_id = int(data.split(":")[-1])
+                await self._safe_answer_callback(self.main_bot, call.id)
                 self._set_user_state(call.message.chat.id, "await_delete_ad_blackout", channel_id=channel_id)
                 await self.main_bot.send_message(
                     call.message.chat.id,
@@ -2163,11 +2259,11 @@ class MasterBot:
                     "21 15:00 18:00\n\n"
                     "\u0412\u0432\u043e\u0434 \u0434\u043e\u043b\u0436\u0435\u043d \u0441\u043e\u0432\u043f\u0430\u0434\u0430\u0442\u044c \u0441 \u0442\u0435\u043c \u043e\u043a\u043d\u043e\u043c, \u043a\u043e\u0442\u043e\u0440\u043e\u0435 \u0431\u044b\u043b\u043e \u0434\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u043e.",
                 )
-                await self.main_bot.answer_callback_query(call.id)
                 return
 
             if data.startswith("channel:generate:"):
                 channel_id = int(data.split(":")[-1])
+                await self._safe_answer_callback(self.main_bot, call.id)
                 label = await self._get_channel_label(channel_id)
                 self._set_user_state(call.message.chat.id, "await_generate_posts", channel_id=channel_id)
                 await self.main_bot.send_message(
@@ -2177,24 +2273,24 @@ class MasterBot:
                         "\u041e\u0442\u043f\u0440\u0430\u0432\u044c\u0442\u0435 \u0447\u0438\u0441\u043b\u043e \u043e\u0442 1 \u0434\u043e 10. \u041e\u0431\u044b\u0447\u043d\u043e \u0445\u0432\u0430\u0442\u0430\u0435\u0442 3."
                     ),
                 )
-                await self.main_bot.answer_callback_query(call.id)
                 return
 
             if data.startswith("channel:slots:"):
                 channel_id = int(data.split(":")[-1])
+                await self._safe_answer_callback(self.main_bot, call.id)
                 await self._show_channel_slots_menu(call.message.chat.id, channel_id)
-                await self.main_bot.answer_callback_query(call.id)
                 return
 
             if data.startswith("channel:params:"):
                 channel_id = int(data.split(":")[-1])
+                await self._safe_answer_callback(self.main_bot, call.id)
                 self._set_user_state(call.message.chat.id, "await_update_channel_setting", channel_id=channel_id)
                 await self._send_channel_settings_prompt(call.message.chat.id, channel_id)
-                await self.main_bot.answer_callback_query(call.id)
                 return
 
             if data.startswith("channel:seed:"):
                 channel_id = int(data.split(":")[-1])
+                await self._safe_answer_callback(self.main_bot, call.id)
                 created_count = await self.editorial_actions.seed_default_slots(channel_id)
                 label = await self._get_channel_label(channel_id)
                 await self.main_bot.send_message(
@@ -2202,11 +2298,11 @@ class MasterBot:
                     f"Для {label} создано стандартных слотов: {created_count}.",
                 )
                 await self._show_channel_slots_menu(call.message.chat.id, channel_id)
-                await self.main_bot.answer_callback_query(call.id)
                 return
 
             if data.startswith("channel:add_slot:"):
                 channel_id = int(data.split(":")[-1])
+                await self._safe_answer_callback(self.main_bot, call.id)
                 self._set_user_state(call.message.chat.id, "await_add_slot", channel_id=channel_id)
                 await self.main_bot.send_message(
                     call.message.chat.id,
@@ -2215,11 +2311,11 @@ class MasterBot:
                     "Примеры:\n12:00 15:00 16:00\nall 10:00 15:00\n0 09:30 18:00\n0,2,4 18:00 21:00\n"
                     "Где 0 = понедельник, 6 = воскресенье.",
                 )
-                await self.main_bot.answer_callback_query(call.id)
                 return
 
             if data.startswith("channel:delete_slots:"):
                 channel_id = int(data.split(":")[-1])
+                await self._safe_answer_callback(self.main_bot, call.id)
                 self._set_user_state(call.message.chat.id, "await_delete_slots", channel_id=channel_id)
                 await self.main_bot.send_message(
                     call.message.chat.id,
@@ -2232,6 +2328,7 @@ class MasterBot:
                 return
 
             if data == "paste:add":
+                await self._safe_answer_callback(self.main_bot, call.id)
                 self._set_user_state(call.message.chat.id, "await_add_paste")
                 await self.main_bot.send_message(
                     call.message.chat.id,
@@ -2239,18 +2336,17 @@ class MasterBot:
                     "Если хотите задать заголовок вручную, используйте формат:\n"
                     "Заголовок :: Текст пасты",
                 )
-                await self.main_bot.answer_callback_query(call.id)
                 return
 
             if data.startswith("paste:delete:"):
                 paste_id = int(data.split(":")[-1])
+                await self._safe_answer_callback(self.main_bot, call.id)
                 deleted_paste_id, deleted_paste_title = await self.editorial_actions.delete_paste(paste_id)
                 await self.main_bot.send_message(
                     call.message.chat.id,
                     f"Паста #{deleted_paste_id} удалена: {deleted_paste_title}",
                 )
                 await self._show_first_paste(call.message.chat.id, current_id=paste_id)
-                await self.main_bot.answer_callback_query(call.id)
                 return
 
             if data.startswith("paste:delete:legacy_disabled:"):
@@ -2433,11 +2529,18 @@ class MasterBot:
     async def run_bot(self) -> None:
         logger.info("run_bot")
         await self.__load_dynamic_admins()
+        bots_lst = self._filter_enabled_subbots(await self.bots_database.get_bots_info())
+        request_limit = self._configure_request_limit(len(bots_lst))
+        await self._reset_telegram_session()
         self.bot_info = await self.main_bot.get_me()
-        bots_lst = await self.bots_database.get_bots_info()
 
         try:
             logger.info("main bot @{} working", self.bot_info.username)
+            logger.info(
+                "Configured Telegram request limit {} for {} subbots (+ main bot)",
+                request_limit,
+                len(bots_lst),
+            )
             async with aiohttp.ClientSession() as session:
                 for api_token, bot_username, channel_id, _id_row in bots_lst:
                     channel_username = await self._fetch_channel_username(session, api_token, channel_id)

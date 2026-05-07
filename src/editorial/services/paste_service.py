@@ -130,7 +130,6 @@ class PasteService:
             text_hash=compute_text_hash(paste.body_text) or "",
             primary_tag=pick_primary_tag(tags),
             tags=tags,
-            template_key="paste_library",
             tone_key="community",
             review_required=review_required,
             status=status,

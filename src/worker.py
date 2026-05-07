@@ -79,6 +79,21 @@ class SubBot:
         self.chat_suggest = None
         self.chat_suggests = None
 
+    async def _safe_answer_callback(
+        self,
+        call: CallbackQuery,
+        text: str | None = None,
+        show_alert: bool = False,
+    ) -> None:
+        try:
+            await self.sup_bot.answer_callback_query(
+                callback_query_id=call.id,
+                text=text,
+                show_alert=show_alert,
+            )
+        except Exception as ex:
+            logger.debug("Failed to answer callback {}: {}", call.id, ex)
+
     @classmethod
     @logger.catch
     async def create(cls,
@@ -497,7 +512,11 @@ class SubBot:
             buttons_func = MarkupButton(self.sup_bot)
             utils_func = Utils()
             await utils_func.save_admin_action(call)
-            match call.data.split(";")[0]:
+            action = call.data.split(";")[0]
+            if action not in {"send_suggest", "day_choice"}:
+                await self._safe_answer_callback(call)
+
+            match action:
                 case "banned_user":
                     await buttons_func.add_ban_user(call, self.ban_database, self.channel_id, self.bot_info, self.chat_suggest)
                     await self._sync_editorial_submission_status(
@@ -515,6 +534,7 @@ class SubBot:
                     if blocked_until is not None:
                         await self._warn_publication_blocked(call, blocked_until)
                         return
+                    await self._safe_answer_callback(call)
                     logger.debug(sender_id)
                     info_sender = await self.sup_bot.get_chat(sender_id)
                     logger.debug(info_sender)
@@ -575,6 +595,7 @@ class SubBot:
                     if blocked_until is not None:
                         await self._warn_publication_blocked(call, blocked_until)
                         return
+                    await self._safe_answer_callback(call)
                     sender_info = await self.sup_bot.get_chat(int(call.data.split(";")[4]))
                     await utils_func.save_post(
                         call,
@@ -785,11 +806,7 @@ class SubBot:
             "Legacy publication is blocked; choose another time or try later."
         )
         try:
-            await self.sup_bot.answer_callback_query(
-                callback_query_id=call.id,
-                text=text[:200],
-                show_alert=True,
-            )
+            await self._safe_answer_callback(call, text=text[:200], show_alert=True)
         except Exception as ex:
             logger.debug("Failed to answer blocked legacy publication callback: {}", ex)
         await self.sup_bot.send_message(call.message.chat.id, text)

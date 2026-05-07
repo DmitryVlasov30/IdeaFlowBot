@@ -2,12 +2,57 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import os
+from pathlib import Path
+import re
 
 
 def _split_int_collection(raw: str) -> list[int]:
     if not raw:
         return []
     return [int(item.strip()) for item in raw.split(",") if item.strip()]
+
+
+def _split_str_collection(raw: str) -> list[str]:
+    if not raw:
+        return []
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def _unique_preserve_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            result.append(item)
+    return result
+
+
+def _split_env_usernames(raw: str) -> list[str]:
+    if not raw:
+        return []
+    return [item.strip() for item in re.split(r"[\s,;]+", raw) if item.strip()]
+
+
+def _load_repeated_env_values(name: str) -> list[str]:
+    values: list[str] = []
+    env_file = Path(".env")
+    if not env_file.exists():
+        return values
+
+    prefix = f"{name}="
+    for line in env_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or not stripped.startswith(prefix):
+            continue
+        values.extend(_split_env_usernames(stripped[len(prefix):]))
+    return values
+
+
+def _load_enabled_subbot_usernames() -> list[str]:
+    values = _split_env_usernames(os.getenv("ENABLED_SUBBOT_USERNAMES", ""))
+    values.extend(_load_repeated_env_values("ENABLED_SUBBOT_USERNAMES"))
+    return _unique_preserve_order(values)
 
 
 def _optional_int(raw: str) -> int | None:
@@ -41,6 +86,9 @@ class Settings:
     proxy_host_port: str = os.getenv("PROXY_HOST_PORT", "")
     shift_time_seconds: int = int(os.getenv("SHIFT_TIME_SECONDS", "3600"))
     sup_bot_limit: int = int(os.getenv("SUP_BOT_LIMIT", "20"))
+    enabled_subbot_usernames: list[str] = field(
+        default_factory=_load_enabled_subbot_usernames
+    )
     media_preview_max_mb: int = int(os.getenv("MEDIA_PREVIEW_MAX_MB", "20"))
     advertiser: list[int] = field(default_factory=lambda: _split_int_collection(os.getenv("ADVERTISER_IDS", "")))
     advertising_manager_username: str = os.getenv("ADVERTISING_MANAGER_USERNAME", "@ivanblk")

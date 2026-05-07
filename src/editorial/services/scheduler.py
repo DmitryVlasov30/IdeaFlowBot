@@ -342,7 +342,6 @@ class SchedulerService:
                 text_hash=paste.text_hash,
                 primary_tag=paste.primary_tag,
                 tags=paste.tags,
-                template_key="paste_library",
                 tone_key="community",
                 review_required=False,
                 status=ContentItemStatus.APPROVED,
@@ -440,7 +439,11 @@ class SchedulerService:
             if latest_same_tag and latest_same_tag.published_at and latest_same_tag.published_at >= slot_dt - timedelta(hours=channel.same_tag_cooldown_hours):
                 return False
 
-        if candidate.template_key and channel.same_template_cooldown_hours > 0:
+        if (
+            candidate.template_key
+            and candidate.source_type != ContentSourceType.PASTE
+            and channel.same_template_cooldown_hours > 0
+        ):
             latest_same_template = await session.scalar(
                 select(PublicationLog)
                 .join(ContentItem, ContentItem.id == PublicationLog.content_item_id)
