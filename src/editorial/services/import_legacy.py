@@ -13,12 +13,12 @@ from src.editorial.models.channel import Channel
 from src.editorial.models.content import ContentItem
 from src.editorial.models.submission import Submission
 from src.editorial.services.legacy_source import LegacyCollectorReader, LegacySenderRow
+from src.editorial.services.tag_service import TagService
 from src.editorial.utils.text import (
     clean_text,
     compute_raw_text_hash,
     compute_text_hash,
     detect_language_code,
-    detect_tags,
     normalize_text,
 )
 
@@ -38,6 +38,7 @@ class ImportLegacyResult:
 class LegacyImporter:
     def __init__(self, legacy_reader: LegacyCollectorReader | None = None):
         self.legacy_reader = legacy_reader or LegacyCollectorReader()
+        self.tag_service = TagService()
 
     @staticmethod
     def _build_media_fingerprint(row: LegacySenderRow) -> str:
@@ -176,7 +177,7 @@ class LegacyImporter:
         await session.flush()
         return created
 
-    def _build_submission_payload(self, row: LegacySenderRow, channel_id: int) -> dict:
+    async def _build_submission_payload(self, session: AsyncSession, row: LegacySenderRow, channel_id: int) -> dict:
         raw_text = row.text_post or ""
         cleaned_text = clean_text(raw_text)
         normalized_text = normalize_text(cleaned_text)
@@ -209,7 +210,7 @@ class LegacyImporter:
             "cleaned_text": cleaned_text or None,
             "normalized_text": normalized_text or None,
             "text_hash": text_hash,
-            "detected_tags": detect_tags(cleaned_text),
+            "detected_tags": await self.tag_service.detect_tags(session, cleaned_text),
             "language_code": detect_language_code(cleaned_text),
             "is_candidate_for_generation": len(cleaned_text) >= settings.minimum_submission_length,
             "is_candidate_for_paste": len(cleaned_text) >= settings.minimum_submission_length,
@@ -245,7 +246,7 @@ class LegacyImporter:
             logger.warning("Skipping legacy row {} because channel {} is unknown", row.id, row.channel_id)
             return None
 
-        submission = Submission(**self._build_submission_payload(row, channel_id))
+        submission = Submission(**await self._build_submission_payload(session, row, channel_id))
         session.add(submission)
         await session.flush()
         return submission
@@ -298,7 +299,7 @@ class LegacyImporter:
                 result.skipped_duplicates += 1
                 continue
 
-            submission = Submission(**self._build_submission_payload(row, channels[row.channel_id]))
+            submission = Submission(**await self._build_submission_payload(session, row, channels[row.channel_id]))
             session.add(submission)
             result.imported += 1
 

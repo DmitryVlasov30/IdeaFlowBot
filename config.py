@@ -86,6 +86,9 @@ class Settings:
     proxy_host_port: str = os.getenv("PROXY_HOST_PORT", "")
     shift_time_seconds: int = int(os.getenv("SHIFT_TIME_SECONDS", "3600"))
     sup_bot_limit: int = int(os.getenv("SUP_BOT_LIMIT", "20"))
+    max_subbots: int = int(os.getenv("MAX_SUBBOTS", "200"))
+    telegram_connections_per_bot: int = int(os.getenv("TELEGRAM_CONNECTIONS_PER_BOT", "4"))
+    telegram_connection_overhead: int = int(os.getenv("TELEGRAM_CONNECTION_OVERHEAD", "20"))
     enabled_subbot_usernames: list[str] = field(
         default_factory=_load_enabled_subbot_usernames
     )

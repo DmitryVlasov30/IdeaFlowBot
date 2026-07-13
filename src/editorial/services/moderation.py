@@ -14,10 +14,14 @@ from src.editorial.models.enums import (
 )
 from src.editorial.models.review import Review
 from src.editorial.models.submission import Submission
-from src.editorial.utils.text import clean_text, compute_raw_text_hash, compute_text_hash, detect_tags, normalize_text, pick_primary_tag
+from src.editorial.services.tag_service import TagService
+from src.editorial.utils.text import clean_text, compute_raw_text_hash, compute_text_hash, normalize_text
 
 
 class ModerationService:
+    def __init__(self, tag_service: TagService | None = None) -> None:
+        self.tag_service = tag_service or TagService()
+
     @staticmethod
     def _visible_submission_filter():
         return or_(Submission.source_chat_id.is_(None), Submission.source_chat_id >= 0)
@@ -179,7 +183,7 @@ class ModerationService:
         if not content_text:
             content_text = self._build_media_placeholder(submission, group_size)
 
-        tags = detect_tags(content_text)
+        tags, primary_tag = await self.tag_service.apply_tags_to_content_cache(session, content_text)
         normalized_text, text_hash = self._build_submission_fingerprint(submission, group_size, content_text)
         item = ContentItem(
             channel_id=channel_id or submission.channel_id,
@@ -188,7 +192,7 @@ class ModerationService:
             body_text=content_text,
             normalized_text=normalized_text,
             text_hash=text_hash,
-            primary_tag=pick_primary_tag(tags),
+            primary_tag=primary_tag,
             tags=tags,
             template_key=template_key or self._template_key_for_submission(submission),
             tone_key=tone_key,
@@ -238,7 +242,7 @@ class ModerationService:
         elif decision == ReviewDecision.EDIT_AND_APPROVE:
             if not edited_text:
                 raise ValueError("edited_text is required for edit_and_approve")
-            tags = detect_tags(edited_text)
+            tags, primary_tag = await self.tag_service.apply_tags_to_content_cache(session, edited_text)
             item.body_text = edited_text
             normalized_text = normalize_text(edited_text)
             text_hash = compute_text_hash(edited_text)
@@ -249,7 +253,7 @@ class ModerationService:
                 item.normalized_text = clean_text(edited_text)
                 item.text_hash = compute_raw_text_hash(edited_text) or ""
             item.tags = tags
-            item.primary_tag = pick_primary_tag(tags)
+            item.primary_tag = primary_tag
             item.status = ContentItemStatus.APPROVED
         else:
             raise ValueError(f"Unsupported review decision for content items: {decision}")

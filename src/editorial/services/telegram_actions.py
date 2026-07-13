@@ -13,12 +13,21 @@ from src.core_database.models.sender_info import SenderData
 from src.editorial.db.session import session_factory
 from src.editorial.models.channel import Channel
 from src.editorial.models.content import ContentItem
-from src.editorial.models.enums import ContentItemStatus, ContentSourceType, PasteStatus, PublicationStatus, ReviewDecision, SubmissionStatus
+from src.editorial.models.enums import (
+    ChannelPasteTagRuleMode,
+    ContentItemStatus,
+    ContentSourceType,
+    PasteStatus,
+    PublicationStatus,
+    ReviewDecision,
+    SubmissionStatus,
+)
 from src.editorial.models.moderation_subscription import ModerationChannelSubscription
 from src.editorial.models.notification import NotificationSubscription
 from src.editorial.models.paste import PasteLibrary
 from src.editorial.models.publication import PublicationLog
 from src.editorial.models.submission import Submission
+from src.editorial.models.tag import ChannelPasteTagRule, TagDefinition, TagKeyword
 from src.editorial.services.advertising import send_advertising_flow
 from src.editorial.services.channel_history_service import ChannelHistoryImportResult, ChannelHistoryService
 from src.editorial.services.channel_service import ChannelService
@@ -30,7 +39,8 @@ from src.editorial.services.moderation import ModerationService
 from src.editorial.services.paste_service import PasteService
 from src.editorial.services.publisher import PublisherService
 from src.editorial.services.scheduler import SchedulerService
-from src.editorial.utils.text import clean_text, compute_raw_text_hash, compute_text_hash, detect_tags, normalize_text, pick_primary_tag
+from src.editorial.services.tag_service import PasteTagSummary, TagService
+from src.editorial.utils.text import clean_text, compute_raw_text_hash, compute_text_hash, normalize_text
 
 
 @dataclass(slots=True)
@@ -77,6 +87,7 @@ class TelegramEditorialActions:
         self.paste_service = PasteService()
         self.channel_history_service = ChannelHistoryService()
         self.channel_service = ChannelService()
+        self.tag_service = TagService()
         self.scheduler = SchedulerService()
         self.publisher = PublisherService()
         self.banned_users = CrudBannedUser()
@@ -779,12 +790,12 @@ class TelegramEditorialActions:
             if item.status not in {ContentItemStatus.PENDING_REVIEW, ContentItemStatus.HOLD}:
                 raise ValueError("Only pending or held content items can be edited")
 
-            tags = detect_tags(cleaned_body)
+            tags, primary_tag = await self.tag_service.apply_tags_to_content_cache(session, cleaned_body)
             item.body_text = cleaned_body
             item.normalized_text = normalize_text(cleaned_body)
             item.text_hash = compute_text_hash(cleaned_body) or compute_raw_text_hash(cleaned_body) or ""
             item.tags = tags
-            item.primary_tag = pick_primary_tag(tags)
+            item.primary_tag = primary_tag
             await session.commit()
             await session.refresh(item)
             return item
@@ -817,6 +828,130 @@ class TelegramEditorialActions:
                 body_text=body_text.strip(),
                 created_by=reviewer_id,
                 status=PasteStatus.ACTIVE,
+            )
+
+    async def list_tags(self, include_inactive: bool = True) -> list[TagDefinition]:
+        async with session_factory() as session:
+            return await self.tag_service.list_tags(session, include_inactive=include_inactive)
+
+    async def create_tag(self, *, slug: str, title: str | None, created_by: int | None) -> TagDefinition:
+        async with session_factory() as session:
+            return await self.tag_service.create_tag(
+                session,
+                slug=slug,
+                title=title,
+                created_by=created_by,
+            )
+
+    async def set_tag_active(self, *, slug: str, is_active: bool) -> TagDefinition:
+        async with session_factory() as session:
+            return await self.tag_service.set_tag_active(session, slug=slug, is_active=is_active)
+
+    async def list_tag_keywords(self, tag_slug: str) -> list[TagKeyword]:
+        async with session_factory() as session:
+            return await self.tag_service.list_keywords(session, tag_slug)
+
+    async def add_tag_keywords(self, *, tag_slug: str, keywords: Iterable[str]) -> list[TagKeyword]:
+        created: list[TagKeyword] = []
+        async with session_factory() as session:
+            for keyword in keywords:
+                if not keyword.strip():
+                    continue
+                created.append(
+                    await self.tag_service.add_keyword(
+                        session,
+                        tag_slug=tag_slug,
+                        keyword=keyword.strip(),
+                    )
+                )
+            return created
+
+    async def remove_tag_keyword(self, keyword_id: int) -> TagKeyword:
+        async with session_factory() as session:
+            return await self.tag_service.remove_keyword(session, keyword_id)
+
+    async def get_paste_tag_summary(self, paste_id: int) -> PasteTagSummary:
+        async with session_factory() as session:
+            paste = await session.get(PasteLibrary, paste_id)
+            if paste is None:
+                raise ValueError(f"Paste {paste_id} not found")
+            return await self.tag_service.get_paste_tag_summary(session, paste)
+
+    async def add_paste_manual_tag(self, *, paste_id: int, tag_slug: str, created_by: int | None) -> PasteTagSummary:
+        async with session_factory() as session:
+            paste = await session.get(PasteLibrary, paste_id)
+            if paste is None:
+                raise ValueError(f"Paste {paste_id} not found")
+            summary = await self.tag_service.add_paste_manual_tag(
+                session,
+                paste=paste,
+                tag_slug=tag_slug,
+                created_by=created_by,
+            )
+            await session.commit()
+            return summary
+
+    async def remove_paste_manual_tag(self, *, paste_id: int, tag_slug: str) -> PasteTagSummary:
+        async with session_factory() as session:
+            paste = await session.get(PasteLibrary, paste_id)
+            if paste is None:
+                raise ValueError(f"Paste {paste_id} not found")
+            summary = await self.tag_service.remove_paste_manual_tag(session, paste=paste, tag_slug=tag_slug)
+            await session.commit()
+            return summary
+
+    async def refresh_paste_auto_tags(self, paste_id: int) -> PasteTagSummary:
+        async with session_factory() as session:
+            paste = await session.get(PasteLibrary, paste_id)
+            if paste is None:
+                raise ValueError(f"Paste {paste_id} not found")
+            summary = await self.tag_service.sync_paste_auto_tags(session, paste)
+            await session.commit()
+            return summary
+
+    async def set_paste_primary_tag(self, *, paste_id: int, tag_slug: str) -> PasteTagSummary:
+        async with session_factory() as session:
+            paste = await session.get(PasteLibrary, paste_id)
+            if paste is None:
+                raise ValueError(f"Paste {paste_id} not found")
+            summary = await self.tag_service.set_paste_primary_tag(session, paste=paste, tag_slug=tag_slug)
+            await session.commit()
+            return summary
+
+    async def list_channel_paste_tag_rules(self, channel_id: int) -> list[tuple[ChannelPasteTagRule, TagDefinition]]:
+        async with session_factory() as session:
+            return await self.tag_service.list_channel_paste_tag_rules(session, channel_id)
+
+    async def add_channel_paste_tag_rule(
+        self,
+        *,
+        channel_id: int,
+        tag_slug: str,
+        mode: ChannelPasteTagRuleMode,
+        created_by: int | None,
+    ) -> ChannelPasteTagRule:
+        async with session_factory() as session:
+            return await self.tag_service.add_channel_paste_tag_rule(
+                session,
+                channel_id=channel_id,
+                tag_slug=tag_slug,
+                mode=mode,
+                created_by=created_by,
+            )
+
+    async def remove_channel_paste_tag_rule(
+        self,
+        *,
+        channel_id: int,
+        tag_slug: str,
+        mode: ChannelPasteTagRuleMode,
+    ) -> int:
+        async with session_factory() as session:
+            return await self.tag_service.remove_channel_paste_tag_rule(
+                session,
+                channel_id=channel_id,
+                tag_slug=tag_slug,
+                mode=mode,
             )
 
     async def archive_paste(self, paste_id: int) -> PasteLibrary:
@@ -911,10 +1046,10 @@ class TelegramEditorialActions:
 
         normalized_text = normalize_text(cleaned_body) or cleaned_body
         text_hash = compute_text_hash(cleaned_body) or compute_raw_text_hash(cleaned_body) or ""
-        tags = detect_tags(cleaned_body)
         now = datetime.now(timezone.utc)
 
         async with session_factory() as session:
+            tags, primary_tag = await self.tag_service.apply_tags_to_content_cache(session, cleaned_body)
             for channel_id in unique_channel_ids:
                 channel = await session.get(Channel, channel_id)
                 if channel is None:
@@ -936,7 +1071,7 @@ class TelegramEditorialActions:
                     body_text=cleaned_body,
                     normalized_text=normalized_text,
                     text_hash=text_hash,
-                    primary_tag=pick_primary_tag(tags),
+                    primary_tag=primary_tag,
                     tags=tags,
                     template_key="manual_panel_message",
                     tone_key=f"manual:{moderator_id}",

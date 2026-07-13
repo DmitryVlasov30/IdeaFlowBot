@@ -61,6 +61,22 @@ class PasteStatus(StrEnum):
     ARCHIVED = "archived"
 
 
+class TagMatchType(StrEnum):
+    CONTAINS = "contains"
+    WORD = "word"
+    REGEX = "regex"
+
+
+class TagAssignmentSource(StrEnum):
+    AUTO = "auto"
+    MANUAL = "manual"
+
+
+class ChannelPasteTagRuleMode(StrEnum):
+    INCLUDE = "include"
+    EXCLUDE = "exclude"
+
+
 def enum_column(enum_cls: Type[StrEnum], name: str) -> Enum:
     return Enum(
         enum_cls,

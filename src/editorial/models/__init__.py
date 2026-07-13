@@ -10,6 +10,9 @@ from src.editorial.models.enums import (
     PublicationStatus,
     ReviewDecision,
     SubmissionStatus,
+    TagAssignmentSource,
+    TagMatchType,
+    ChannelPasteTagRuleMode,
 )
 from src.editorial.models.generation import GenerationRun
 from src.editorial.models.moderation_subscription import ModerationChannelSubscription
@@ -18,11 +21,14 @@ from src.editorial.models.paste import PasteChannelRule, PasteLibrary, PasteUsag
 from src.editorial.models.publication import PublicationLog
 from src.editorial.models.review import Review
 from src.editorial.models.submission import Submission
+from src.editorial.models.tag import ChannelPasteTagRule, PasteTagAssignment, TagDefinition, TagKeyword
 
 __all__ = [
     "Channel",
     "ChannelAdBlackout",
     "ChannelHistoryMessage",
+    "ChannelPasteTagRule",
+    "ChannelPasteTagRuleMode",
     "ChannelSlot",
     "ContentItem",
     "ContentItemSource",
@@ -36,11 +42,16 @@ __all__ = [
     "PasteLibrary",
     "PasteStatus",
     "PasteUsage",
+    "PasteTagAssignment",
     "PublicationLog",
     "PublicationStatus",
     "Review",
     "ReviewDecision",
     "Submission",
     "SubmissionStatus",
+    "TagAssignmentSource",
+    "TagDefinition",
+    "TagKeyword",
+    "TagMatchType",
 ]
 

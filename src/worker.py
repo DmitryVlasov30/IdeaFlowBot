@@ -17,6 +17,7 @@ from src.core_database.database import (CrudChatAdmins, CrudBannedUser,
 from src.editorial.models.enums import SubmissionStatus
 from src.editorial.services.legacy_moderation_sync import LegacyModerationSyncService
 from src.editorial.services.legacy_publication_guard import LegacyPublicationGuard
+from src.legacy_delayed import delayed_publication_matches
 from src.utils import Utils, filter_chats
 from config import settings
 from src.markups import MarkupButton
@@ -811,7 +812,19 @@ class SubBot:
             logger.debug("Failed to answer blocked legacy publication callback: {}", ex)
         await self.sup_bot.send_message(call.message.chat.id, text)
 
-    async def reschedule_delayed_if_publication_blocked(self, message_id: int, sender_id: int | str) -> bool:
+    async def reschedule_delayed_if_publication_blocked(
+        self,
+        message_id: int,
+        sender_id: int | str,
+        expected_time: int | float | str | None = None,
+    ) -> bool:
+        if expected_time is not None and not await self.is_delayed_publication_current(
+            message_id,
+            sender_id,
+            expected_time,
+        ):
+            return False
+
         now_timestamp = datetime.now(timezone.utc).timestamp()
         blocked_until = await self._get_publication_blocked_until(now_timestamp)
         if blocked_until is None:
@@ -862,7 +875,38 @@ class SubBot:
     async def getter_delayed_info(self) -> dict:
         return self.delayed_message
 
-    async def send_delayed_message(self, message_id, sender_id) -> bool:
+    async def is_delayed_publication_current(
+        self,
+        message_id: int,
+        sender_id: int | str,
+        expected_time: int | float | str,
+    ) -> bool:
+        current = self.delayed_message.get(int(message_id))
+        if current is None:
+            logger.info("Skip stale delayed message {}: it is no longer scheduled", message_id)
+            return False
+
+        current_time, current_sender_id = current
+        is_current = delayed_publication_matches(self.delayed_message, message_id, sender_id, expected_time)
+        if not is_current:
+            logger.info(
+                "Skip stale delayed message {}: expected time/sender {}:{}, current {}:{}",
+                message_id,
+                expected_time,
+                sender_id,
+                current_time,
+                current_sender_id,
+            )
+        return is_current
+
+    async def send_delayed_message(self, message_id, sender_id, expected_time=None) -> bool:
+        if expected_time is not None and not await self.is_delayed_publication_current(
+            message_id,
+            sender_id,
+            expected_time,
+        ):
+            return False
+
         markup = None
         is_anonymous = message_id in self.anonym_send
 

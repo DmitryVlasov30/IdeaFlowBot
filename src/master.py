@@ -20,17 +20,19 @@ from telebot.types import (
 
 from config import settings
 from src.core_database.database import CrudBotAdmins, CrudBotsData, CrudDelayedPosts
-from src.editorial.models.enums import SubmissionStatus
+from src.editorial.models.enums import ChannelPasteTagRuleMode, SubmissionStatus
 from src.editorial.services.advertising import send_advertising_flow
 from src.editorial.services.db_export import DatabaseExportService
 from src.editorial.services.legacy_source import LegacyCollectorReader
 from src.editorial.services.sql_export import SqlExportService
 from src.editorial.services.telegram_actions import TelegramEditorialActions
+from src.telegram_runtime import calculate_telegram_request_limit
 from src.panel_markups import (
     build_admin_menu,
     build_channel_actions,
     build_channel_history_import_progress_actions,
     build_channel_history_import_start_actions,
+    build_channel_paste_tag_actions,
     build_channel_slots_actions,
     build_channels_actions,
     build_content_actions,
@@ -39,6 +41,10 @@ from src.panel_markups import (
     build_main_panel,
     build_my_channels_actions,
     build_paste_actions,
+    build_paste_tag_actions,
+    build_tag_actions,
+    build_tag_keywords_actions,
+    build_tags_actions,
     build_submission_actions,
     build_submission_history_actions,
     build_subbot_menu,
@@ -87,7 +93,13 @@ class MasterBot:
         # Bootstrap performs Telegram API calls before run_bot(), so start with
         # a generous limit to avoid creating the shared aiohttp session with a
         # too-small connector.
-        self._initial_request_limit = max(settings.sup_bot_limit, 100)
+        self._initial_request_limit = calculate_telegram_request_limit(
+            current_subbot_count=0,
+            max_subbot_count=settings.max_subbots,
+            configured_limit=settings.sup_bot_limit,
+            connections_per_bot=settings.telegram_connections_per_bot,
+            overhead_connections=settings.telegram_connection_overhead,
+        )
         asyncio_helper.REQUEST_LIMIT = self._initial_request_limit
         self.main_bot = AsyncTeleBot(self.api_token_bot)
         self.bots_work: list[SubBot] = []
@@ -118,8 +130,13 @@ class MasterBot:
         # Long polling for every bot occupies a request slot almost constantly.
         # Keep extra headroom for callback answers, send/edit message operations,
         # and legacy moderation actions so UI interactions do not sit in queue.
-        active_bot_count = max(1, subbot_count + 1)
-        desired_limit = max(settings.sup_bot_limit, active_bot_count * 4)
+        desired_limit = calculate_telegram_request_limit(
+            current_subbot_count=subbot_count,
+            max_subbot_count=settings.max_subbots,
+            configured_limit=settings.sup_bot_limit,
+            connections_per_bot=settings.telegram_connections_per_bot,
+            overhead_connections=settings.telegram_connection_overhead,
+        )
         asyncio_helper.REQUEST_LIMIT = desired_limit
         return desired_limit
 
@@ -483,6 +500,7 @@ class MasterBot:
                 return "\u042d\u0442\u043e\u0442 \u0441\u0430\u0431\u0431\u043e\u0442 \u0443\u0436\u0435 \u043f\u0440\u0438\u0432\u044f\u0437\u0430\u043d \u043a \u0434\u0440\u0443\u0433\u043e\u043c\u0443 \u043a\u0430\u043d\u0430\u043b\u0443.", None
             editorial_channel = await self.editorial_actions.ensure_channel_for_tg_channel_id(channel_id)
             if not self._is_subbot_running(bot_username, channel_id):
+                self._configure_request_limit(len(self.bots_work) + 1)
                 await bot.run_bot()
                 self.bots_work.append(bot)
             return "\u041f\u0440\u0438\u0432\u044f\u0437\u043a\u0430 \u0441\u0430\u0431\u0431\u043e\u0442\u0430 \u0443\u0436\u0435 \u0431\u044b\u043b\u0430 \u0432 \u0431\u0430\u0437\u0435; \u043a\u0430\u043d\u0430\u043b \u0440\u0435\u0430\u043a\u0442\u0438\u0432\u0438\u0440\u043e\u0432\u0430\u043d.", editorial_channel.id
@@ -501,6 +519,7 @@ class MasterBot:
                 "bot_api_token": api_token,
             }
         )
+        self._configure_request_limit(len(self.bots_work) + 1)
         await bot.run_bot()
         self.bots_work.append(bot)
         editorial_channel = await self.editorial_actions.ensure_channel_for_tg_channel_id(channel_id)
@@ -1354,6 +1373,90 @@ class MasterBot:
             reply_markup=build_paste_actions(paste.id, len(pastes) > index + 1),
         )
 
+    async def _show_tags_menu(self, chat_id: int) -> None:
+        tags = await self.editorial_actions.list_tags(include_inactive=True)
+        buttons = [(tag.slug, tag.title, tag.is_active) for tag in tags]
+        await self.main_bot.send_message(
+            chat_id,
+            "Теги управляют авто-разметкой паст и сообщений, а также правилами публикации паст по каналам.",
+            reply_markup=build_tags_actions(buttons),
+        )
+
+    async def _show_tag_card(self, chat_id: int, slug: str) -> None:
+        tags = await self.editorial_actions.list_tags(include_inactive=True)
+        tag = next((item for item in tags if item.slug == slug), None)
+        if tag is None:
+            await self.main_bot.send_message(chat_id, f"Тег {slug} не найден.")
+            return
+        keywords = await self.editorial_actions.list_tag_keywords(slug)
+        active_keywords = [keyword.keyword for keyword in keywords if keyword.is_active]
+        keyword_text = ", ".join(active_keywords) if active_keywords else "нет"
+        await self.main_bot.send_message(
+            chat_id,
+            (
+                f"Тег: {tag.title}\n"
+                f"Slug: {tag.slug}\n"
+                f"Статус: {'активен' if tag.is_active else 'выключен'}\n"
+                f"Priority: {tag.priority}\n"
+                f"Ключевые слова: {keyword_text}"
+            ),
+            reply_markup=build_tag_actions(tag.slug, tag.is_active),
+        )
+
+    async def _show_tag_keywords(self, chat_id: int, slug: str) -> None:
+        keywords = await self.editorial_actions.list_tag_keywords(slug)
+        buttons = [(keyword.id, keyword.keyword, keyword.is_active) for keyword in keywords]
+        await self.main_bot.send_message(
+            chat_id,
+            f"Ключевые слова тега {slug}:",
+            reply_markup=build_tag_keywords_actions(slug, buttons),
+        )
+
+    async def _show_paste_tags(self, chat_id: int, paste_id: int) -> None:
+        paste = await self.editorial_actions.get_paste(paste_id)
+        if paste is None:
+            await self.main_bot.send_message(chat_id, f"Паста #{paste_id} не найдена.")
+            return
+        summary = await self.editorial_actions.get_paste_tag_summary(paste_id)
+        await self.main_bot.send_message(
+            chat_id,
+            (
+                f"Теги пасты #{paste_id}: {paste.title}\n"
+                f"Авто: {', '.join(summary.auto_tags) if summary.auto_tags else 'нет'}\n"
+                f"Вручную: {', '.join(summary.manual_tags) if summary.manual_tags else 'нет'}\n"
+                f"Итог: {', '.join(summary.all_tags) if summary.all_tags else 'нет'}\n"
+                f"Основной: {summary.primary_tag or '-'}"
+            ),
+            reply_markup=build_paste_tag_actions(paste_id),
+        )
+
+    async def _show_channel_paste_tags(self, chat_id: int, channel_id: int) -> None:
+        channel = await self.editorial_actions.get_channel(channel_id)
+        if channel is None:
+            await self.main_bot.send_message(chat_id, f"Канал {channel_id} не найден.")
+            return
+        label = await self._get_channel_label(channel_id)
+        rows = await self.editorial_actions.list_channel_paste_tag_rules(channel_id)
+        include_tags = [tag.slug for rule, tag in rows if rule.mode == ChannelPasteTagRuleMode.INCLUDE and rule.is_active]
+        exclude_tags = [tag.slug for rule, tag in rows if rule.mode == ChannelPasteTagRuleMode.EXCLUDE and rule.is_active]
+        await self.main_bot.send_message(
+            chat_id,
+            (
+                f"Правила паст по тегам для {label}\n"
+                f"Только с тегами: {', '.join(include_tags) if include_tags else 'нет'}\n"
+                f"Запрещённые теги: {', '.join(exclude_tags) if exclude_tags else 'нет'}\n\n"
+                "Если список 'только с тегами' пуст, подходят любые пасты без запрещённых тегов."
+            ),
+            reply_markup=build_channel_paste_tag_actions(channel_id),
+        )
+
+    @staticmethod
+    def _split_slug_list(text_value: str) -> list[str]:
+        raw_items = text_value.replace("\n", ",").replace(";", ",").split(",")
+        if len(raw_items) == 1:
+            raw_items = text_value.split()
+        return [item.strip() for item in raw_items if item.strip()]
+
     async def _handle_stateful_admin_text(self, message: Message) -> bool:
         state = self.user_states.get(message.chat.id)
         if not state:
@@ -1671,6 +1774,111 @@ class MasterBot:
             await self._show_first_paste(message.chat.id, current_id=paste.id)
             return True
 
+        if action == "await_add_tag":
+            if not text_value:
+                await self.main_bot.send_message(message.chat.id, "Нужен slug тега или строка 'slug :: Название'.")
+                return True
+            title = None
+            slug = text_value
+            if "::" in text_value:
+                slug, title = [part.strip() for part in text_value.split("::", maxsplit=1)]
+            try:
+                tag = await self.editorial_actions.create_tag(
+                    slug=slug,
+                    title=title,
+                    created_by=message.from_user.id if message.from_user else message.chat.id,
+                )
+            except ValueError as exc:
+                await self.main_bot.send_message(message.chat.id, str(exc))
+                return True
+            await self.main_bot.send_message(message.chat.id, f"Тег {tag.slug} добавлен.")
+            await self._show_tag_card(message.chat.id, tag.slug)
+            return True
+
+        if action == "await_add_tag_keywords":
+            slug = state["slug"]
+            keywords = self._split_slug_list(text_value)
+            if not keywords:
+                await self.main_bot.send_message(message.chat.id, "Нужны ключевые слова через запятую или пробел.")
+                return True
+            try:
+                created = await self.editorial_actions.add_tag_keywords(tag_slug=slug, keywords=keywords)
+            except ValueError as exc:
+                await self.main_bot.send_message(message.chat.id, str(exc))
+                return True
+            await self.main_bot.send_message(message.chat.id, f"Добавлено/включено ключевых слов: {len(created)}.")
+            await self._show_tag_card(message.chat.id, slug)
+            return True
+
+        if action == "await_add_paste_manual_tag":
+            paste_id = int(state["paste_id"])
+            try:
+                summary = await self.editorial_actions.add_paste_manual_tag(
+                    paste_id=paste_id,
+                    tag_slug=text_value,
+                    created_by=message.from_user.id if message.from_user else message.chat.id,
+                )
+            except ValueError as exc:
+                await self.main_bot.send_message(message.chat.id, str(exc))
+                return True
+            await self.main_bot.send_message(message.chat.id, f"Теги пасты обновлены: {', '.join(summary.all_tags) or 'нет'}.")
+            await self._show_paste_tags(message.chat.id, paste_id)
+            return True
+
+        if action == "await_remove_paste_manual_tag":
+            paste_id = int(state["paste_id"])
+            try:
+                summary = await self.editorial_actions.remove_paste_manual_tag(paste_id=paste_id, tag_slug=text_value)
+            except ValueError as exc:
+                await self.main_bot.send_message(message.chat.id, str(exc))
+                return True
+            await self.main_bot.send_message(message.chat.id, f"Теги пасты обновлены: {', '.join(summary.all_tags) or 'нет'}.")
+            await self._show_paste_tags(message.chat.id, paste_id)
+            return True
+
+        if action == "await_set_paste_primary_tag":
+            paste_id = int(state["paste_id"])
+            try:
+                summary = await self.editorial_actions.set_paste_primary_tag(paste_id=paste_id, tag_slug=text_value)
+            except ValueError as exc:
+                await self.main_bot.send_message(message.chat.id, str(exc))
+                return True
+            await self.main_bot.send_message(message.chat.id, f"Основной тег пасты: {summary.primary_tag or '-'}.")
+            await self._show_paste_tags(message.chat.id, paste_id)
+            return True
+
+        if action == "await_channel_paste_tag_rule":
+            channel_id = int(state["channel_id"])
+            mode = ChannelPasteTagRuleMode(state["mode"])
+            operation = state["operation"]
+            tag_slugs = self._split_slug_list(text_value)
+            if not tag_slugs:
+                await self.main_bot.send_message(message.chat.id, "Нужен slug тега.")
+                return True
+            changed = 0
+            try:
+                for tag_slug in tag_slugs:
+                    if operation == "add":
+                        await self.editorial_actions.add_channel_paste_tag_rule(
+                            channel_id=channel_id,
+                            tag_slug=tag_slug,
+                            mode=mode,
+                            created_by=message.from_user.id if message.from_user else message.chat.id,
+                        )
+                        changed += 1
+                    else:
+                        changed += await self.editorial_actions.remove_channel_paste_tag_rule(
+                            channel_id=channel_id,
+                            tag_slug=tag_slug,
+                            mode=mode,
+                        )
+            except ValueError as exc:
+                await self.main_bot.send_message(message.chat.id, str(exc))
+                return True
+            await self.main_bot.send_message(message.chat.id, f"Правила обновлены: {changed}.")
+            await self._show_channel_paste_tags(message.chat.id, channel_id)
+            return True
+
         if action == "await_manual_channel_message":
             channel_ids = [int(channel_id) for channel_id in state.get("channel_ids", [])]
             if not text_value:
@@ -1739,13 +1947,15 @@ class MasterBot:
             for message_id, info in info_post:
                 time_post, sender_id = info
                 if now.timestamp() >= time_post:
-                    public_data.append((message_id, sender_id, bot))
+                    public_data.append((message_id, sender_id, bot, time_post))
 
-        for message_id, sender_id, bot in public_data:
+        for message_id, sender_id, bot, time_post in public_data:
             try:
-                if await bots_data[bot].reschedule_delayed_if_publication_blocked(message_id, sender_id):
+                if not await bots_data[bot].is_delayed_publication_current(message_id, sender_id, time_post):
                     continue
-                sent = await bots_data[bot].send_delayed_message(message_id, sender_id)
+                if await bots_data[bot].reschedule_delayed_if_publication_blocked(message_id, sender_id, time_post):
+                    continue
+                sent = await bots_data[bot].send_delayed_message(message_id, sender_id, time_post)
                 if not sent:
                     continue
                 await self.delayed_database.delete_delayed_posts(
@@ -1926,6 +2136,10 @@ class MasterBot:
                         await self._safe_answer_callback(self.main_bot, call.id)
                         answered_early = True
                         await self._show_first_paste(call.message.chat.id)
+                    case "tags":
+                        await self._safe_answer_callback(self.main_bot, call.id)
+                        answered_early = True
+                        await self._show_tags_menu(call.message.chat.id)
                     case "channels":
                         await self._safe_answer_callback(self.main_bot, call.id)
                         answered_early = True
@@ -2158,6 +2372,61 @@ class MasterBot:
                         await self._show_first_pending_content(call.message.chat.id, current_id=content_item_id)
                 return
 
+            if data == "tag:add":
+                await self._safe_answer_callback(self.main_bot, call.id)
+                self._set_user_state(call.message.chat.id, "await_add_tag")
+                await self.main_bot.send_message(
+                    call.message.chat.id,
+                    "Отправьте slug тега или строку:\nslug :: Название\n\nНапример:\nsummer :: Лето",
+                )
+                return
+
+            if data.startswith("tag:view:"):
+                slug = data.split(":", maxsplit=2)[2]
+                await self._safe_answer_callback(self.main_bot, call.id)
+                await self._show_tag_card(call.message.chat.id, slug)
+                return
+
+            if data.startswith("tag:add_keywords:"):
+                slug = data.split(":", maxsplit=2)[2]
+                await self._safe_answer_callback(self.main_bot, call.id)
+                self._set_user_state(call.message.chat.id, "await_add_tag_keywords", slug=slug)
+                await self.main_bot.send_message(
+                    call.message.chat.id,
+                    f"Отправьте ключевые слова для тега {slug} через запятую.\nНапример:\nлето, каникулы, июль",
+                )
+                return
+
+            if data.startswith("tag:keywords:"):
+                slug = data.split(":", maxsplit=2)[2]
+                await self._safe_answer_callback(self.main_bot, call.id)
+                await self._show_tag_keywords(call.message.chat.id, slug)
+                return
+
+            if data.startswith("tag:toggle:"):
+                slug = data.split(":", maxsplit=2)[2]
+                await self._safe_answer_callback(self.main_bot, call.id)
+                tags = await self.editorial_actions.list_tags(include_inactive=True)
+                tag = next((item for item in tags if item.slug == slug), None)
+                if tag is None:
+                    await self.main_bot.send_message(call.message.chat.id, f"Тег {slug} не найден.")
+                    return
+                updated = await self.editorial_actions.set_tag_active(slug=slug, is_active=not tag.is_active)
+                await self.main_bot.send_message(
+                    call.message.chat.id,
+                    f"Тег {updated.slug} {'включен' if updated.is_active else 'выключен'}.",
+                )
+                await self._show_tag_card(call.message.chat.id, slug)
+                return
+
+            if data.startswith("tag:remove_keyword:"):
+                _prefix, _action, slug, keyword_id = data.split(":")
+                await self._safe_answer_callback(self.main_bot, call.id)
+                keyword = await self.editorial_actions.remove_tag_keyword(int(keyword_id))
+                await self.main_bot.send_message(call.message.chat.id, f"Ключевое слово выключено: {keyword.keyword}")
+                await self._show_tag_keywords(call.message.chat.id, slug)
+                return
+
             if data == "my_channels:all":
                 await self._safe_answer_callback(self.main_bot, call.id)
                 channels = await self.editorial_actions.list_user_moderation_feed_channels(call.from_user.id)
@@ -2288,6 +2557,12 @@ class MasterBot:
                 await self._send_channel_settings_prompt(call.message.chat.id, channel_id)
                 return
 
+            if data.startswith("channel:paste_tags:"):
+                channel_id = int(data.split(":")[-1])
+                await self._safe_answer_callback(self.main_bot, call.id)
+                await self._show_channel_paste_tags(call.message.chat.id, channel_id)
+                return
+
             if data.startswith("channel:seed:"):
                 channel_id = int(data.split(":")[-1])
                 await self._safe_answer_callback(self.main_bot, call.id)
@@ -2327,6 +2602,39 @@ class MasterBot:
                 await self.main_bot.answer_callback_query(call.id)
                 return
 
+            if data.startswith("channel_paste_tags:"):
+                _prefix, action, value = data.split(":")
+                channel_id = int(value)
+                await self._safe_answer_callback(self.main_bot, call.id)
+                if action == "add_include":
+                    operation = "add"
+                    mode = ChannelPasteTagRuleMode.INCLUDE
+                    prompt = "Отправьте slug обязательного тега для паст. Можно несколько через запятую."
+                elif action == "add_exclude":
+                    operation = "add"
+                    mode = ChannelPasteTagRuleMode.EXCLUDE
+                    prompt = "Отправьте slug запрещённого тега для паст. Можно несколько через запятую."
+                elif action == "remove_include":
+                    operation = "remove"
+                    mode = ChannelPasteTagRuleMode.INCLUDE
+                    prompt = "Отправьте slug обязательного тега, который нужно убрать."
+                elif action == "remove_exclude":
+                    operation = "remove"
+                    mode = ChannelPasteTagRuleMode.EXCLUDE
+                    prompt = "Отправьте slug запрещённого тега, который нужно убрать."
+                else:
+                    await self.main_bot.send_message(call.message.chat.id, "Неизвестное действие с тегами паст канала.")
+                    return
+                self._set_user_state(
+                    call.message.chat.id,
+                    "await_channel_paste_tag_rule",
+                    channel_id=channel_id,
+                    operation=operation,
+                    mode=mode.value,
+                )
+                await self.main_bot.send_message(call.message.chat.id, prompt)
+                return
+
             if data == "paste:add":
                 await self._safe_answer_callback(self.main_bot, call.id)
                 self._set_user_state(call.message.chat.id, "await_add_paste")
@@ -2336,6 +2644,41 @@ class MasterBot:
                     "Если хотите задать заголовок вручную, используйте формат:\n"
                     "Заголовок :: Текст пасты",
                 )
+                return
+
+            if data.startswith("paste:tags:"):
+                paste_id = int(data.split(":")[-1])
+                await self._safe_answer_callback(self.main_bot, call.id)
+                await self._show_paste_tags(call.message.chat.id, paste_id)
+                return
+
+            if data.startswith("paste_tags:"):
+                _prefix, action, value = data.split(":")
+                paste_id = int(value)
+                await self._safe_answer_callback(self.main_bot, call.id)
+                if action == "refresh":
+                    summary = await self.editorial_actions.refresh_paste_auto_tags(paste_id)
+                    await self.main_bot.send_message(
+                        call.message.chat.id,
+                        f"Авто-теги пересчитаны. Итог: {', '.join(summary.all_tags) or 'нет'}.",
+                    )
+                    await self._show_paste_tags(call.message.chat.id, paste_id)
+                    return
+                state_action = {
+                    "add": "await_add_paste_manual_tag",
+                    "remove": "await_remove_paste_manual_tag",
+                    "primary": "await_set_paste_primary_tag",
+                }.get(action)
+                if state_action is None:
+                    await self.main_bot.send_message(call.message.chat.id, "Неизвестное действие с тегами пасты.")
+                    return
+                self._set_user_state(call.message.chat.id, state_action, paste_id=paste_id)
+                prompts = {
+                    "add": "Отправьте slug тега, который нужно вручную добавить пасте.",
+                    "remove": "Отправьте slug ручного тега, который нужно убрать с пасты.",
+                    "primary": "Отправьте slug тега, который нужно сделать основным.",
+                }
+                await self.main_bot.send_message(call.message.chat.id, prompts[action])
                 return
 
             if data.startswith("paste:delete:"):
@@ -2543,19 +2886,26 @@ class MasterBot:
             )
             async with aiohttp.ClientSession() as session:
                 for api_token, bot_username, channel_id, _id_row in bots_lst:
-                    channel_username = await self._fetch_channel_username(session, api_token, channel_id)
-                    bot = await SubBot.create(
-                        main_bot_username=self.bot_info.username,
-                        api_token_bot=api_token,
-                        channel_username="@" + channel_username,
-                        hello_msg=settings.hello_msg,
-                        ban_usr_msg=settings.ban_msg,
-                        send_post_msg=settings.send_post_msg,
-                        callback_adv_action=self.callback_adv_send_message_v2,
-                        callback_new_submission=self.callback_new_submission_notification,
-                    )
-                    await bot.run_bot()
-                    self.bots_work.append(bot)
+                    try:
+                        channel_username = await self._fetch_channel_username(session, api_token, channel_id)
+                        bot = await SubBot.create(
+                            main_bot_username=self.bot_info.username,
+                            api_token_bot=api_token,
+                            channel_username="@" + channel_username,
+                            hello_msg=settings.hello_msg,
+                            ban_usr_msg=settings.ban_msg,
+                            send_post_msg=settings.send_post_msg,
+                            callback_adv_action=self.callback_adv_send_message_v2,
+                            callback_new_submission=self.callback_new_submission_notification,
+                        )
+                        await bot.run_bot()
+                        self.bots_work.append(bot)
+                    except Exception:
+                        logger.exception(
+                            "Failed to start saved subbot @{} for channel {}. Continuing startup.",
+                            bot_username,
+                            channel_id,
+                        )
             self.delayed_task = asyncio.create_task(self.__delayed_posts_checker())
             await self.main_bot.polling(none_stop=True)
         except Exception as ex:

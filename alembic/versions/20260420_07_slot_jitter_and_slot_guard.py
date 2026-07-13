@@ -20,7 +20,7 @@ depends_on = None
 def upgrade() -> None:
     op.add_column(
         "channels",
-        sa.Column("slot_jitter_minutes", sa.Integer(), server_default="0", nullable=False),
+        sa.Column("slot_jitter_minutes", sa.Integer(), server_default="30", nullable=False),
     )
     op.add_column("publication_log", sa.Column("slot_id", sa.Integer(), nullable=True))
     op.add_column("publication_log", sa.Column("slot_date", sa.Date(), nullable=True))

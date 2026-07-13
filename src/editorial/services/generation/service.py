@@ -24,7 +24,8 @@ from src.editorial.services.generation.providers import (
     OpenRouterGenerationProvider,
     StubGenerationProvider,
 )
-from src.editorial.utils.text import compute_text_hash, detect_tags, normalize_text, pick_primary_tag
+from src.editorial.services.tag_service import TagService
+from src.editorial.utils.text import compute_text_hash, normalize_text
 
 
 BAD_VARIANT_PHRASES = (
@@ -87,6 +88,7 @@ FAKE_PRECISION_PATTERNS = (
 class GenerationService:
     def __init__(self, provider: BaseGenerationProvider | None = None):
         self.provider = provider or self._resolve_provider()
+        self.tag_service = TagService()
 
     def _resolve_provider(self) -> BaseGenerationProvider:
         if settings.generation_default_provider == "openrouter":
@@ -157,14 +159,14 @@ class GenerationService:
                 return run
 
             for body_text in variants:
-                tags = detect_tags(body_text)
+                tags, primary_tag = await self.tag_service.apply_tags_to_content_cache(session, body_text)
                 item = ContentItem(
                     channel_id=channel_id,
                     source_type=ContentSourceType.GENERATED,
                     body_text=body_text,
                     normalized_text=normalize_text(body_text),
                     text_hash=compute_text_hash(body_text) or "",
-                    primary_tag=pick_primary_tag(tags),
+                    primary_tag=primary_tag,
                     tags=tags,
                     template_key="generated_question" if "?" in body_text else "generated_digest",
                     tone_key="soft_discussion",

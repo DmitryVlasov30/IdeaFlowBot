@@ -12,14 +12,16 @@ from src.editorial.models.enums import ContentItemStatus, ContentSourceType, Pas
 from src.editorial.models.paste import PasteChannelRule, PasteLibrary, PasteUsage
 from src.editorial.models.publication import PublicationLog
 from src.editorial.models.submission import Submission
-from src.editorial.utils.text import compute_text_hash, detect_tags, normalize_text, pick_primary_tag
+from src.editorial.services.tag_service import TagService
+from src.editorial.utils.text import compute_text_hash, normalize_text
 
 
 class PasteService:
     GLOBAL_CROSS_CHANNEL_COOLDOWN_DAYS = 3
 
-    def __init__(self) -> None:
+    def __init__(self, tag_service: TagService | None = None) -> None:
         self._random = SystemRandom()
+        self.tag_service = tag_service or TagService()
 
     async def list_pastes(
         self,
@@ -42,18 +44,20 @@ class PasteService:
         created_by: int | None = None,
         status: PasteStatus = PasteStatus.ACTIVE,
     ) -> PasteLibrary:
-        tags = detect_tags(body_text)
+        tags, primary_tag = await self.tag_service.apply_tags_to_content_cache(session, body_text)
         paste = PasteLibrary(
             title=title,
             body_text=body_text,
             normalized_text=normalize_text(body_text),
             text_hash=compute_text_hash(body_text) or "",
             tags=tags,
-            primary_tag=pick_primary_tag(tags),
+            primary_tag=primary_tag,
             status=status,
             created_by=created_by,
         )
         session.add(paste)
+        await session.flush()
+        await self.tag_service.sync_paste_auto_tags(session, paste)
         await session.commit()
         await session.refresh(paste)
         return paste
@@ -120,7 +124,9 @@ class PasteService:
         if paste is None:
             raise ValueError(f"Paste {paste_id} not found")
 
-        tags = detect_tags(paste.body_text)
+        await self.tag_service.refresh_paste_tag_cache(session, paste)
+        tags = list(paste.tags or [])
+        primary_tag = paste.primary_tag or await self.tag_service.pick_primary_tag(session, tags)
         item = ContentItem(
             channel_id=channel_id,
             source_type=ContentSourceType.PASTE,
@@ -128,7 +134,7 @@ class PasteService:
             body_text=paste.body_text,
             normalized_text=normalize_text(paste.body_text),
             text_hash=compute_text_hash(paste.body_text) or "",
-            primary_tag=pick_primary_tag(tags),
+            primary_tag=primary_tag,
             tags=tags,
             tone_key="community",
             review_required=review_required,
@@ -171,6 +177,12 @@ class PasteService:
         available: list[PasteLibrary] = []
         for paste in pastes:
             if not await self._is_paste_allowed_for_channel(session, paste, channel_id):
+                continue
+            if not await self.tag_service.is_paste_allowed_for_channel_tags(
+                session,
+                paste=paste,
+                channel_id=channel_id,
+            ):
                 continue
             if await self._is_paste_in_cooldown(session, paste, channel_id):
                 continue

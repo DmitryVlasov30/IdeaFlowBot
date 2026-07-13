@@ -18,6 +18,9 @@ def build_main_panel(is_general_admin: bool) -> InlineKeyboardMarkup:
         InlineKeyboardButton("\u041a\u0430\u043d\u0430\u043b\u044b \u0438 \u0441\u043b\u043e\u0442\u044b", callback_data="panel:channels"),
     )
     markup.add(
+        InlineKeyboardButton("Теги", callback_data="panel:tags"),
+    )
+    markup.add(
         InlineKeyboardButton("\u041c\u043e\u0438 \u043a\u0430\u043d\u0430\u043b\u044b", callback_data="panel:my_channels")
     )
     markup.add(
@@ -171,6 +174,7 @@ def build_channel_actions(
         InlineKeyboardButton("\u0421\u0433\u0435\u043d\u0435\u0440\u0438\u0440\u043e\u0432\u0430\u0442\u044c \u043f\u043e\u0441\u0442\u044b", callback_data=f"channel:generate:{channel_id}"),
         InlineKeyboardButton("\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0430 \u0441\u043b\u043e\u0442\u043e\u0432", callback_data=f"channel:slots:{channel_id}"),
         InlineKeyboardButton("\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0435 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432", callback_data=f"channel:params:{channel_id}"),
+        InlineKeyboardButton("Теги паст", callback_data=f"channel:paste_tags:{channel_id}"),
     )
     markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u043a \u043a\u0430\u043d\u0430\u043b\u0430\u043c", callback_data="panel:channels"))
     markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u0432 \u043f\u0430\u043d\u0435\u043b\u044c", callback_data="panel:main"))
@@ -195,6 +199,7 @@ def build_paste_actions(paste_id: int, has_next: bool) -> InlineKeyboardMarkup:
         InlineKeyboardButton("\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u043f\u0430\u0441\u0442\u0443", callback_data="paste:add"),
         InlineKeyboardButton("\u0423\u0434\u0430\u043b\u0438\u0442\u044c \u043f\u0430\u0441\u0442\u0443", callback_data=f"paste:delete:{paste_id}"),
     )
+    markup.add(InlineKeyboardButton("Теги пасты", callback_data=f"paste:tags:{paste_id}"))
     markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u0432 \u043f\u0430\u043d\u0435\u043b\u044c", callback_data="panel:main"))
     if has_next:
         markup.add(InlineKeyboardButton("\u0421\u043b\u0435\u0434\u0443\u044e\u0449\u0430\u044f \u043f\u0430\u0441\u0442\u0430", callback_data=f"paste:next:{paste_id}"))
@@ -222,6 +227,63 @@ def build_subbot_menu(subbot_buttons: list[tuple[str, int]]) -> InlineKeyboardMa
     markup.add(InlineKeyboardButton("\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u0441\u0430\u0431\u0431\u043e\u0442\u0430", callback_data="subbot:add"))
     for username, channel_id in subbot_buttons:
         markup.add(InlineKeyboardButton(f"\u0423\u0434\u0430\u043b\u0438\u0442\u044c @{username}", callback_data=f"subbot:remove:{username}:{channel_id}"))
+    markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u0432 \u043f\u0430\u043d\u0435\u043b\u044c", callback_data="panel:main"))
+    return markup
+
+
+def build_tags_actions(tag_buttons: list[tuple[str, str, bool]]) -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(InlineKeyboardButton("Добавить тег", callback_data="tag:add"))
+    for slug, title, is_active in tag_buttons:
+        state = "" if is_active else " [выкл]"
+        markup.add(InlineKeyboardButton(f"{title} ({slug}){state}", callback_data=f"tag:view:{slug}"))
+    markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u0432 \u043f\u0430\u043d\u0435\u043b\u044c", callback_data="panel:main"))
+    return markup
+
+
+def build_tag_actions(slug: str, is_active: bool) -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("Добавить ключевые слова", callback_data=f"tag:add_keywords:{slug}"),
+        InlineKeyboardButton("Ключевые слова", callback_data=f"tag:keywords:{slug}"),
+        InlineKeyboardButton("Выключить тег" if is_active else "Включить тег", callback_data=f"tag:toggle:{slug}"),
+    )
+    markup.add(InlineKeyboardButton("Назад к тегам", callback_data="panel:tags"))
+    markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u0432 \u043f\u0430\u043d\u0435\u043b\u044c", callback_data="panel:main"))
+    return markup
+
+
+def build_tag_keywords_actions(slug: str, keyword_buttons: list[tuple[int, str, bool]]) -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(InlineKeyboardButton("Добавить ключевые слова", callback_data=f"tag:add_keywords:{slug}"))
+    for keyword_id, keyword, is_active in keyword_buttons:
+        state = "" if is_active else " [выкл]"
+        markup.add(InlineKeyboardButton(f"Удалить: {keyword}{state}", callback_data=f"tag:remove_keyword:{slug}:{keyword_id}"))
+    markup.add(InlineKeyboardButton("Назад к тегу", callback_data=f"tag:view:{slug}"))
+    return markup
+
+
+def build_paste_tag_actions(paste_id: int) -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("Добавить ручной тег", callback_data=f"paste_tags:add:{paste_id}"),
+        InlineKeyboardButton("Убрать ручной тег", callback_data=f"paste_tags:remove:{paste_id}"),
+        InlineKeyboardButton("Сделать тег основным", callback_data=f"paste_tags:primary:{paste_id}"),
+        InlineKeyboardButton("Пересчитать авто-теги", callback_data=f"paste_tags:refresh:{paste_id}"),
+    )
+    markup.add(InlineKeyboardButton("Назад к пастам", callback_data="panel:pastes"))
+    return markup
+
+
+def build_channel_paste_tag_actions(channel_id: int) -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("Добавить обязательный тег", callback_data=f"channel_paste_tags:add_include:{channel_id}"),
+        InlineKeyboardButton("Добавить запрещённый тег", callback_data=f"channel_paste_tags:add_exclude:{channel_id}"),
+        InlineKeyboardButton("Удалить обязательный тег", callback_data=f"channel_paste_tags:remove_include:{channel_id}"),
+        InlineKeyboardButton("Удалить запрещённый тег", callback_data=f"channel_paste_tags:remove_exclude:{channel_id}"),
+    )
+    markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u043a \u043a\u0430\u043d\u0430\u043b\u0443", callback_data=f"channel:view:{channel_id}"))
     markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u0432 \u043f\u0430\u043d\u0435\u043b\u044c", callback_data="panel:main"))
     return markup
 
