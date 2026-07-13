@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.editorial.models.enums import ChannelPasteTagRuleMode, TagAssignmentSource, TagMatchType
 from src.editorial.models.paste import PasteLibrary
-from src.editorial.models.tag import ChannelPasteTagRule, PasteTagAssignment, TagDefinition, TagKeyword
+from src.editorial.models.tag import ChannelPasteTagRule, GlobalPasteTagRule, PasteTagAssignment, TagDefinition, TagKeyword
 from src.editorial.utils.text import detect_tags as legacy_detect_tags
 from src.editorial.utils.text import normalize_text
 
@@ -394,6 +394,78 @@ class TagService:
             ).all()
         )
 
+    async def add_global_paste_tag_rule(
+        self,
+        session: AsyncSession,
+        *,
+        tag_slug: str,
+        mode: ChannelPasteTagRuleMode,
+        ends_at: datetime | None = None,
+        created_by: int | None = None,
+    ) -> GlobalPasteTagRule:
+        tag = await self.get_tag_by_slug(session, tag_slug)
+        if tag is None:
+            raise ValueError(f"Tag {tag_slug} not found")
+        existing = await session.scalar(
+            select(GlobalPasteTagRule)
+            .where(
+                GlobalPasteTagRule.tag_id == tag.id,
+                GlobalPasteTagRule.mode == mode,
+            )
+            .limit(1)
+        )
+        if existing is not None:
+            existing.is_active = True
+            existing.starts_at = None
+            existing.ends_at = ends_at
+            existing.created_by = created_by
+            await session.commit()
+            await session.refresh(existing)
+            return existing
+        rule = GlobalPasteTagRule(
+            tag_id=tag.id,
+            mode=mode,
+            is_active=True,
+            starts_at=None,
+            ends_at=ends_at,
+            created_by=created_by,
+        )
+        session.add(rule)
+        await session.commit()
+        await session.refresh(rule)
+        return rule
+
+    async def remove_global_paste_tag_rule(
+        self,
+        session: AsyncSession,
+        *,
+        tag_slug: str,
+        mode: ChannelPasteTagRuleMode,
+    ) -> int:
+        tag = await self.get_tag_by_slug(session, tag_slug)
+        if tag is None:
+            raise ValueError(f"Tag {tag_slug} not found")
+        result = await session.execute(
+            sql_delete(GlobalPasteTagRule).where(
+                GlobalPasteTagRule.tag_id == tag.id,
+                GlobalPasteTagRule.mode == mode,
+            )
+        )
+        await session.commit()
+        return int(result.rowcount or 0)
+
+    async def list_global_paste_tag_rules(self, session: AsyncSession) -> list[tuple[GlobalPasteTagRule, TagDefinition]]:
+        await self.ensure_default_tags(session)
+        return list(
+            (
+                await session.execute(
+                    select(GlobalPasteTagRule, TagDefinition)
+                    .join(TagDefinition, TagDefinition.id == GlobalPasteTagRule.tag_id)
+                    .order_by(GlobalPasteTagRule.mode.asc(), TagDefinition.priority.asc(), TagDefinition.slug.asc())
+                )
+            ).all()
+        )
+
     async def is_paste_allowed_for_channel_tags(
         self,
         session: AsyncSession,
@@ -406,7 +478,21 @@ class TagService:
             paste_tags.add(paste.primary_tag)
 
         now = datetime.now(timezone.utc)
-        rows = list(
+        global_rows = list(
+            (
+                await session.execute(
+                    select(GlobalPasteTagRule, TagDefinition)
+                    .join(TagDefinition, TagDefinition.id == GlobalPasteTagRule.tag_id)
+                    .where(
+                        GlobalPasteTagRule.is_active.is_(True),
+                        TagDefinition.is_active.is_(True),
+                        (GlobalPasteTagRule.starts_at.is_(None) | (GlobalPasteTagRule.starts_at <= now)),
+                        (GlobalPasteTagRule.ends_at.is_(None) | (GlobalPasteTagRule.ends_at > now)),
+                    )
+                )
+            ).all()
+        )
+        channel_rows = list(
             (
                 await session.execute(
                     select(ChannelPasteTagRule, TagDefinition)
@@ -421,14 +507,32 @@ class TagService:
                 )
             ).all()
         )
-        excluded = {tag.slug for rule, tag in rows if rule.mode == ChannelPasteTagRuleMode.EXCLUDE}
+        global_included = {tag.slug for rule, tag in global_rows if rule.mode == ChannelPasteTagRuleMode.INCLUDE}
+        global_excluded = {tag.slug for rule, tag in global_rows if rule.mode == ChannelPasteTagRuleMode.EXCLUDE}
+        channel_included = {tag.slug for rule, tag in channel_rows if rule.mode == ChannelPasteTagRuleMode.INCLUDE}
+        channel_excluded = {tag.slug for rule, tag in channel_rows if rule.mode == ChannelPasteTagRuleMode.EXCLUDE}
+
+        return self._is_allowed_by_tag_sets(
+            paste_tags,
+            global_included=global_included,
+            channel_included=channel_included,
+            excluded=global_excluded | channel_excluded,
+        )
+
+    @staticmethod
+    def _is_allowed_by_tag_sets(
+        paste_tags: set[str],
+        *,
+        global_included: set[str],
+        channel_included: set[str],
+        excluded: set[str],
+    ) -> bool:
         if paste_tags & excluded:
             return False
-
-        included = {tag.slug for rule, tag in rows if rule.mode == ChannelPasteTagRuleMode.INCLUDE}
-        if included and not (paste_tags & included):
+        if global_included and not (paste_tags & global_included):
             return False
-
+        if channel_included and not (paste_tags & channel_included):
+            return False
         return True
 
     async def _paste_assignment_slugs(self, session: AsyncSession, paste_id: int) -> tuple[list[str], list[str]]:

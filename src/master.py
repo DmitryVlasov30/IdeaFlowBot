@@ -38,6 +38,7 @@ from src.panel_markups import (
     build_content_actions,
     build_empty_paste_actions,
     build_extra_panel,
+    build_global_paste_tag_rule_actions,
     build_main_panel,
     build_my_channels_actions,
     build_paste_actions,
@@ -1450,12 +1451,116 @@ class MasterBot:
             reply_markup=build_channel_paste_tag_actions(channel_id),
         )
 
+    async def _show_global_paste_tags(self, chat_id: int) -> None:
+        rows = await self.editorial_actions.list_global_paste_tag_rules()
+        now = datetime.now(timezone.utc)
+        include_tags = [
+            self._format_global_paste_tag_rule(rule, tag.slug)
+            for rule, tag in rows
+            if rule.mode == ChannelPasteTagRuleMode.INCLUDE and self._is_tag_rule_active(rule, now)
+        ]
+        exclude_tags = [
+            self._format_global_paste_tag_rule(rule, tag.slug)
+            for rule, tag in rows
+            if rule.mode == ChannelPasteTagRuleMode.EXCLUDE and self._is_tag_rule_active(rule, now)
+        ]
+        expired_count = sum(1 for rule, _tag in rows if self._is_tag_rule_expired(rule, now))
+        await self.main_bot.send_message(
+            chat_id,
+            (
+                "Массовые правила паст для всех каналов\n"
+                f"Include для всех: {', '.join(include_tags) if include_tags else 'нет'}\n"
+                f"Exclude для всех: {', '.join(exclude_tags) if exclude_tags else 'нет'}\n"
+                f"Истекших правил: {expired_count}\n\n"
+                "Exclude всегда сильнее include. Если глобальный include включён, паста должна иметь этот тег для любого канала."
+            ),
+            reply_markup=build_global_paste_tag_rule_actions(),
+        )
+
     @staticmethod
     def _split_slug_list(text_value: str) -> list[str]:
         raw_items = text_value.replace("\n", ",").replace(";", ",").split(",")
         if len(raw_items) == 1:
             raw_items = text_value.split()
         return [item.strip() for item in raw_items if item.strip()]
+
+    @staticmethod
+    def _is_tag_rule_active(rule: object, now: datetime) -> bool:
+        starts_at = MasterBot._normalize_rule_datetime(getattr(rule, "starts_at", None))
+        ends_at = MasterBot._normalize_rule_datetime(getattr(rule, "ends_at", None))
+        return bool(getattr(rule, "is_active", False)) and (starts_at is None or starts_at <= now) and (ends_at is None or ends_at > now)
+
+    @staticmethod
+    def _is_tag_rule_expired(rule: object, now: datetime) -> bool:
+        ends_at = MasterBot._normalize_rule_datetime(getattr(rule, "ends_at", None))
+        return bool(getattr(rule, "is_active", False)) and ends_at is not None and ends_at <= now
+
+    @staticmethod
+    def _normalize_rule_datetime(value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    @staticmethod
+    def _format_global_paste_tag_rule(rule: object, slug: str) -> str:
+        ends_at = MasterBot._normalize_rule_datetime(getattr(rule, "ends_at", None))
+        if ends_at is None:
+            return slug
+        local_until = ends_at.astimezone(ZoneInfo("Europe/Moscow"))
+        return f"{slug} до {local_until:%d.%m.%Y %H:%M}"
+
+    def _parse_global_paste_tag_rule_input(self, text_value: str) -> tuple[list[str], datetime | None]:
+        cleaned = text_value.strip()
+        if not cleaned:
+            return [], None
+
+        lowered = cleaned.lower()
+        for marker in (" до ", " until "):
+            marker_index = lowered.rfind(marker)
+            if marker_index != -1:
+                tag_text = cleaned[:marker_index].strip()
+                date_text = cleaned[marker_index + len(marker):].strip()
+                ends_at = self._parse_global_rule_until(date_text)
+                return self._split_slug_list(tag_text), ends_at
+
+        parts = cleaned.split()
+        for date_part_count in (2, 1):
+            if len(parts) <= date_part_count:
+                continue
+            date_text = " ".join(parts[-date_part_count:])
+            try:
+                ends_at = self._parse_global_rule_until(date_text)
+            except ValueError:
+                continue
+            tag_text = " ".join(parts[:-date_part_count])
+            return self._split_slug_list(tag_text), ends_at
+
+        return self._split_slug_list(cleaned), None
+
+    @staticmethod
+    def _parse_global_rule_until(date_text: str) -> datetime:
+        cleaned = date_text.strip()
+        formats = (
+            ("%Y-%m-%d %H:%M", False),
+            ("%d.%m.%Y %H:%M", False),
+            ("%Y-%m-%d", True),
+            ("%d.%m.%Y", True),
+        )
+        for fmt, date_only in formats:
+            try:
+                parsed = datetime.strptime(cleaned, fmt)
+            except ValueError:
+                continue
+            if date_only:
+                parsed = parsed.replace(hour=23, minute=59, second=59)
+            local_dt = parsed.replace(tzinfo=ZoneInfo("Europe/Moscow"))
+            utc_dt = local_dt.astimezone(timezone.utc)
+            if utc_dt <= datetime.now(timezone.utc):
+                raise ValueError("Срок действия правила уже прошёл.")
+            return utc_dt
+        raise ValueError("Не удалось разобрать дату. Используйте формат 2026-08-31 или 31.08.2026 23:59.")
 
     async def _handle_stateful_admin_text(self, message: Message) -> bool:
         state = self.user_states.get(message.chat.id)
@@ -1877,6 +1982,47 @@ class MasterBot:
                 return True
             await self.main_bot.send_message(message.chat.id, f"Правила обновлены: {changed}.")
             await self._show_channel_paste_tags(message.chat.id, channel_id)
+            return True
+
+        if action == "await_global_paste_tag_rule":
+            mode = ChannelPasteTagRuleMode(state["mode"])
+            operation = state["operation"]
+            if operation == "add":
+                try:
+                    tag_slugs, ends_at = self._parse_global_paste_tag_rule_input(text_value)
+                except ValueError as exc:
+                    await self.main_bot.send_message(message.chat.id, str(exc))
+                    return True
+            else:
+                tag_slugs = self._split_slug_list(text_value)
+                ends_at = None
+            if not tag_slugs:
+                await self.main_bot.send_message(message.chat.id, "Нужен slug тега.")
+                return True
+
+            changed = 0
+            try:
+                for tag_slug in tag_slugs:
+                    if operation == "add":
+                        await self.editorial_actions.add_global_paste_tag_rule(
+                            tag_slug=tag_slug,
+                            mode=mode,
+                            ends_at=ends_at,
+                            created_by=message.from_user.id if message.from_user else message.chat.id,
+                        )
+                        changed += 1
+                    else:
+                        changed += await self.editorial_actions.remove_global_paste_tag_rule(
+                            tag_slug=tag_slug,
+                            mode=mode,
+                        )
+            except ValueError as exc:
+                await self.main_bot.send_message(message.chat.id, str(exc))
+                return True
+
+            mode_label = "Include" if mode == ChannelPasteTagRuleMode.INCLUDE else "Exclude"
+            await self.main_bot.send_message(message.chat.id, f"Массовые правила {mode_label} обновлены: {changed}.")
+            await self._show_global_paste_tags(message.chat.id)
             return True
 
         if action == "await_manual_channel_message":
@@ -2381,6 +2527,11 @@ class MasterBot:
                 )
                 return
 
+            if data == "tag:global_rules":
+                await self._safe_answer_callback(self.main_bot, call.id)
+                await self._show_global_paste_tags(call.message.chat.id)
+                return
+
             if data.startswith("tag:view:"):
                 slug = data.split(":", maxsplit=2)[2]
                 await self._safe_answer_callback(self.main_bot, call.id)
@@ -2425,6 +2576,46 @@ class MasterBot:
                 keyword = await self.editorial_actions.remove_tag_keyword(int(keyword_id))
                 await self.main_bot.send_message(call.message.chat.id, f"Ключевое слово выключено: {keyword.keyword}")
                 await self._show_tag_keywords(call.message.chat.id, slug)
+                return
+
+            if data.startswith("global_paste_tags:"):
+                action = data.split(":", maxsplit=1)[1]
+                await self._safe_answer_callback(self.main_bot, call.id)
+                if action == "add_include":
+                    operation = "add"
+                    mode = ChannelPasteTagRuleMode.INCLUDE
+                    prompt = (
+                        "Отправьте slug тега, который нужно поставить как Include для всех каналов.\n"
+                        "Можно указать срок действия:\n"
+                        "summer до 2026-08-31\n"
+                        "summer 31.08.2026 23:59"
+                    )
+                elif action == "add_exclude":
+                    operation = "add"
+                    mode = ChannelPasteTagRuleMode.EXCLUDE
+                    prompt = (
+                        "Отправьте slug тега, который нужно поставить как Exclude для всех каналов.\n"
+                        "Можно указать срок действия:\n"
+                        "tech до 2026-08-31"
+                    )
+                elif action == "remove_include":
+                    operation = "remove"
+                    mode = ChannelPasteTagRuleMode.INCLUDE
+                    prompt = "Отправьте slug include-тега, который нужно убрать для всех каналов. Можно несколько через запятую."
+                elif action == "remove_exclude":
+                    operation = "remove"
+                    mode = ChannelPasteTagRuleMode.EXCLUDE
+                    prompt = "Отправьте slug exclude-тега, который нужно убрать для всех каналов. Можно несколько через запятую."
+                else:
+                    await self.main_bot.send_message(call.message.chat.id, "Неизвестное действие с массовыми правилами паст.")
+                    return
+                self._set_user_state(
+                    call.message.chat.id,
+                    "await_global_paste_tag_rule",
+                    operation=operation,
+                    mode=mode.value,
+                )
+                await self.main_bot.send_message(call.message.chat.id, prompt)
                 return
 
             if data == "my_channels:all":

@@ -79,3 +79,21 @@ class ChannelPasteTagRule(EditorialBase, BaseIdMixin, TimestampMixin):
     starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_by: Mapped[int | None] = mapped_column(BigInteger)
+
+
+class GlobalPasteTagRule(EditorialBase, BaseIdMixin, TimestampMixin):
+    __tablename__ = "global_paste_tag_rules"
+    __table_args__ = (
+        UniqueConstraint("tag_id", "mode"),
+    )
+
+    tag_id: Mapped[int] = mapped_column(ForeignKey("tag_definitions.id", ondelete="CASCADE"), nullable=False, index=True)
+    mode: Mapped[ChannelPasteTagRuleMode] = mapped_column(
+        enum_column(ChannelPasteTagRuleMode, "channel_paste_tag_rule_mode"),
+        nullable=False,
+        index=True,
+    )
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[int | None] = mapped_column(BigInteger)

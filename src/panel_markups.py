@@ -234,6 +234,7 @@ def build_subbot_menu(subbot_buttons: list[tuple[str, int]]) -> InlineKeyboardMa
 def build_tags_actions(tag_buttons: list[tuple[str, str, bool]]) -> InlineKeyboardMarkup:
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(InlineKeyboardButton("Добавить тег", callback_data="tag:add"))
+    markup.add(InlineKeyboardButton("Массовые правила паст", callback_data="tag:global_rules"))
     for slug, title, is_active in tag_buttons:
         state = "" if is_active else " [выкл]"
         markup.add(InlineKeyboardButton(f"{title} ({slug}){state}", callback_data=f"tag:view:{slug}"))
@@ -284,6 +285,19 @@ def build_channel_paste_tag_actions(channel_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton("Удалить запрещённый тег", callback_data=f"channel_paste_tags:remove_exclude:{channel_id}"),
     )
     markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u043a \u043a\u0430\u043d\u0430\u043b\u0443", callback_data=f"channel:view:{channel_id}"))
+    markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u0432 \u043f\u0430\u043d\u0435\u043b\u044c", callback_data="panel:main"))
+    return markup
+
+
+def build_global_paste_tag_rule_actions() -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("Поставить Include для всех", callback_data="global_paste_tags:add_include"),
+        InlineKeyboardButton("Убрать Include для всех", callback_data="global_paste_tags:remove_include"),
+        InlineKeyboardButton("Поставить Exclude для всех", callback_data="global_paste_tags:add_exclude"),
+        InlineKeyboardButton("Убрать Exclude для всех", callback_data="global_paste_tags:remove_exclude"),
+    )
+    markup.add(InlineKeyboardButton("Назад к тегам", callback_data="panel:tags"))
     markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u0432 \u043f\u0430\u043d\u0435\u043b\u044c", callback_data="panel:main"))
     return markup
 

@@ -21,7 +21,7 @@ from src.editorial.models.paste import PasteChannelRule, PasteLibrary, PasteUsag
 from src.editorial.models.publication import PublicationLog
 from src.editorial.models.review import Review
 from src.editorial.models.submission import Submission
-from src.editorial.models.tag import ChannelPasteTagRule, PasteTagAssignment, TagDefinition, TagKeyword
+from src.editorial.models.tag import ChannelPasteTagRule, GlobalPasteTagRule, PasteTagAssignment, TagDefinition, TagKeyword
 
 __all__ = [
     "Channel",
@@ -36,6 +36,7 @@ __all__ = [
     "ContentSourceType",
     "GenerationRun",
     "GenerationStatus",
+    "GlobalPasteTagRule",
     "ModerationChannelSubscription",
     "NotificationSubscription",
     "PasteChannelRule",

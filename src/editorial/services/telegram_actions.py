@@ -27,7 +27,7 @@ from src.editorial.models.notification import NotificationSubscription
 from src.editorial.models.paste import PasteLibrary
 from src.editorial.models.publication import PublicationLog
 from src.editorial.models.submission import Submission
-from src.editorial.models.tag import ChannelPasteTagRule, TagDefinition, TagKeyword
+from src.editorial.models.tag import ChannelPasteTagRule, GlobalPasteTagRule, TagDefinition, TagKeyword
 from src.editorial.services.advertising import send_advertising_flow
 from src.editorial.services.channel_history_service import ChannelHistoryImportResult, ChannelHistoryService
 from src.editorial.services.channel_service import ChannelService
@@ -950,6 +950,40 @@ class TelegramEditorialActions:
             return await self.tag_service.remove_channel_paste_tag_rule(
                 session,
                 channel_id=channel_id,
+                tag_slug=tag_slug,
+                mode=mode,
+            )
+
+    async def list_global_paste_tag_rules(self) -> list[tuple[GlobalPasteTagRule, TagDefinition]]:
+        async with session_factory() as session:
+            return await self.tag_service.list_global_paste_tag_rules(session)
+
+    async def add_global_paste_tag_rule(
+        self,
+        *,
+        tag_slug: str,
+        mode: ChannelPasteTagRuleMode,
+        ends_at: datetime | None,
+        created_by: int | None,
+    ) -> GlobalPasteTagRule:
+        async with session_factory() as session:
+            return await self.tag_service.add_global_paste_tag_rule(
+                session,
+                tag_slug=tag_slug,
+                mode=mode,
+                ends_at=ends_at,
+                created_by=created_by,
+            )
+
+    async def remove_global_paste_tag_rule(
+        self,
+        *,
+        tag_slug: str,
+        mode: ChannelPasteTagRuleMode,
+    ) -> int:
+        async with session_factory() as session:
+            return await self.tag_service.remove_global_paste_tag_rule(
+                session,
                 tag_slug=tag_slug,
                 mode=mode,
             )

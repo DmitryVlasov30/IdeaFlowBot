@@ -26,3 +26,24 @@ def test_exclude_is_stronger_than_include_policy_shape() -> None:
     assert paste_tags & included
     assert paste_tags & excluded
     assert ChannelPasteTagRuleMode.EXCLUDE.value == "exclude"
+
+
+def test_global_include_and_channel_include_are_separate_filters() -> None:
+    assert TagService._is_allowed_by_tag_sets(
+        {"summer", "art"},
+        global_included={"summer"},
+        channel_included={"art"},
+        excluded=set(),
+    )
+    assert not TagService._is_allowed_by_tag_sets(
+        {"summer"},
+        global_included={"summer"},
+        channel_included={"art"},
+        excluded=set(),
+    )
+    assert not TagService._is_allowed_by_tag_sets(
+        {"summer", "art", "tech"},
+        global_included={"summer"},
+        channel_included={"art"},
+        excluded={"tech"},
+    )
