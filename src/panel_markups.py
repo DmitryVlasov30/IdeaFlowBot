@@ -131,10 +131,27 @@ def build_content_actions(content_item_id: int, has_next: bool) -> InlineKeyboar
     return markup
 
 
-def build_channels_actions(channel_buttons: list[tuple[int, str]]) -> InlineKeyboardMarkup:
+def build_channels_actions(
+    channel_buttons: list[tuple[int, str]],
+    *,
+    page: int = 0,
+    has_previous: bool = False,
+    has_next: bool = False,
+) -> InlineKeyboardMarkup:
     markup = InlineKeyboardMarkup(row_width=1)
     for channel_id, title in channel_buttons:
         markup.add(InlineKeyboardButton(title, callback_data=f"channel:view:{channel_id}"))
+    nav_buttons = []
+    if has_previous:
+        nav_buttons.append(
+            InlineKeyboardButton("\u2b05\ufe0f \u041d\u0430\u0437\u0430\u0434", callback_data=f"panel:channels:{page - 1}")
+        )
+    if has_next:
+        nav_buttons.append(
+            InlineKeyboardButton("\u0412\u043f\u0435\u0440\u0435\u0434 \u27a1\ufe0f", callback_data=f"panel:channels:{page + 1}")
+        )
+    if nav_buttons:
+        markup.row(*nav_buttons)
     markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u0432 \u043f\u0430\u043d\u0435\u043b\u044c", callback_data="panel:main"))
     return markup
 
@@ -222,11 +239,28 @@ def build_admin_menu(admin_buttons: list[int]) -> InlineKeyboardMarkup:
     return markup
 
 
-def build_subbot_menu(subbot_buttons: list[tuple[str, int]]) -> InlineKeyboardMarkup:
+def build_subbot_menu(
+    subbot_buttons: list[tuple[str, int]],
+    *,
+    page: int = 0,
+    has_previous: bool = False,
+    has_next: bool = False,
+) -> InlineKeyboardMarkup:
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(InlineKeyboardButton("\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u0441\u0430\u0431\u0431\u043e\u0442\u0430", callback_data="subbot:add"))
     for username, channel_id in subbot_buttons:
         markup.add(InlineKeyboardButton(f"\u0423\u0434\u0430\u043b\u0438\u0442\u044c @{username}", callback_data=f"subbot:remove:{username}:{channel_id}"))
+    nav_buttons = []
+    if has_previous:
+        nav_buttons.append(
+            InlineKeyboardButton("\u2b05\ufe0f \u041d\u0430\u0437\u0430\u0434", callback_data=f"panel:subbots:{page - 1}")
+        )
+    if has_next:
+        nav_buttons.append(
+            InlineKeyboardButton("\u0412\u043f\u0435\u0440\u0435\u0434 \u27a1\ufe0f", callback_data=f"panel:subbots:{page + 1}")
+        )
+    if nav_buttons:
+        markup.row(*nav_buttons)
     markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u0432 \u043f\u0430\u043d\u0435\u043b\u044c", callback_data="panel:main"))
     return markup
 

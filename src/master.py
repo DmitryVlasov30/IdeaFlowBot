@@ -66,6 +66,9 @@ WEEKDAY_LABELS = {
 }
 
 
+PANEL_PAGE_SIZE = 10
+
+
 class MasterBot:
     def __init__(self, api_token_bot: str):
         self.delayed_task = None
@@ -426,12 +429,24 @@ class MasterBot:
 
     async def _list_subbots_text(self) -> str:
         all_info = await self.bots_database.get_bots_info()
+        return await self._format_subbots_text(all_info)
+
+    async def _format_subbots_text(self, all_info: list, page: int | None = None) -> str:
         if not all_info:
             return "Сабботы пока не подключены."
 
-        lines = ["Подключенные сабботы:"]
+        page_info = ""
+        page_items = all_info
+        if page is not None:
+            page = self._normalize_panel_page(page, len(all_info))
+            start = page * PANEL_PAGE_SIZE
+            end = min(start + PANEL_PAGE_SIZE, len(all_info))
+            page_items = all_info[start:end]
+            page_info = f" ({start + 1}-{end} \u0438\u0437 {len(all_info)})"
+
+        lines = [f"Подключенные сабботы:{page_info}"]
         async with aiohttp.ClientSession() as session:
-            for api_token, bot_username, channel_id, _row_id in all_info:
+            for api_token, bot_username, channel_id, _row_id in page_items:
                 channel_username = None
                 try:
                     channel_username = await self._fetch_channel_username(session, api_token, channel_id)
@@ -441,6 +456,32 @@ class MasterBot:
                     f"@{bot_username} -> {('@' + channel_username) if channel_username else channel_id}"
                 )
         return "\n".join(lines)
+
+    @staticmethod
+    def _normalize_panel_page(page: int, total_items: int) -> int:
+        if total_items <= 0:
+            return 0
+        max_page = (total_items - 1) // PANEL_PAGE_SIZE
+        return min(max(page, 0), max_page)
+
+    @staticmethod
+    def _parse_panel_page(data: str) -> int:
+        parts = data.split(":")
+        if len(parts) < 3:
+            return 0
+        try:
+            return max(int(parts[2]), 0)
+        except ValueError:
+            return 0
+
+    @staticmethod
+    def _page_bounds(page: int, total_items: int) -> tuple[int, int, bool, bool]:
+        if total_items <= 0:
+            return 0, 0, False, False
+        page = MasterBot._normalize_panel_page(page, total_items)
+        start = page * PANEL_PAGE_SIZE
+        end = min(start + PANEL_PAGE_SIZE, total_items)
+        return start, end, page > 0, end < total_items
 
     async def _fetch_channel_username(self, session: aiohttp.ClientSession, api_token: str, channel_id: int) -> str:
         url = f"https://api.telegram.org/bot{api_token}/getchat?chat_id={channel_id}"
@@ -561,13 +602,21 @@ class MasterBot:
         text += "\n".join(map(str, dynamic_admins)) if dynamic_admins else "Пока никого нет."
         await self.main_bot.send_message(chat_id, text, reply_markup=build_admin_menu(dynamic_admins))
 
-    async def _show_subbots_menu(self, chat_id: int) -> None:
+    async def _show_subbots_menu(self, chat_id: int, page: int = 0) -> None:
         bots = await self.bots_database.get_bots_info()
-        buttons = [(item[1].replace("@", ""), item[2]) for item in bots]
+        page = self._normalize_panel_page(page, len(bots))
+        start, end, has_previous, has_next = self._page_bounds(page, len(bots))
+        page_bots = bots[start:end]
+        buttons = [(item[1].replace("@", ""), item[2]) for item in page_bots]
         await self.main_bot.send_message(
             chat_id,
-            await self._list_subbots_text(),
-            reply_markup=build_subbot_menu(buttons),
+            await self._format_subbots_text(bots, page=page),
+            reply_markup=build_subbot_menu(
+                buttons,
+                page=page,
+                has_previous=has_previous,
+                has_next=has_next,
+            ),
         )
 
     def _is_subbot_running(self, username_bot: str, channel_id: int | None = None) -> bool:
@@ -776,15 +825,18 @@ class MasterBot:
 
         return source_chat_id, source_message_id, original_published_at
 
-    async def _show_channels_menu(self, chat_id: int) -> None:
+    async def _show_channels_menu(self, chat_id: int, page: int = 0) -> None:
         channels = await self.editorial_actions.list_channels()
         if not channels:
             await self.main_bot.send_message(chat_id, "Каналов в editorial-слое пока нет. Сначала импортируйте legacy данные.")
             return
 
+        page = self._normalize_panel_page(page, len(channels))
+        start, end, has_previous, has_next = self._page_bounds(page, len(channels))
+        page_channels = channels[start:end]
         buttons = []
-        lines = ["Каналы:"]
-        for item in channels:
+        lines = [f"Каналы ({start + 1}-{end} \u0438\u0437 {len(channels)}):"]
+        for item in page_channels:
             label = self._compose_channel_display_label(
                 self._channel_title_from_runtime(item.tg_channel_id) or item.title,
                 self._channel_label_from_runtime(item.tg_channel_id),
@@ -796,7 +848,12 @@ class MasterBot:
         await self.main_bot.send_message(
             chat_id,
             "\n".join(lines),
-            reply_markup=build_channels_actions(buttons),
+            reply_markup=build_channels_actions(
+                buttons,
+                page=page,
+                has_previous=has_previous,
+                has_next=has_next,
+            ),
         )
 
     async def _show_my_channels_menu(self, chat_id: int, user_id: int) -> None:
@@ -2250,6 +2307,7 @@ class MasterBot:
             data = call.data
             if data.startswith("panel:"):
                 action = data.split(":")[1]
+                page = self._parse_panel_page(data)
                 answered_early = False
                 match action:
                     case "main":
@@ -2289,7 +2347,7 @@ class MasterBot:
                     case "channels":
                         await self._safe_answer_callback(self.main_bot, call.id)
                         answered_early = True
-                        await self._show_channels_menu(call.message.chat.id)
+                        await self._show_channels_menu(call.message.chat.id, page=page)
                     case "my_channels":
                         await self._safe_answer_callback(self.main_bot, call.id)
                         answered_early = True
@@ -2340,7 +2398,7 @@ class MasterBot:
                             return
                         await self._safe_answer_callback(self.main_bot, call.id)
                         answered_early = True
-                        await self._show_subbots_menu(call.message.chat.id)
+                        await self._show_subbots_menu(call.message.chat.id, page=page)
                 if not answered_early:
                     await self._safe_answer_callback(self.main_bot, call.id)
                 return
