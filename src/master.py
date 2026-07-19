@@ -1625,6 +1625,59 @@ class MasterBot:
             reply_markup=build_channel_paste_tag_actions(channel_id),
         )
 
+    async def _show_channel_paste_diagnostics(self, chat_id: int, channel_id: int) -> None:
+        try:
+            diagnostics = await self.editorial_actions.get_channel_paste_diagnostics(channel_id)
+        except ValueError:
+            await self.main_bot.send_message(chat_id, f"Канал {channel_id} не найден.")
+            return
+
+        channel_label = await self._get_channel_label(channel_id)
+        paste_today = diagnostics.scheduled_pastes_today + diagnostics.sent_pastes_today
+        lines = [
+            f"Почему не публикует пасты: {channel_label}",
+            "",
+            "Канал:",
+            f"active: {'да' if diagnostics.is_active else 'нет'}",
+            f"allow_pastes: {'да' if diagnostics.allow_pastes else 'нет'}",
+            f"max_paste_per_day: {diagnostics.max_paste_per_day}",
+            f"same_paste_cooldown_days: {diagnostics.same_paste_cooldown_days}",
+            f"same_tag_cooldown_hours: {diagnostics.same_tag_cooldown_hours}",
+            "",
+            "Пасты:",
+            f"всего в библиотеке: {diagnostics.total_pastes}",
+            f"active: {diagnostics.active_pastes}",
+            f"доступно прямо сейчас: {diagnostics.available_pastes}",
+            f"готовых approved paste items для канала: {diagnostics.approved_ready_paste_items}",
+            f"сегодня scheduled/sent: {diagnostics.scheduled_pastes_today}/{diagnostics.sent_pastes_today} (всего {paste_today})",
+        ]
+
+        if diagnostics.next_available_examples:
+            lines.extend(["", "Примеры доступных:"])
+            lines.extend(diagnostics.next_available_examples)
+
+        if diagnostics.reasons:
+            lines.extend(["", "Почему остальные недоступны:"])
+            for reason in diagnostics.reasons:
+                lines.append(f"{reason.title}: {reason.count}")
+                if reason.examples:
+                    lines.append(f"  например: {', '.join(reason.examples)}")
+
+        if diagnostics.available_pastes == 0:
+            lines.extend(["", "Что проверить первым:"])
+            if not diagnostics.is_active:
+                lines.append("канал выключен в editorial-слое")
+            if not diagnostics.allow_pastes:
+                lines.append("включить allow_pastes")
+            if paste_today >= diagnostics.max_paste_per_day:
+                lines.append("max_paste_per_day уже выбран сегодня")
+            if any(reason.code == "tag_rule" for reason in diagnostics.reasons):
+                lines.append("include/exclude правила тегов для паст")
+            if any(reason.code in {"cooldown", "reserved"} for reason in diagnostics.reasons):
+                lines.append("кулдауны или уже запланированные пасты")
+
+        await self.main_bot.send_message(chat_id, "\n".join(lines))
+
     async def _show_global_paste_tags(self, chat_id: int) -> None:
         rows = await self.editorial_actions.list_global_paste_tag_rules()
         now = datetime.now(timezone.utc)
@@ -2938,6 +2991,12 @@ class MasterBot:
                 await self._safe_answer_callback(self.main_bot, call.id)
                 self._set_user_state(call.message.chat.id, "await_update_channel_setting", channel_id=channel_id)
                 await self._send_channel_settings_prompt(call.message.chat.id, channel_id)
+                return
+
+            if data.startswith("channel:paste_diagnostics:"):
+                channel_id = int(data.split(":")[-1])
+                await self._safe_answer_callback(self.main_bot, call.id)
+                await self._show_channel_paste_diagnostics(call.message.chat.id, channel_id)
                 return
 
             if data.startswith("channel:paste_tags:"):

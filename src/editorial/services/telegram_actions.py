@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
-from sqlalchemy import delete as sql_delete, or_, select, update as sql_update
+from sqlalchemy import delete as sql_delete, func, or_, select, update as sql_update
 from telebot.async_telebot import AsyncTeleBot
 
 from src.core_database.database import CrudBannedUser
@@ -73,6 +73,33 @@ class ManualChannelMessageResult:
     content_item_ids: list[int] = field(default_factory=list)
     publication_log_ids: list[int] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class PasteAvailabilityReason:
+    code: str
+    title: str
+    count: int = 0
+    examples: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class ChannelPasteDiagnostics:
+    channel_id: int
+    channel_title: str
+    is_active: bool
+    allow_pastes: bool
+    max_paste_per_day: int
+    same_paste_cooldown_days: int
+    same_tag_cooldown_hours: int
+    total_pastes: int
+    active_pastes: int
+    available_pastes: int
+    approved_ready_paste_items: int
+    scheduled_pastes_today: int
+    sent_pastes_today: int
+    next_available_examples: list[str]
+    reasons: list[PasteAvailabilityReason]
 
 
 class TelegramEditorialActions:
@@ -807,6 +834,211 @@ class TelegramEditorialActions:
     async def get_paste(self, paste_id: int) -> PasteLibrary | None:
         async with session_factory() as session:
             return await session.get(PasteLibrary, paste_id)
+
+    async def get_channel_paste_diagnostics(self, channel_id: int) -> ChannelPasteDiagnostics:
+        async with session_factory() as session:
+            channel = await session.get(Channel, channel_id)
+            if channel is None:
+                raise ValueError(f"Channel {channel_id} not found")
+
+            now = datetime.now(timezone.utc)
+            day_start_utc, day_end_utc = self.scheduler._channel_day_bounds(channel.timezone, now)
+
+            pastes = list(
+                (
+                    await session.execute(
+                        select(PasteLibrary).order_by(PasteLibrary.updated_at.desc())
+                    )
+                ).scalars().all()
+            )
+            active_pastes = [paste for paste in pastes if paste.status == PasteStatus.ACTIVE]
+
+            scheduled_pastes_today = await session.scalar(
+                select(func.count())
+                .select_from(PublicationLog)
+                .join(ContentItem, ContentItem.id == PublicationLog.content_item_id)
+                .where(
+                    PublicationLog.channel_id == channel.id,
+                    PublicationLog.scheduled_for >= day_start_utc,
+                    PublicationLog.scheduled_for < day_end_utc,
+                    PublicationLog.publish_status == PublicationStatus.SCHEDULED,
+                    ContentItem.source_type == ContentSourceType.PASTE,
+                )
+            )
+            sent_pastes_today = await session.scalar(
+                select(func.count())
+                .select_from(PublicationLog)
+                .join(ContentItem, ContentItem.id == PublicationLog.content_item_id)
+                .where(
+                    PublicationLog.channel_id == channel.id,
+                    PublicationLog.scheduled_for >= day_start_utc,
+                    PublicationLog.scheduled_for < day_end_utc,
+                    PublicationLog.publish_status == PublicationStatus.SENT,
+                    ContentItem.source_type == ContentSourceType.PASTE,
+                )
+            )
+            approved_ready_paste_items = await session.scalar(
+                select(func.count())
+                .select_from(ContentItem)
+                .where(
+                    ContentItem.channel_id == channel.id,
+                    ContentItem.source_type == ContentSourceType.PASTE,
+                    ContentItem.status == ContentItemStatus.APPROVED,
+                    (ContentItem.publish_after.is_(None) | (ContentItem.publish_after <= now)),
+                    (ContentItem.expires_at.is_(None) | (ContentItem.expires_at > now)),
+                )
+            )
+
+            reasons_by_code = {
+                "inactive": PasteAvailabilityReason("inactive", "не active"),
+                "channel_disabled": PasteAvailabilityReason("channel_disabled", "канал выключен"),
+                "pastes_disabled": PasteAvailabilityReason("pastes_disabled", "allow_pastes выключен"),
+                "channel_rule": PasteAvailabilityReason("channel_rule", "не разрешены для этого канала"),
+                "tag_rule": PasteAvailabilityReason("tag_rule", "не проходят include/exclude теги"),
+                "cooldown": PasteAvailabilityReason("cooldown", "в кулдауне"),
+                "reserved": PasteAvailabilityReason("reserved", "уже запланированы/зарезервированы"),
+                "daily_limit": PasteAvailabilityReason("daily_limit", "дневной лимит паст уже выбран"),
+                "same_paste": PasteAvailabilityReason("same_paste", "same_paste_cooldown_days канала"),
+                "same_tag": PasteAvailabilityReason("same_tag", "same_tag_cooldown_hours канала"),
+                "duplicate": PasteAvailabilityReason("duplicate", "дубликат/похожий текст уже был в канале"),
+            }
+            available_examples: list[str] = []
+            available_count = 0
+            paste_today_total = (scheduled_pastes_today or 0) + (sent_pastes_today or 0)
+            daily_limit_reached = paste_today_total >= channel.max_paste_per_day
+
+            for paste in pastes:
+                title = paste.title if len(paste.title) <= 80 else f"{paste.title[:77]}..."
+                example = f"#{paste.id} {title}"
+                reason: PasteAvailabilityReason | None = None
+
+                if paste.status != PasteStatus.ACTIVE:
+                    reason = reasons_by_code["inactive"]
+                elif not channel.is_active:
+                    reason = reasons_by_code["channel_disabled"]
+                elif not channel.allow_pastes:
+                    reason = reasons_by_code["pastes_disabled"]
+                elif not await self.paste_service._is_paste_allowed_for_channel(session, paste, channel.id):
+                    reason = reasons_by_code["channel_rule"]
+                elif not await self.tag_service.is_paste_allowed_for_channel_tags(
+                    session,
+                    paste=paste,
+                    channel_id=channel.id,
+                ):
+                    reason = reasons_by_code["tag_rule"]
+                elif await self.paste_service._is_paste_in_cooldown(session, paste, channel.id):
+                    reason = reasons_by_code["cooldown"]
+                elif await self.paste_service._is_paste_recently_reserved(session, paste, channel.id):
+                    reason = reasons_by_code["reserved"]
+                elif daily_limit_reached:
+                    reason = reasons_by_code["daily_limit"]
+                elif await self._is_channel_same_paste_cooldown_active(session, channel, paste, now):
+                    reason = reasons_by_code["same_paste"]
+                elif await self._is_channel_same_tag_cooldown_active(session, channel, paste, now):
+                    reason = reasons_by_code["same_tag"]
+                elif await self._is_duplicate_paste_for_channel(session, channel, paste):
+                    reason = reasons_by_code["duplicate"]
+
+                if reason is None:
+                    available_count += 1
+                    if len(available_examples) < 5:
+                        available_examples.append(example)
+                    continue
+
+                reason.count += 1
+                if len(reason.examples) < 3:
+                    reason.examples.append(example)
+
+            return ChannelPasteDiagnostics(
+                channel_id=channel.id,
+                channel_title=channel.title or channel.short_code,
+                is_active=channel.is_active,
+                allow_pastes=channel.allow_pastes,
+                max_paste_per_day=channel.max_paste_per_day,
+                same_paste_cooldown_days=channel.same_paste_cooldown_days,
+                same_tag_cooldown_hours=channel.same_tag_cooldown_hours,
+                total_pastes=len(pastes),
+                active_pastes=len(active_pastes),
+                available_pastes=available_count,
+                approved_ready_paste_items=approved_ready_paste_items or 0,
+                scheduled_pastes_today=scheduled_pastes_today or 0,
+                sent_pastes_today=sent_pastes_today or 0,
+                next_available_examples=available_examples,
+                reasons=[reason for reason in reasons_by_code.values() if reason.count > 0],
+            )
+
+    async def _is_channel_same_paste_cooldown_active(
+        self,
+        session,
+        channel: Channel,
+        paste: PasteLibrary,
+        now: datetime,
+    ) -> bool:
+        if channel.same_paste_cooldown_days <= 0:
+            return False
+        latest_same_paste = await session.scalar(
+            select(PublicationLog)
+            .join(ContentItem, ContentItem.id == PublicationLog.content_item_id)
+            .where(
+                PublicationLog.channel_id == channel.id,
+                PublicationLog.publish_status.in_([PublicationStatus.SCHEDULED, PublicationStatus.SENT]),
+                ContentItem.origin_paste_id == paste.id,
+            )
+            .order_by(PublicationLog.scheduled_for.desc())
+            .limit(1)
+        )
+        return bool(
+            latest_same_paste
+            and latest_same_paste.scheduled_for
+            and latest_same_paste.scheduled_for >= now - timedelta(days=channel.same_paste_cooldown_days)
+        )
+
+    async def _is_channel_same_tag_cooldown_active(
+        self,
+        session,
+        channel: Channel,
+        paste: PasteLibrary,
+        now: datetime,
+    ) -> bool:
+        if not paste.primary_tag or channel.same_tag_cooldown_hours <= 0:
+            return False
+        latest_same_tag = await session.scalar(
+            select(PublicationLog)
+            .join(ContentItem, ContentItem.id == PublicationLog.content_item_id)
+            .where(
+                PublicationLog.channel_id == channel.id,
+                PublicationLog.publish_status == PublicationStatus.SENT,
+                ContentItem.primary_tag == paste.primary_tag,
+            )
+            .order_by(PublicationLog.published_at.desc())
+            .limit(1)
+        )
+        return bool(
+            latest_same_tag
+            and latest_same_tag.published_at
+            and latest_same_tag.published_at >= now - timedelta(hours=channel.same_tag_cooldown_hours)
+        )
+
+    async def _is_duplicate_paste_for_channel(
+        self,
+        session,
+        channel: Channel,
+        paste: PasteLibrary,
+    ) -> bool:
+        draft_candidate = ContentItem(
+            channel_id=channel.id,
+            source_type=ContentSourceType.PASTE,
+            origin_paste_id=paste.id,
+            body_text=paste.body_text,
+            normalized_text=paste.normalized_text,
+            text_hash=paste.text_hash,
+            primary_tag=paste.primary_tag,
+            tags=paste.tags,
+            tone_key="community",
+            review_required=False,
+            status=ContentItemStatus.APPROVED,
+        )
+        return await self.scheduler._is_duplicate_for_channel(session, channel.id, draft_candidate)
 
     async def delete_paste(self, paste_id: int) -> tuple[int, str]:
         async with session_factory() as session:

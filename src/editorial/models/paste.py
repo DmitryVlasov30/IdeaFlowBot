@@ -28,7 +28,7 @@ class PasteLibrary(EditorialBase, BaseIdMixin, TimestampMixin):
         nullable=False,
         index=True,
     )
-    global_cooldown_days: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
+    global_cooldown_days: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     per_channel_cooldown_days: Mapped[int] = mapped_column(Integer, default=120, nullable=False)
     allow_all_channels: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     min_channel_activity_score: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
