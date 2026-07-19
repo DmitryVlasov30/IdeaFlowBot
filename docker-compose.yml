@@ -13,8 +13,6 @@ services:
       retries: 12
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
 
   redis:
     image: redis:7
@@ -24,8 +22,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 12
-    ports:
-      - "6379:6379"
 
   collector-bot:
     image: ideaflowbot-app:local
