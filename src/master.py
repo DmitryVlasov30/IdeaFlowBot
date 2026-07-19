@@ -825,6 +825,86 @@ class MasterBot:
 
         return source_chat_id, source_message_id, original_published_at
 
+    def _channel_panel_entry(self, channel) -> tuple[int, str, str]:
+        runtime_title = self._channel_title_from_runtime(channel.tg_channel_id)
+        runtime_label = self._channel_label_from_runtime(channel.tg_channel_id)
+        label = self._compose_channel_display_label(
+            runtime_title or channel.title,
+            runtime_label,
+            channel.short_code,
+        )
+        search_text = " ".join(
+            str(value)
+            for value in (
+                channel.id,
+                channel.tg_channel_id,
+                channel.title,
+                channel.short_code,
+                runtime_title,
+                runtime_label,
+                label,
+            )
+            if value
+        ).lower()
+        return channel.id, label, search_text
+
+    async def _show_channel_search_results(self, chat_id: int, query: str) -> None:
+        channels = await self.editorial_actions.list_channels()
+        needle = query.strip().lower().lstrip("@")
+        if not needle:
+            await self._show_channels_menu(chat_id)
+            return
+
+        matches = []
+        for channel in channels:
+            channel_id, label, search_text = self._channel_panel_entry(channel)
+            if needle in search_text.lstrip("@"):
+                matches.append((channel_id, label))
+
+        if not matches:
+            self._set_user_state(chat_id, "await_channel_jump")
+            await self.main_bot.send_message(
+                chat_id,
+                f"Каналы по запросу '{query}' не найдены. Отправьте номер канала или часть тега/названия.",
+                reply_markup=build_channels_actions([], page=0, has_previous=False, has_next=False),
+            )
+            return
+
+        visible_matches = matches[:PANEL_PAGE_SIZE]
+        lines = [f"Каналы по запросу '{query}' ({len(visible_matches)} из {len(matches)}):"]
+        lines.extend(f"{channel_id}. {label}" for channel_id, label in visible_matches)
+        if len(matches) > PANEL_PAGE_SIZE:
+            lines.append("")
+            lines.append("Найдено больше 10 каналов, уточните запрос текстом.")
+
+        self._set_user_state(chat_id, "await_channel_jump")
+        await self.main_bot.send_message(
+            chat_id,
+            "\n".join(lines),
+            reply_markup=build_channels_actions(
+                visible_matches,
+                page=0,
+                has_previous=False,
+                has_next=False,
+            ),
+        )
+
+    async def _show_channels_menu_for_input(self, chat_id: int, query: str) -> None:
+        text = query.strip()
+        if text.isdigit():
+            channels = await self.editorial_actions.list_channels()
+            if not channels:
+                await self._show_channels_menu(chat_id)
+                return
+            target_id = int(text)
+            index = next((idx for idx, channel in enumerate(channels) if channel.id == target_id), None)
+            if index is None:
+                index = min(max(target_id - 1, 0), len(channels) - 1)
+            await self._show_channels_menu(chat_id, page=index // PANEL_PAGE_SIZE)
+            return
+
+        await self._show_channel_search_results(chat_id, text)
+
     async def _show_channels_menu(self, chat_id: int, page: int = 0) -> None:
         channels = await self.editorial_actions.list_channels()
         if not channels:
@@ -837,14 +917,13 @@ class MasterBot:
         buttons = []
         lines = [f"Каналы ({start + 1}-{end} \u0438\u0437 {len(channels)}):"]
         for item in page_channels:
-            label = self._compose_channel_display_label(
-                self._channel_title_from_runtime(item.tg_channel_id) or item.title,
-                self._channel_label_from_runtime(item.tg_channel_id),
-                item.short_code,
-            )
-            buttons.append((item.id, label))
+            channel_id, label, _ = self._channel_panel_entry(item)
+            buttons.append((channel_id, label))
             lines.append(f"{item.id}. {label}")
+        lines.append("")
+        lines.append("Можно отправить номер канала или часть тега/названия.")
 
+        self._set_user_state(chat_id, "await_channel_jump")
         await self.main_bot.send_message(
             chat_id,
             "\n".join(lines),
@@ -1407,7 +1486,50 @@ class MasterBot:
             reply_markup=build_content_actions(item.id, len(items) > index + 1),
         )
 
-    async def _show_first_paste(self, chat_id: int, current_id: int | None = None) -> None:
+    async def _show_paste_at_index(self, chat_id: int, pastes: list, index: int) -> None:
+        index = min(max(index, 0), len(pastes) - 1)
+        paste = pastes[index]
+        self._set_user_state(chat_id, "await_paste_jump", current_paste_id=paste.id)
+        await self.main_bot.send_message(
+            chat_id,
+            f"Паста {index + 1}/{len(pastes)}\n\n{await self._format_paste(paste)}",
+            reply_markup=build_paste_actions(
+                paste.id,
+                has_previous=index > 0,
+                has_next=len(pastes) > index + 1,
+            ),
+        )
+
+    async def _show_paste_from_input(self, chat_id: int, value: str) -> None:
+        text = value.strip()
+        if not text.isdigit():
+            self._set_user_state(chat_id, "await_paste_jump")
+            await self.main_bot.send_message(chat_id, "Отправьте номер пасты числом.")
+            return
+
+        target_number = int(text)
+        pastes = await self.editorial_actions.list_pastes(limit=None)
+        if not pastes:
+            await self.main_bot.send_message(
+                chat_id,
+                "В библиотеке паст пока ничего нет.",
+                reply_markup=build_empty_paste_actions(),
+            )
+            return
+
+        for index, paste in enumerate(pastes):
+            if paste.id == target_number:
+                await self._show_paste_at_index(chat_id, pastes, index)
+                return
+
+        if 1 <= target_number <= len(pastes):
+            await self._show_paste_at_index(chat_id, pastes, target_number - 1)
+            return
+
+        self._set_user_state(chat_id, "await_paste_jump")
+        await self.main_bot.send_message(chat_id, f"Паста #{target_number} не найдена.")
+
+    async def _show_first_paste(self, chat_id: int, current_id: int | None = None, step: int = 1) -> None:
         pastes = await self.editorial_actions.list_pastes(limit=None)
         if not pastes:
             await self.main_bot.send_message(
@@ -1421,15 +1543,10 @@ class MasterBot:
         if current_id is not None:
             for idx, item in enumerate(pastes):
                 if item.id == current_id:
-                    index = min(idx + 1, len(pastes) - 1)
+                    index = min(max(idx + step, 0), len(pastes) - 1)
                     break
 
-        paste = pastes[index]
-        await self.main_bot.send_message(
-            chat_id,
-            await self._format_paste(paste),
-            reply_markup=build_paste_actions(paste.id, len(pastes) > index + 1),
-        )
+        await self._show_paste_at_index(chat_id, pastes, index)
 
     async def _show_tags_menu(self, chat_id: int) -> None:
         tags = await self.editorial_actions.list_tags(include_inactive=True)
@@ -1628,6 +1745,14 @@ class MasterBot:
         if action != "await_import_channel_history":
             self._clear_user_state(message.chat.id)
         text_value = (message.text or message.caption or "").strip()
+
+        if action == "await_paste_jump":
+            await self._show_paste_from_input(message.chat.id, text_value)
+            return True
+
+        if action == "await_channel_jump":
+            await self._show_channels_menu_for_input(message.chat.id, text_value)
+            return True
 
         if action == "await_add_moderator":
             try:
@@ -2726,6 +2851,15 @@ class MasterBot:
                 )
                 return
 
+            if data == "channel:jump":
+                await self._safe_answer_callback(self.main_bot, call.id)
+                self._set_user_state(call.message.chat.id, "await_channel_jump")
+                await self.main_bot.send_message(
+                    call.message.chat.id,
+                    "Отправьте номер канала или часть тега/названия.",
+                )
+                return
+
             if data.startswith("channel:view:"):
                 channel_id = int(data.split(":")[-1])
                 await self._safe_answer_callback(self.main_bot, call.id)
@@ -2901,6 +3035,12 @@ class MasterBot:
                 await self._show_paste_tags(call.message.chat.id, paste_id)
                 return
 
+            if data == "paste:jump":
+                await self._safe_answer_callback(self.main_bot, call.id)
+                self._set_user_state(call.message.chat.id, "await_paste_jump")
+                await self.main_bot.send_message(call.message.chat.id, "Отправьте номер пасты.")
+                return
+
             if data.startswith("paste_tags:"):
                 _prefix, action, value = data.split(":")
                 paste_id = int(value)
@@ -2952,6 +3092,12 @@ class MasterBot:
             if data.startswith("paste:next:"):
                 paste_id = int(data.split(":")[-1])
                 await self._show_first_paste(call.message.chat.id, current_id=paste_id)
+                await self.main_bot.answer_callback_query(call.id)
+                return
+
+            if data.startswith("paste:prev:"):
+                paste_id = int(data.split(":")[-1])
+                await self._show_first_paste(call.message.chat.id, current_id=paste_id, step=-1)
                 await self.main_bot.answer_callback_query(call.id)
                 return
 

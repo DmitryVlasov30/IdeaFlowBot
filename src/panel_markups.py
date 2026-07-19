@@ -152,6 +152,7 @@ def build_channels_actions(
         )
     if nav_buttons:
         markup.row(*nav_buttons)
+    markup.add(InlineKeyboardButton("Перейти к №/тегу", callback_data="channel:jump"))
     markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u0432 \u043f\u0430\u043d\u0435\u043b\u044c", callback_data="panel:main"))
     return markup
 
@@ -210,16 +211,22 @@ def build_channel_slots_actions(channel_id: int) -> InlineKeyboardMarkup:
     return markup
 
 
-def build_paste_actions(paste_id: int, has_next: bool) -> InlineKeyboardMarkup:
+def build_paste_actions(paste_id: int, has_previous: bool, has_next: bool) -> InlineKeyboardMarkup:
     markup = InlineKeyboardMarkup(row_width=2)
+    nav_buttons = []
+    if has_previous:
+        nav_buttons.append(InlineKeyboardButton("⬅️", callback_data=f"paste:prev:{paste_id}"))
+    if has_next:
+        nav_buttons.append(InlineKeyboardButton("➡️", callback_data=f"paste:next:{paste_id}"))
+    if nav_buttons:
+        markup.row(*nav_buttons)
     markup.add(
         InlineKeyboardButton("\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u043f\u0430\u0441\u0442\u0443", callback_data="paste:add"),
         InlineKeyboardButton("\u0423\u0434\u0430\u043b\u0438\u0442\u044c \u043f\u0430\u0441\u0442\u0443", callback_data=f"paste:delete:{paste_id}"),
     )
     markup.add(InlineKeyboardButton("Теги пасты", callback_data=f"paste:tags:{paste_id}"))
+    markup.add(InlineKeyboardButton("Перейти к № пасты", callback_data="paste:jump"))
     markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u0432 \u043f\u0430\u043d\u0435\u043b\u044c", callback_data="panel:main"))
-    if has_next:
-        markup.add(InlineKeyboardButton("\u0421\u043b\u0435\u0434\u0443\u044e\u0449\u0430\u044f \u043f\u0430\u0441\u0442\u0430", callback_data=f"paste:next:{paste_id}"))
     return markup
 
 
