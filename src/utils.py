@@ -1,5 +1,6 @@
 import pytz
 import json
+import re
 from telebot.types import Message, CallbackQuery, InlineKeyboardButton
 from datetime import datetime, timedelta, timezone
 from loguru import logger
@@ -217,22 +218,54 @@ class Utils:
         return True if is_anon == "True" else False
 
     @staticmethod
+    def _tme_slug(value: str | None) -> str | None:
+        text = (value or "").strip().lower()
+        if not text:
+            return None
+        if text.startswith("@"):
+            return text[1:].strip("/") or None
+        text = text.removeprefix("https://").removeprefix("http://").removeprefix("www.")
+        for prefix in ("t.me/", "telegram.me/"):
+            if text.startswith(prefix):
+                slug = text.removeprefix(prefix).split("?", 1)[0].split("/", 1)[0]
+                return slug or None
+        if "/" not in text and not text.startswith("-"):
+            return text
+        return None
+
+    @classmethod
+    def _is_ignored_channel_link(cls, url: str | None, ignored_channel_ref: str | None) -> bool:
+        ignored_slug = cls._tme_slug(ignored_channel_ref)
+        url_slug = cls._tme_slug(url)
+        return bool(ignored_slug and url_slug and ignored_slug == url_slug)
+
+    @staticmethod
+    def _message_text_for_links(message: Message) -> str:
+        return message.text or message.caption or ""
+
+    @classmethod
+    def _extract_message_links(cls, message: Message) -> list[str]:
+        text = cls._message_text_for_links(message)
+        links = re.findall(r"https?://[^\s<>)]+", text)
+        entities = message.entities or message.caption_entities or []
+        for entity in entities:
+            entity_type = getattr(entity, "type", None)
+            if entity_type == "text_link":
+                url = getattr(entity, "url", None)
+                if url:
+                    links.append(url)
+            elif entity_type == "url":
+                offset = getattr(entity, "offset", 0)
+                length = getattr(entity, "length", 0)
+                if length:
+                    links.append(text[offset:offset + length])
+        return links
+
+    @classmethod
     @logger.catch
-    async def check_link(message: Message) -> bool:
-        if message.entities is None and message.caption_entities is None:
-            if message.text is None and message.caption is None:
-                return False
-            if message.text is None:
-                text = message.caption
-            else:
-                text = message.text
-            return "http" in text or "https" in text
-        if message.entities is None:
-            check_lst = message.caption_entities
-        else:
-            check_lst = message.entities
-        for el in check_lst:
-            if el.type == "text_link":
+    async def check_link(cls, message: Message, ignored_channel_ref: str | None = None) -> bool:
+        for link in cls._extract_message_links(message):
+            if not cls._is_ignored_channel_link(link, ignored_channel_ref):
                 return True
         return False
 

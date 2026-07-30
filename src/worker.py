@@ -475,7 +475,7 @@ class SubBot:
         @logger.catch
         @self.sup_bot.channel_post_handler(content_types=['text', 'photo', 'video'])
         async def snipe_post(message: Message) -> None:
-            check_link = await Utils.check_link(message)
+            check_link = await Utils.check_link(message, ignored_channel_ref=self.channel_username)
             if check_link:
                 await save_advertising(message)
                 await shift_timer()
