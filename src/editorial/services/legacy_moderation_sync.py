@@ -10,7 +10,7 @@ from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 from src.editorial.db.session import session_factory
 from src.editorial.models.channel import Channel
 from src.editorial.models.content import ContentItem
-from src.editorial.models.enums import ContentItemStatus, PublicationStatus, SubmissionStatus
+from src.editorial.models.enums import ContentItemStatus, PublicationStatus, ReviewDecision, SubmissionStatus
 from src.editorial.models.publication import PublicationLog
 from src.editorial.models.submission import Submission
 from src.editorial.services.import_legacy import LegacyImporter
@@ -86,6 +86,133 @@ class LegacyModerationSyncService:
                     submission=submission,
                 )
             return True
+
+    async def approve_review_message(
+        self,
+        *,
+        channel_tg_id: int,
+        review_chat_id: int,
+        review_message_id: int,
+        reviewer_id: int,
+    ) -> ContentItem | None:
+        async with session_factory() as session:
+            row = await self.legacy_reader.find_sender_row_by_review_message(
+                channel_id=channel_tg_id,
+                review_chat_id=review_chat_id,
+                review_message_id=review_message_id,
+            )
+            if row is None:
+                return None
+
+            submission = await self.importer.ensure_submission_for_legacy_row(session, row)
+            if submission is None:
+                return None
+
+            channel = await session.get(Channel, submission.channel_id)
+            if channel is None or not channel.is_active:
+                raise ValueError("Channel is inactive or unlinked")
+
+            item = await self._get_or_create_content_item(session, submission)
+            terminal_ready_statuses = {
+                ContentItemStatus.APPROVED,
+                ContentItemStatus.SCHEDULED,
+                ContentItemStatus.PUBLISHED,
+            }
+            if item.status not in terminal_ready_statuses:
+                item = await self.moderation.review_content_item(
+                    session=session,
+                    content_item_id=item.id,
+                    reviewer_id=reviewer_id,
+                    decision=ReviewDecision.APPROVE,
+                    review_note="Approved in legacy moderation chat for slot pipeline",
+                )
+
+            related = await self.moderation.get_related_submissions(session, submission)
+            reviewed_at = datetime.now(timezone.utc)
+            for related_submission in related:
+                related_submission.status = SubmissionStatus.CONTENT_CREATED
+                related_submission.reviewed_at = reviewed_at
+                related_submission.moderator_note = "Handled in legacy moderation: approved to slot"
+            await session.commit()
+            await session.refresh(item)
+            return item
+
+    async def cancel_review_message_approval(
+        self,
+        *,
+        channel_tg_id: int,
+        review_chat_id: int,
+        review_message_id: int,
+        reviewer_id: int,
+    ) -> ContentItem | None:
+        async with session_factory() as session:
+            row = await self.legacy_reader.find_sender_row_by_review_message(
+                channel_id=channel_tg_id,
+                review_chat_id=review_chat_id,
+                review_message_id=review_message_id,
+            )
+            if row is None:
+                return None
+
+            submission = await self.importer.ensure_submission_for_legacy_row(session, row)
+            if submission is None:
+                return None
+
+            item = await self._get_latest_content_item(session, submission)
+            if item is None:
+                related = await self.moderation.get_related_submissions(session, submission)
+                reviewed_at = datetime.now(timezone.utc)
+                for related_submission in related:
+                    related_submission.status = SubmissionStatus.HOLD
+                    related_submission.reviewed_at = reviewed_at
+                    related_submission.moderator_note = "Legacy slot approval cancelled"
+                await session.commit()
+                return None
+
+            sent_count = await session.scalar(
+                select(PublicationLog)
+                .where(
+                    PublicationLog.content_item_id == item.id,
+                    PublicationLog.publish_status == PublicationStatus.SENT,
+                )
+                .limit(1)
+            )
+            if sent_count is not None or item.status == ContentItemStatus.PUBLISHED:
+                raise ValueError("Content item is already published and cannot be cancelled")
+
+            scheduled_logs = list(
+                (
+                    await session.execute(
+                        select(PublicationLog).where(
+                            PublicationLog.content_item_id == item.id,
+                            PublicationLog.publish_status == PublicationStatus.SCHEDULED,
+                        )
+                    )
+                ).scalars().all()
+            )
+            for log_item in scheduled_logs:
+                log_item.publish_status = PublicationStatus.CANCELLED
+                log_item.error_text = "Legacy slot approval cancelled"
+
+            item.scheduled_for = None
+            if item.status != ContentItemStatus.HOLD:
+                item = await self.moderation.review_content_item(
+                    session=session,
+                    content_item_id=item.id,
+                    reviewer_id=reviewer_id,
+                    decision=ReviewDecision.HOLD,
+                    review_note="Legacy slot approval cancelled",
+                )
+
+            related = await self.moderation.get_related_submissions(session, submission)
+            reviewed_at = datetime.now(timezone.utc)
+            for related_submission in related:
+                related_submission.status = SubmissionStatus.HOLD
+                related_submission.reviewed_at = reviewed_at
+                related_submission.moderator_note = "Legacy slot approval cancelled"
+            await session.commit()
+            await session.refresh(item)
+            return item
 
     async def mark_legacy_delayed_published(
         self,
@@ -238,6 +365,28 @@ class LegacyModerationSyncService:
                 ContentItem.origin_submission_id.in_(submission_ids),
                 ContentItem.template_key == LEGACY_DELAYED_AUDIT_TEMPLATE_KEY,
             )
+            .order_by(ContentItem.created_at.desc())
+            .limit(1)
+        )
+
+    async def _get_or_create_content_item(self, session, submission: Submission) -> ContentItem:
+        existing = await self._get_latest_content_item(session, submission)
+        if existing is not None:
+            return existing
+
+        return await self.moderation.create_content_from_submission(
+            session=session,
+            submission_id=submission.id,
+            channel_id=submission.channel_id,
+            status=ContentItemStatus.PENDING_REVIEW,
+        )
+
+    async def _get_latest_content_item(self, session, submission: Submission) -> ContentItem | None:
+        related = await self.moderation.get_related_submissions(session, submission)
+        submission_ids = [item.id for item in related]
+        return await session.scalar(
+            select(ContentItem)
+            .where(ContentItem.origin_submission_id.in_(submission_ids))
             .order_by(ContentItem.created_at.desc())
             .limit(1)
         )

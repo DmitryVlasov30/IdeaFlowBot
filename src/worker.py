@@ -566,6 +566,71 @@ class SubBot:
                             status=SubmissionStatus.CONTENT_CREATED,
                             moderator_note="Handled in legacy moderation: approved",
                         )
+                case "approve_to_slot":
+                    sender_id = int(call.data.split(";")[1])
+                    try:
+                        item = await self.legacy_moderation_sync.approve_review_message(
+                            channel_tg_id=self.channel_id,
+                            review_chat_id=call.message.chat.id,
+                            review_message_id=call.message.message_id,
+                            reviewer_id=call.from_user.id,
+                        )
+                    except Exception as ex:
+                        logger.error("Failed to approve legacy submission into slot pipeline: {}", ex)
+                        await self.sup_bot.send_message(
+                            chat_id=call.message.chat.id,
+                            text=f"\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043e\u0434\u043e\u0431\u0440\u0438\u0442\u044c \u0432 \u0441\u043b\u043e\u0442: {ex}",
+                        )
+                        return
+                    if item is None:
+                        await self.sup_bot.send_message(
+                            chat_id=call.message.chat.id,
+                            text="\u041d\u0435 \u043d\u0430\u0448\u0451\u043b \u044d\u0442\u0443 \u043f\u0440\u0435\u0434\u043b\u043e\u0436\u043a\u0443 \u0432 legacy-\u0431\u0430\u0437\u0435.",
+                        )
+                        return
+                    self.delayed_message.pop(call.message.message_id, None)
+                    self.anonym_send.discard(call.message.message_id)
+                    await buttons_func.approve_to_slot_button(
+                        call.message.chat.id,
+                        call.message.message_id,
+                        sender_id,
+                    )
+                    await self.sup_bot.send_message(
+                        chat_id=call.message.chat.id,
+                        text=(
+                            f"\u0421\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435 \u043e\u0434\u043e\u0431\u0440\u0435\u043d\u043e \u0432 \u0441\u043b\u043e\u0442. "
+                            f"Content item #{item.id}."
+                        ),
+                    )
+                case "cancel_approve_to_slot":
+                    sender_id = int(call.data.split(";")[1])
+                    try:
+                        item = await self.legacy_moderation_sync.cancel_review_message_approval(
+                            channel_tg_id=self.channel_id,
+                            review_chat_id=call.message.chat.id,
+                            review_message_id=call.message.message_id,
+                            reviewer_id=call.from_user.id,
+                        )
+                    except Exception as ex:
+                        logger.error("Failed to cancel legacy slot approval: {}", ex)
+                        await self.sup_bot.send_message(
+                            chat_id=call.message.chat.id,
+                            text=f"\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043e\u0442\u043c\u0435\u043d\u0438\u0442\u044c: {ex}",
+                        )
+                        return
+                    await buttons_func.main_menu(
+                        sender_id=call.message.chat.id,
+                        chat_id=sender_id,
+                        message_id=call.message.message_id,
+                        chat_suggest=self.chat_suggest,
+                        is_send=False,
+                        is_anon=(call.message.message_id in self.anonym_send),
+                    )
+                    suffix = f" Content item #{item.id} переведён в hold." if item is not None else ""
+                    await self.sup_bot.send_message(
+                        chat_id=call.message.chat.id,
+                        text=f"\u041e\u0434\u043e\u0431\u0440\u0435\u043d\u0438\u0435 \u0432 \u0441\u043b\u043e\u0442 \u043e\u0442\u043c\u0435\u043d\u0435\u043d\u043e.{suffix}",
+                    )
                 case "reject":
                     await buttons_func.reject_post(call)
                     await self._sync_editorial_submission_status(

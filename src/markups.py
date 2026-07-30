@@ -219,6 +219,10 @@ class MarkupButton:
             text="✅Одобрить",
             callback_data=f"send_suggest;{chat_id}"
         )
+        approve_to_slot_button = InlineKeyboardButton(
+            text="\u2705 \u041e\u0434\u043e\u0431\u0440\u0438\u0442\u044c \u0432 \u0441\u043b\u043e\u0442",
+            callback_data=f"approve_to_slot;{chat_id}"
+        )
         reject_button = InlineKeyboardButton(
             text="❌Отклонить",
             callback_data=f"reject;{chat_id}"
@@ -241,6 +245,7 @@ class MarkupButton:
 
         markup.add(banned_user, addition_info, anon_button)
         markup.add(send_button, reject_button)
+        markup.add(approve_to_slot_button)
         markup.add(delayed_button, advertising_button)
         if is_send:
             return await self.bot.copy_message(
@@ -293,6 +298,27 @@ class MarkupButton:
             callback_data=f"add_info;{sender_id}"
         )
         markup.add(button_info)
+        await self.bot.edit_message_reply_markup(
+            chat_id=chat_id,
+            message_id=message_id,
+            reply_markup=markup
+        )
+
+    @logger.catch
+    async def approve_to_slot_button(self, chat_id, message_id, sender_id=None):
+        markup = InlineKeyboardMarkup()
+        info_sender = await self.bot.get_chat(sender_id)
+        author = f"@{info_sender.username}" if info_sender.username else str(info_sender.id)
+        button_info = InlineKeyboardButton(
+            text=f"{author} (\u043e\u0434\u043e\u0431\u0440\u0435\u043d\u043e \u0432 \u0441\u043b\u043e\u0442)",
+            callback_data=f"add_info;{sender_id}"
+        )
+        cancel_button = InlineKeyboardButton(
+            text="\u21a9\ufe0f \u041e\u0442\u043c\u0435\u043d\u0438\u0442\u044c \u0441\u043b\u043e\u0442",
+            callback_data=f"cancel_approve_to_slot;{sender_id}"
+        )
+        markup.add(button_info)
+        markup.add(cancel_button)
         await self.bot.edit_message_reply_markup(
             chat_id=chat_id,
             message_id=message_id,
