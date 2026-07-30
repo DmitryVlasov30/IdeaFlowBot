@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import json
 
 from loguru import logger
 from sqlalchemy import select
@@ -18,6 +17,7 @@ from src.editorial.models.submission import Submission
 from src.editorial.services.legacy_audit import LEGACY_DELAYED_AUDIT_TEMPLATE_KEY
 from src.editorial.services.legacy_source import LegacyCollectorReader, LegacySenderRow
 from src.editorial.services.paste_service import PasteService
+from src.editorial.services.publication_signature import channel_publication_signature_html, format_publication_html
 from src.editorial.services.telegram_publisher import TelegramPublisherAdapter
 from src.editorial.utils.text import clean_text
 
@@ -77,8 +77,11 @@ class PublisherService:
             parts.append(cleaned_text)
         if submission is not None and not submission.is_anonymous:
             parts.append(self._submission_author_signature(submission))
-        parts.append(self._channel_signature(channel, channel_signature))
-        return "\n\n".join(parts)
+        signature_html = channel_publication_signature_html(channel, channel_signature)
+        return format_publication_html(
+            "\n\n".join(parts),
+            signature_html=signature_html,
+        )
 
     @staticmethod
     def _can_copy_submission_verbatim(
@@ -128,16 +131,6 @@ class PublisherService:
         if submission.source_chat_id is None or submission.source_message_id is None:
             raise ValueError("Submission has no source chat or message id")
         return int(submission.source_chat_id), int(submission.source_message_id)
-
-    @staticmethod
-    def _parse_entities_json(legacy_row: LegacySenderRow | None) -> list[dict] | None:
-        if legacy_row is None or not legacy_row.entities_json:
-            return None
-        try:
-            entities = json.loads(legacy_row.entities_json)
-        except json.JSONDecodeError:
-            return None
-        return entities if isinstance(entities, list) and entities else None
 
     async def _publish_submission_based_item(
         self,
@@ -266,7 +259,6 @@ class PublisherService:
         source_text = self._get_related_submission_source_text(related_rows)
         if self._can_copy_submission_verbatim(submission, content_item, source_text):
             legacy_row = related_legacy_rows[0] if related_legacy_rows else None
-            entities = self._parse_entities_json(legacy_row)
             source_text_value = (legacy_row.text_post if legacy_row and legacy_row.text_post is not None else source_text)
             text_to_send = self.format_publication_text(
                 source_text_value,
@@ -274,20 +266,6 @@ class PublisherService:
                 submission,
                 channel_signature=channel_signature,
             )
-            if entities:
-                telegram_message_id = await self.telegram_adapter.send_text_with_entities(
-                    bot_token=bot_token,
-                    channel_id=channel.tg_channel_id,
-                    text=text_to_send,
-                    entities=entities,
-                )
-                logger.info(
-                    "Published content item {} via send_text_with_entities (entities={}, legacy_row={})",
-                    content_item.id,
-                    len(entities),
-                    legacy_row.id if legacy_row else None,
-                )
-                return telegram_message_id
             telegram_message_id = await self.telegram_adapter.send_text(
                 bot_token=bot_token,
                 channel_id=channel.tg_channel_id,

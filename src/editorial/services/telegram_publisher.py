@@ -17,9 +17,9 @@ class TelegramPublisherAdapter:
         if proxy:
             asyncio_helper.proxy = proxy
 
-    async def send_text(self, bot_token: str, channel_id: int, text: str) -> int:
+    async def send_text(self, bot_token: str, channel_id: int, text: str, parse_mode: str | None = "HTML") -> int:
         bot = AsyncTeleBot(bot_token)
-        message = await bot.send_message(chat_id=channel_id, text=text)
+        message = await bot.send_message(chat_id=channel_id, text=text, parse_mode=parse_mode)
         return int(message.message_id)
 
     async def get_chat_tag(self, bot_token: str, channel_id: int) -> str | None:
@@ -66,6 +66,7 @@ class TelegramPublisherAdapter:
         from_chat_id: int,
         message_id: int,
         caption: str | None = None,
+        parse_mode: str | None = "HTML",
     ) -> int:
         bot = AsyncTeleBot(bot_token)
         message = await bot.copy_message(
@@ -73,6 +74,7 @@ class TelegramPublisherAdapter:
             from_chat_id=from_chat_id,
             message_id=message_id,
             caption=caption,
+            parse_mode=parse_mode,
         )
         return int(message.message_id)
 

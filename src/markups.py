@@ -3,6 +3,7 @@ from telebot.async_telebot import AsyncTeleBot
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 from loguru import logger
 
+from src.editorial.services.publication_signature import format_publication_html, publication_signature_html
 from src.utils import Utils
 from config import settings
 
@@ -326,7 +327,7 @@ class MarkupButton:
         )
 
     @logger.catch
-    async def send_suggest(self, call, channel_username, channel_id, is_anon):
+    async def send_suggest(self, call, channel_username, channel_id, is_anon, channel_title=None):
         try:
             markup_post = None
 
@@ -348,12 +349,26 @@ class MarkupButton:
                 )
                 markup_post.add(info_post_sender)
 
-            await self.bot.copy_message(
-                chat_id=channel_id,
-                from_chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                reply_markup=markup_post,
+            signature_html = publication_signature_html(
+                title=channel_title,
+                channel_ref=channel_username,
             )
+            if call.message.content_type == "text":
+                await self.bot.send_message(
+                    chat_id=channel_id,
+                    text=format_publication_html(call.message.text, signature_html=signature_html),
+                    parse_mode="HTML",
+                    reply_markup=markup_post,
+                )
+            else:
+                await self.bot.copy_message(
+                    chat_id=channel_id,
+                    from_chat_id=call.message.chat.id,
+                    message_id=call.message.message_id,
+                    caption=format_publication_html(call.message.caption, signature_html=signature_html),
+                    parse_mode="HTML",
+                    reply_markup=markup_post,
+                )
             await self.bot.edit_message_reply_markup(
                 chat_id=call.message.chat.id,
                 message_id=call.message.message_id,
