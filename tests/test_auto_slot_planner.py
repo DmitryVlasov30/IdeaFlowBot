@@ -79,9 +79,17 @@ def test_spread_slot_times_caps_count_by_min_gap() -> None:
     assert slot_times == [time(10, 0), time(11, 0), time(12, 0)]
 
 
-def test_target_date_uses_channel_timezone_and_plan_time() -> None:
+def test_target_date_uses_current_day_after_plan_time() -> None:
     service = AutoSlotPlannerService()
-    channel = _channel(auto_slots_last_planned_for=date(2026, 7, 30))
-    now = datetime(2026, 7, 30, 21, 0, tzinfo=timezone.utc)
+    channel = _channel(auto_slots_last_planned_for=None)
+    now = datetime(2026, 7, 30, 20, 31, tzinfo=timezone.utc)
 
-    assert service._target_date_for_channel(channel, now) == date(2026, 7, 31)
+    assert service._target_date_for_channel(channel, now) == date(2026, 7, 30)
+
+
+def test_target_date_waits_until_plan_time_for_current_day() -> None:
+    service = AutoSlotPlannerService()
+    channel = _channel(auto_slots_last_planned_for=None)
+    now = datetime(2026, 7, 30, 20, 0, tzinfo=timezone.utc)
+
+    assert service._target_date_for_channel(channel, now) is None

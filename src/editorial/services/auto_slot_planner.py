@@ -76,10 +76,8 @@ class AutoSlotPlannerService:
         local_today = local_now.date()
 
         if local_now.time() >= channel.auto_slots_plan_time:
-            return local_today + timedelta(days=1)
-
-        if channel.auto_slots_last_planned_for is None or channel.auto_slots_last_planned_for < local_today:
-            return local_today
+            if channel.auto_slots_last_planned_for != local_today:
+                return local_today
 
         return None
 
