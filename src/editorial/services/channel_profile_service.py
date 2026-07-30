@@ -21,6 +21,7 @@ PROFILE_SETTING_FIELDS = [
     "auto_slots_window_start",
     "auto_slots_window_end",
     "auto_slots_replace_manual",
+    "min_slots_per_day",
     "max_posts_per_day",
     "max_generated_per_day",
     "max_paste_per_day",

@@ -52,6 +52,7 @@ class ChannelResponse(BaseModel):
     settings_profile_id: int | None
     settings_profile_auto_enabled: bool
     settings_profile_applied_at: datetime | None
+    min_slots_per_day: int
 
 
 class ChannelSettingProfileResponse(BaseModel):
@@ -71,6 +72,7 @@ class ChannelSettingProfileResponse(BaseModel):
     auto_slots_window_start: time
     auto_slots_window_end: time
     auto_slots_replace_manual: bool
+    min_slots_per_day: int
     max_posts_per_day: int
     max_generated_per_day: int
     max_paste_per_day: int

@@ -204,7 +204,7 @@ class AutoSlotPlannerService:
     @staticmethod
     def _calculate_target_slots(channel: Channel, approved_ready_count: int) -> tuple[int, int]:
         fallback_paste_slots = channel.max_paste_per_day if channel.allow_pastes else 0
-        target_slots = max(approved_ready_count, fallback_paste_slots)
+        target_slots = max(approved_ready_count, fallback_paste_slots, channel.min_slots_per_day)
         target_slots = min(target_slots, max(channel.max_posts_per_day, 0))
         paste_slots = min(max(0, target_slots - approved_ready_count), fallback_paste_slots)
         return target_slots, paste_slots

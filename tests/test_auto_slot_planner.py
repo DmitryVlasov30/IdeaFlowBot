@@ -9,6 +9,7 @@ def _channel(**overrides) -> Channel:
         "tg_channel_id": 1,
         "short_code": "test",
         "timezone": "Europe/Moscow",
+        "min_slots_per_day": 0,
         "max_posts_per_day": 100,
         "max_paste_per_day": 3,
         "allow_pastes": True,
@@ -46,6 +47,15 @@ def test_target_slots_are_capped_by_max_posts_per_day() -> None:
 
     assert target_slots == 5
     assert paste_slots == 0
+
+
+def test_target_slots_respect_min_slots_per_day_without_raising_paste_limit() -> None:
+    channel = _channel(min_slots_per_day=5, max_paste_per_day=2, max_posts_per_day=10)
+
+    target_slots, paste_slots = AutoSlotPlannerService._calculate_target_slots(channel, approved_ready_count=0)
+
+    assert target_slots == 5
+    assert paste_slots == 2
 
 
 def test_spread_slot_times_evenly_across_window() -> None:

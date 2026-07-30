@@ -906,7 +906,8 @@ class MasterBot:
             max_subs = profile.max_subscribers if profile.max_subscribers is not None else "none"
             lines.append(
                 f"{profile.slug}: {profile.min_subscribers}-{max_subs}, "
-                f"posts={profile.max_posts_per_day}, pastes={profile.max_paste_per_day}"
+                f"min_slots={profile.min_slots_per_day}, posts={profile.max_posts_per_day}, "
+                f"pastes={profile.max_paste_per_day}"
             )
             profile_buttons.append((profile.slug, profile.title, profile.is_active))
         await self.main_bot.send_message(
@@ -944,6 +945,7 @@ class MasterBot:
             f"auto_slots_window_start = {self._format_channel_setting_value(profile.auto_slots_window_start)}",
             f"auto_slots_window_end = {self._format_channel_setting_value(profile.auto_slots_window_end)}",
             f"auto_slots_replace_manual = {self._format_channel_setting_value(profile.auto_slots_replace_manual)}",
+            f"min_slots_per_day = {profile.min_slots_per_day}",
             f"max_posts_per_day = {profile.max_posts_per_day}",
             f"max_generated_per_day = {profile.max_generated_per_day}",
             f"max_paste_per_day = {profile.max_paste_per_day}",
@@ -978,7 +980,7 @@ class MasterBot:
             "title, min_subscribers, max_subscribers, priority, is_active",
             "min_gap_minutes, slot_jitter_minutes, auto_slots_enabled",
             "auto_slots_plan_time, auto_slots_window_start, auto_slots_window_end",
-            "max_posts_per_day, max_generated_per_day, max_paste_per_day",
+            "min_slots_per_day, max_posts_per_day, max_generated_per_day, max_paste_per_day",
             "same_tag_cooldown_hours, same_template_cooldown_hours, same_paste_cooldown_days",
             "min_ready_queue, prefer_real_ratio, allow_generated, allow_pastes",
         ]
@@ -1272,6 +1274,7 @@ class MasterBot:
             "auto_slots_window_end",
             "auto_slots_replace_manual",
             "settings_profile_auto_enabled",
+            "min_slots_per_day",
             "max_posts_per_day",
             "max_paste_per_day",
             "same_tag_cooldown_hours",

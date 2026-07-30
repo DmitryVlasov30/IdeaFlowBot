@@ -18,6 +18,7 @@ def _profile(slug: str, min_subscribers: int, max_subscribers: int | None, **ove
         "auto_slots_window_start": time(10, 0),
         "auto_slots_window_end": time(22, 0),
         "auto_slots_replace_manual": True,
+        "min_slots_per_day": 0,
         "max_posts_per_day": 6,
         "max_generated_per_day": 1,
         "max_paste_per_day": 3,
@@ -61,6 +62,7 @@ def test_apply_profile_copies_publication_policy_to_channel() -> None:
         50,
         999,
         id=42,
+        min_slots_per_day=5,
         max_posts_per_day=8,
         max_paste_per_day=4,
         auto_slots_window_start=time(9, 0),
@@ -70,6 +72,7 @@ def test_apply_profile_copies_publication_policy_to_channel() -> None:
     ChannelProfileService._apply_profile(channel, profile)
 
     assert channel.settings_profile_id == 42
+    assert channel.min_slots_per_day == 5
     assert channel.max_posts_per_day == 8
     assert channel.max_paste_per_day == 4
     assert channel.auto_slots_window_start == time(9, 0)

@@ -165,7 +165,7 @@ Editorial-слой хранит управляемый словарь:
 Профиль задает:
 
 - диапазон подписчиков: `min_subscribers` / `max_subscribers`;
-- параметры публикации: `max_posts_per_day`, `max_paste_per_day`, cooldown, gaps;
+- параметры публикации: `min_slots_per_day`, `max_posts_per_day`, `max_paste_per_day`, cooldown, gaps;
 - параметры автослотов: `auto_slots_enabled`, окно публикаций, время построения плана;
 - разрешения: `allow_pastes`, `allow_generated`.
 
@@ -187,7 +187,7 @@ Editorial-слой хранит управляемый словарь:
 
 ```bash
 python -m src.editorial.cli sync-channel-profiles
-python -m src.editorial.cli upsert-channel-profile --slug growing --min-subs 50 --max-subs 999 --set max_posts_per_day=6 --set max_paste_per_day=3
+python -m src.editorial.cli upsert-channel-profile --slug growing --min-subs 50 --max-subs 999 --set min_slots_per_day=4 --set max_posts_per_day=6 --set max_paste_per_day=3
 python -m src.editorial.cli apply-channel-profile --channel-id 1 --profile growing
 ```
 
@@ -214,7 +214,7 @@ python -m src.editorial.cli apply-channel-profile --channel-id 1 --profile growi
 
 1. Считаются готовые `approved` записи канала из живого контента (`submission` и `editorial`), которые еще не запланированы.
 2. Если пасты разрешены, fallback равен `max_paste_per_day`; если пасты отключены, fallback равен `0`.
-3. `target_slots = max(approved_ready_count, fallback_paste_slots)`.
+3. `target_slots = max(approved_ready_count, fallback_paste_slots, min_slots_per_day)`.
 4. `target_slots` ограничивается `max_posts_per_day` и вместимостью окна с учетом `min_gap_minutes`.
 5. `paste_slots = min(target_slots - approved_ready_count, fallback_paste_slots)`.
 6. Слоты равномерно раскладываются между `auto_slots_window_start` и `auto_slots_window_end`.
