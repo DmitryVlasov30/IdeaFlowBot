@@ -86,3 +86,17 @@ def test_apply_profile_keeps_channel_timezone() -> None:
     ChannelProfileService._apply_profile(channel, profile)
 
     assert channel.timezone == "Asia/Yekaterinburg"
+
+
+def test_profile_settings_match_detects_changed_profile_values() -> None:
+    channel = Channel(
+        tg_channel_id=1,
+        short_code="test",
+        timezone="Europe/Moscow",
+        settings_profile_id=42,
+        min_slots_per_day=0,
+        max_posts_per_day=6,
+    )
+    profile = _profile("growing", 50, 999, id=42, min_slots_per_day=3, max_posts_per_day=6)
+
+    assert not ChannelProfileService._profile_settings_match(channel, profile)

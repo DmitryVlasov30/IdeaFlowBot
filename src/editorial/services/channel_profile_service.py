@@ -225,11 +225,11 @@ class ChannelProfileService:
 
             new_profile = self._select_profile(profiles, channel.subscriber_count)
             changed = False
-            if new_profile is not None and old_profile is not new_profile:
+            if new_profile is not None:
                 old_profile_id = old_profile.id if old_profile is not None else None
-                self._apply_profile(channel, new_profile, applied_at=now)
-                changed = old_profile_id != new_profile.id
+                changed = old_profile_id != new_profile.id or not self._profile_settings_match(channel, new_profile)
                 if changed:
+                    self._apply_profile(channel, new_profile, applied_at=now)
                     result.profiles_changed += 1
 
             result.items.append(
@@ -306,6 +306,14 @@ class ChannelProfileService:
                 setattr(channel, field_name, profile_value)
         channel.settings_profile_id = profile.id
         channel.settings_profile_applied_at = applied_at or datetime.now(timezone.utc)
+
+    @staticmethod
+    def _profile_settings_match(channel: Channel, profile: ChannelSettingProfile) -> bool:
+        for field_name in PROFILE_SETTING_FIELDS:
+            profile_value: Any = getattr(profile, field_name)
+            if profile_value is not None and getattr(channel, field_name) != profile_value:
+                return False
+        return channel.settings_profile_id == profile.id
 
     @staticmethod
     async def _fetch_subscriber_count(binding: LegacyBotBinding) -> int:
