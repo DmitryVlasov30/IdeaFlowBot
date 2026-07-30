@@ -74,3 +74,12 @@ def test_apply_profile_copies_publication_policy_to_channel() -> None:
     assert channel.max_paste_per_day == 4
     assert channel.auto_slots_window_start == time(9, 0)
     assert channel.auto_slots_window_end == time(23, 0)
+
+
+def test_apply_profile_keeps_channel_timezone() -> None:
+    channel = Channel(tg_channel_id=1, short_code="test", timezone="Asia/Yekaterinburg")
+    profile = _profile("growing", 50, 999, id=42, timezone="Europe/Moscow")
+
+    ChannelProfileService._apply_profile(channel, profile)
+
+    assert channel.timezone == "Asia/Yekaterinburg"

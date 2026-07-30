@@ -14,7 +14,6 @@ from src.editorial.services.legacy_source import LegacyBotBinding, LegacyCollect
 
 
 PROFILE_SETTING_FIELDS = [
-    "timezone",
     "min_gap_minutes",
     "slot_jitter_minutes",
     "auto_slots_enabled",

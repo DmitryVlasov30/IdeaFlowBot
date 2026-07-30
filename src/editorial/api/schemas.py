@@ -64,7 +64,6 @@ class ChannelSettingProfileResponse(BaseModel):
     priority: int
     min_subscribers: int
     max_subscribers: int | None
-    timezone: str | None
     min_gap_minutes: int
     slot_jitter_minutes: int
     auto_slots_enabled: bool

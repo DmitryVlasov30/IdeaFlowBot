@@ -937,7 +937,6 @@ class MasterBot:
             f"subscribers = {profile.min_subscribers}-{max_subs}",
             f"priority = {profile.priority}",
             "",
-            f"timezone = {profile.timezone or 'keep channel'}",
             f"min_gap_minutes = {profile.min_gap_minutes}",
             f"slot_jitter_minutes = {profile.slot_jitter_minutes}",
             f"auto_slots_enabled = {self._format_channel_setting_value(profile.auto_slots_enabled)}",
