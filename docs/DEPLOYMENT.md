@@ -82,8 +82,14 @@ python -m src.editorial.cli import-legacy
 Scheduler:
 
 ```bash
+python -m src.editorial.cli sync-channel-profiles
+python -m src.editorial.cli auto-slots
 python -m src.editorial.cli schedule
 ```
+
+`editorial-scheduler` in `docker-compose.yml` runs auto-slot planning before every scheduler pass. The planner changes only channels with `auto_slots_enabled=true` and skips a channel/date after a successful plan.
+
+`editorial-profile-sync` in `docker-compose.yml` updates channel subscriber counts and applies subscriber-based profiles once per hour.
 
 Publisher:
 

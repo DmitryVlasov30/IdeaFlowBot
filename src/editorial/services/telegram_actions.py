@@ -29,6 +29,8 @@ from src.editorial.models.publication import PublicationLog
 from src.editorial.models.submission import Submission
 from src.editorial.models.tag import ChannelPasteTagRule, GlobalPasteTagRule, TagDefinition, TagKeyword
 from src.editorial.services.advertising import send_advertising_flow
+from src.editorial.services.auto_slot_planner import AutoSlotPlannerService
+from src.editorial.services.channel_profile_service import ChannelProfileService
 from src.editorial.services.channel_history_service import ChannelHistoryImportResult, ChannelHistoryService
 from src.editorial.services.channel_service import ChannelService
 from src.editorial.services.generation.service import GenerationService
@@ -39,6 +41,7 @@ from src.editorial.services.moderation import ModerationService
 from src.editorial.services.paste_service import PasteService
 from src.editorial.services.publisher import PublisherService
 from src.editorial.services.scheduler import SchedulerService
+from src.editorial.services.statistics_export import StatisticsExportService
 from src.editorial.services.tag_service import PasteTagSummary, TagService
 from src.editorial.utils.text import clean_text, compute_raw_text_hash, compute_text_hash, normalize_text
 
@@ -114,9 +117,12 @@ class TelegramEditorialActions:
         self.paste_service = PasteService()
         self.channel_history_service = ChannelHistoryService()
         self.channel_service = ChannelService()
+        self.auto_slot_planner = AutoSlotPlannerService()
+        self.channel_profile_service = ChannelProfileService(legacy_reader=self.legacy_reader)
         self.tag_service = TagService()
         self.scheduler = SchedulerService()
         self.publisher = PublisherService()
+        self.statistics_export_service = StatisticsExportService()
         self.banned_users = CrudBannedUser()
         self._legacy_bot_id_cache: dict[str, int] = {}
 
@@ -1405,6 +1411,110 @@ class TelegramEditorialActions:
     async def run_scheduler(self):
         async with session_factory() as session:
             return await self.scheduler.run(session)
+
+    async def run_auto_slot_planner(self, channel_id: int | None = None):
+        async with session_factory() as session:
+            return await self.auto_slot_planner.run(session, channel_id=channel_id)
+
+    async def sync_channel_profiles(self, channel_id: int | None = None):
+        async with session_factory() as session:
+            return await self.channel_profile_service.sync_profiles_by_subscribers(session, channel_id=channel_id)
+
+    async def list_channel_setting_profiles(self, include_inactive: bool = False):
+        async with session_factory() as session:
+            return await self.channel_profile_service.list_profiles(session, include_inactive=include_inactive)
+
+    async def update_channel_setting_profile_field(
+        self,
+        *,
+        slug: str,
+        field_name: str,
+        raw_value: str,
+    ):
+        async with session_factory() as session:
+            profile = await self.channel_profile_service.upsert_profile(
+                session,
+                slug=slug,
+                raw_settings={field_name: raw_value},
+            )
+            return profile
+
+    async def upsert_channel_setting_profile(
+        self,
+        *,
+        slug: str,
+        title: str,
+        min_subscribers: int,
+        max_subscribers: int | None,
+    ):
+        async with session_factory() as session:
+            return await self.channel_profile_service.upsert_profile(
+                session,
+                slug=slug,
+                title=title,
+                min_subscribers=min_subscribers,
+                max_subscribers=max_subscribers,
+                clear_max_subscribers=max_subscribers is None,
+            )
+
+    async def update_channel_setting_profile_meta(
+        self,
+        *,
+        slug: str,
+        field_name: str,
+        raw_value: str,
+    ):
+        async with session_factory() as session:
+            kwargs: dict[str, object] = {"slug": slug}
+            if field_name == "title":
+                kwargs["title"] = raw_value
+            elif field_name == "min_subscribers":
+                kwargs["min_subscribers"] = int(raw_value)
+            elif field_name == "max_subscribers":
+                clean_value = raw_value.strip().lower()
+                if clean_value in {"none", "null", "-", "no"}:
+                    kwargs["clear_max_subscribers"] = True
+                else:
+                    kwargs["max_subscribers"] = int(raw_value)
+            elif field_name == "priority":
+                kwargs["priority"] = int(raw_value)
+            elif field_name == "is_active":
+                kwargs["is_active"] = self.channel_service._parse_setting_value(
+                    field_name=field_name,
+                    raw_value=raw_value,
+                    expected_type="bool",
+                )
+            else:
+                raise ValueError(f"Unknown profile meta field '{field_name}'")
+            return await self.channel_profile_service.upsert_profile(session, **kwargs)
+
+    async def apply_profile_to_channels(
+        self,
+        *,
+        channel_ids: list[int],
+        profile_slug: str,
+        auto_enabled: bool = False,
+    ):
+        async with session_factory() as session:
+            return await self.channel_profile_service.apply_profile_to_channels(
+                session,
+                channel_ids=channel_ids,
+                profile_slug=profile_slug,
+                auto_enabled=auto_enabled,
+            )
+
+    async def export_channel_statistics(
+        self,
+        *,
+        channel_titles: dict[int, str | None] | None = None,
+        channel_tags: dict[int, str | None] | None = None,
+    ):
+        async with session_factory() as session:
+            return await self.statistics_export_service.export_channel_statistics(
+                session,
+                channel_titles=channel_titles,
+                channel_tags=channel_tags,
+            )
 
     async def run_publisher(self):
         async with session_factory() as session:

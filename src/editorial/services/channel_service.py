@@ -20,6 +20,12 @@ class ChannelService:
         "timezone",
         "min_gap_minutes",
         "slot_jitter_minutes",
+        "auto_slots_enabled",
+        "auto_slots_plan_time",
+        "auto_slots_window_start",
+        "auto_slots_window_end",
+        "auto_slots_replace_manual",
+        "settings_profile_auto_enabled",
         "max_posts_per_day",
         "max_generated_per_day",
         "max_paste_per_day",
@@ -39,6 +45,12 @@ class ChannelService:
         "timezone": "str",
         "min_gap_minutes": "int",
         "slot_jitter_minutes": "int",
+        "auto_slots_enabled": "bool",
+        "auto_slots_plan_time": "time",
+        "auto_slots_window_start": "time",
+        "auto_slots_window_end": "time",
+        "auto_slots_replace_manual": "bool",
+        "settings_profile_auto_enabled": "bool",
         "max_posts_per_day": "int",
         "max_generated_per_day": "int",
         "max_paste_per_day": "int",
@@ -100,6 +112,7 @@ class ChannelService:
         channel_id: int,
         slot_times: list[str],
         weekdays: list[int] | None = None,
+        is_auto_managed: bool = False,
     ) -> list[ChannelSlot]:
         channel = await session.get(Channel, channel_id)
         if channel is None:
@@ -125,6 +138,7 @@ class ChannelService:
                     weekday=weekday,
                     slot_time=slot_time,
                     is_active=True,
+                    is_auto_managed=is_auto_managed,
                 )
                 session.add(slot)
                 created.append(slot)
@@ -413,5 +427,8 @@ class ChannelService:
             if not clean_value:
                 raise ValueError(f"Поле '{field_name}' не может быть пустым.")
             return clean_value
+
+        if expected_type == "time":
+            return self._parse_time_value(clean_value)
 
         raise ValueError(f"Unsupported setting type '{expected_type}' for field '{field_name}'")

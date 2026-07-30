@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -43,6 +43,8 @@ from src.panel_markups import (
     build_my_channels_actions,
     build_paste_actions,
     build_paste_tag_actions,
+    build_profile_actions,
+    build_profiles_panel,
     build_tag_actions,
     build_tag_keywords_actions,
     build_tags_actions,
@@ -363,6 +365,50 @@ class MasterBot:
                 f"\u043f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u0438\u0442\u044c "
                 f"\u0432\u044b\u0433\u0440\u0443\u0437\u043a\u0443 \u0411\u0414: {ex}",
             )
+        finally:
+            try:
+                await self.main_bot.delete_message(chat_id=chat_id, message_id=status_message.message_id)
+            except Exception:
+                pass
+            if export_path and export_path.exists():
+                export_path.unlink(missing_ok=True)
+
+    async def _send_statistics_export(self, chat_id: int) -> None:
+        status_message = await self.main_bot.send_message(
+            chat_id,
+            "Готовлю выгрузку статистики. Сначала обновлю подписчиков, потом соберу Excel.",
+        )
+        export_path = None
+        try:
+            sync_result = await self.editorial_actions.sync_channel_profiles()
+            channels = await self.editorial_actions.list_channels()
+            channel_titles = {
+                channel.id: self._channel_title_from_runtime(channel.tg_channel_id) or channel.title
+                for channel in channels
+            }
+            channel_tags = {
+                channel.id: self._channel_label_from_runtime(channel.tg_channel_id) or channel.short_code
+                for channel in channels
+            }
+            export_path = await self.editorial_actions.export_channel_statistics(
+                channel_titles=channel_titles,
+                channel_tags=channel_tags,
+            )
+            with export_path.open("rb") as export_file:
+                await self.main_bot.send_document(
+                    chat_id=chat_id,
+                    document=export_file,
+                    visible_file_name=export_path.name,
+                    caption=(
+                        "Статистика каналов готова.\n"
+                        f"Каналов проверено: {sync_result.channels_checked}\n"
+                        f"Подписчики обновлены: {sync_result.subscriber_counts_updated}\n"
+                        f"Ошибок обновления: {sync_result.failed}"
+                    ),
+                )
+        except Exception as ex:
+            logger.exception("Failed to export channel statistics")
+            await self.main_bot.send_message(chat_id, f"Не удалось подготовить статистику: {ex}")
         finally:
             try:
                 await self.main_bot.delete_message(chat_id=chat_id, message_id=status_message.message_id)
@@ -728,6 +774,74 @@ class MasterBot:
             raise ValueError("Нужен формат: <параметр> <значение>")
         return parts[0].strip(), parts[1].strip()
 
+    def _parse_profile_setting_input(self, raw_value: str, profile_slug: str | None = None) -> tuple[str, str, str]:
+        text = raw_value.strip()
+        if not text:
+            raise ValueError("Empty input")
+
+        if profile_slug is not None:
+            parts = text.split(maxsplit=1)
+            if len(parts) != 2:
+                raise ValueError("Expected format: <field> <value>")
+            return profile_slug, parts[0].strip(), parts[1].strip()
+
+        parts = text.split(maxsplit=2)
+        if len(parts) != 3:
+            raise ValueError("Expected format: <profile_slug> <field> <value>")
+        return parts[0].strip(), parts[1].strip(), parts[2].strip()
+
+    @staticmethod
+    def _parse_profile_create_input(raw_value: str) -> tuple[str, str, int, int | None]:
+        parts = [part.strip() for part in raw_value.strip().split("::")]
+        if len(parts) != 4:
+            raise ValueError("Expected format: slug :: title :: min_subscribers :: max_subscribers")
+        slug, title, min_raw, max_raw = parts
+        if not slug or not title:
+            raise ValueError("Profile slug and title are required")
+        try:
+            min_subscribers = int(min_raw)
+        except ValueError as exc:
+            raise ValueError("min_subscribers must be an integer") from exc
+        max_clean = max_raw.lower()
+        if max_clean in {"none", "null", "-", "no", "inf", "infinity"}:
+            max_subscribers = None
+        else:
+            try:
+                max_subscribers = int(max_raw)
+            except ValueError as exc:
+                raise ValueError("max_subscribers must be an integer or none") from exc
+        return slug, title, min_subscribers, max_subscribers
+
+    @staticmethod
+    def _parse_channel_id_list(raw_value: str, available_channel_ids: set[int]) -> list[int]:
+        text = raw_value.strip().lower()
+        if not text:
+            raise ValueError("Empty channel list")
+        if text == "all":
+            return sorted(available_channel_ids)
+
+        channel_ids: list[int] = []
+        normalized = text.replace(",", " ")
+        for token in normalized.split():
+            if "-" in token:
+                left, right = token.split("-", 1)
+                if not left.isdigit() or not right.isdigit():
+                    raise ValueError(f"Bad range '{token}'")
+                start, end = int(left), int(right)
+                if start > end:
+                    start, end = end, start
+                channel_ids.extend(range(start, end + 1))
+                continue
+            if not token.isdigit():
+                raise ValueError(f"Bad channel id '{token}'")
+            channel_ids.append(int(token))
+
+        unique_channel_ids = list(dict.fromkeys(channel_ids))
+        missing = [channel_id for channel_id in unique_channel_ids if channel_id not in available_channel_ids]
+        if missing:
+            raise ValueError(f"Channels not found: {', '.join(map(str, missing[:20]))}")
+        return unique_channel_ids
+
     def _parse_ad_blackout_input(self, raw_value: str) -> tuple[int, str, str]:
         text = raw_value.strip()
         if not text:
@@ -779,6 +893,128 @@ class MasterBot:
             for field_name, value in settings_snapshot
         )
         await self.main_bot.send_message(chat_id, "\n".join(lines))
+
+    async def _show_profiles_menu(self, chat_id: int) -> None:
+        profiles = await self.editorial_actions.list_channel_setting_profiles(include_inactive=True)
+        lines = [
+            "Профили каналов.",
+            "",
+            "Выберите профиль, чтобы настроить его или выставить каналам.",
+        ]
+        profile_buttons = []
+        for profile in profiles:
+            max_subs = profile.max_subscribers if profile.max_subscribers is not None else "none"
+            lines.append(
+                f"{profile.slug}: {profile.min_subscribers}-{max_subs}, "
+                f"posts={profile.max_posts_per_day}, pastes={profile.max_paste_per_day}"
+            )
+            profile_buttons.append((profile.slug, profile.title, profile.is_active))
+        await self.main_bot.send_message(
+            chat_id,
+            "\n".join(lines),
+            reply_markup=build_profiles_panel(profile_buttons),
+        )
+
+    async def _show_profile_card(self, chat_id: int, profile_slug: str) -> None:
+        profiles = await self.editorial_actions.list_channel_setting_profiles(include_inactive=True)
+        profile = next((item for item in profiles if item.slug == profile_slug), None)
+        if profile is None:
+            await self.main_bot.send_message(chat_id, f"Profile '{profile_slug}' not found.")
+            await self._show_profiles_menu(chat_id)
+            return
+        await self.main_bot.send_message(
+            chat_id,
+            "\n".join(self._format_profile_lines(profile)),
+            reply_markup=build_profile_actions(profile.slug),
+        )
+
+    def _format_profile_lines(self, profile) -> list[str]:
+        max_subs = profile.max_subscribers if profile.max_subscribers is not None else "none"
+        state = "true" if profile.is_active else "false"
+        return [
+            f"Профиль: {profile.title} ({profile.slug})",
+            f"is_active = {state}",
+            f"subscribers = {profile.min_subscribers}-{max_subs}",
+            f"priority = {profile.priority}",
+            "",
+            f"timezone = {profile.timezone or 'keep channel'}",
+            f"min_gap_minutes = {profile.min_gap_minutes}",
+            f"slot_jitter_minutes = {profile.slot_jitter_minutes}",
+            f"auto_slots_enabled = {self._format_channel_setting_value(profile.auto_slots_enabled)}",
+            f"auto_slots_plan_time = {self._format_channel_setting_value(profile.auto_slots_plan_time)}",
+            f"auto_slots_window_start = {self._format_channel_setting_value(profile.auto_slots_window_start)}",
+            f"auto_slots_window_end = {self._format_channel_setting_value(profile.auto_slots_window_end)}",
+            f"auto_slots_replace_manual = {self._format_channel_setting_value(profile.auto_slots_replace_manual)}",
+            f"max_posts_per_day = {profile.max_posts_per_day}",
+            f"max_generated_per_day = {profile.max_generated_per_day}",
+            f"max_paste_per_day = {profile.max_paste_per_day}",
+            f"same_tag_cooldown_hours = {profile.same_tag_cooldown_hours}",
+            f"same_template_cooldown_hours = {profile.same_template_cooldown_hours}",
+            f"same_paste_cooldown_days = {profile.same_paste_cooldown_days}",
+            f"min_ready_queue = {profile.min_ready_queue}",
+            f"prefer_real_ratio = {profile.prefer_real_ratio}",
+            f"allow_generated = {self._format_channel_setting_value(profile.allow_generated)}",
+            f"allow_pastes = {self._format_channel_setting_value(profile.allow_pastes)}",
+        ]
+
+    async def _send_profile_settings_prompt(self, chat_id: int, profile_slug: str) -> None:
+        profiles = await self.editorial_actions.list_channel_setting_profiles(include_inactive=True)
+        profile = next((item for item in profiles if item.slug == profile_slug), None)
+        if profile is None:
+            await self.main_bot.send_message(chat_id, f"Profile '{profile_slug}' not found.")
+            await self._show_profiles_menu(chat_id)
+            return
+        lines = [
+            f"Настройка профиля {profile_slug}.",
+            "",
+            "Текущие параметры:",
+            *self._format_profile_lines(profile),
+            "",
+            "Отправьте строку:",
+            "max_posts_per_day 8",
+            "auto_slots_window_start 10:00",
+            "max_subscribers none",
+            "",
+            "Можно менять:",
+            "title, min_subscribers, max_subscribers, priority, is_active",
+            "min_gap_minutes, slot_jitter_minutes, auto_slots_enabled",
+            "auto_slots_plan_time, auto_slots_window_start, auto_slots_window_end",
+            "max_posts_per_day, max_generated_per_day, max_paste_per_day",
+            "same_tag_cooldown_hours, same_template_cooldown_hours, same_paste_cooldown_days",
+            "min_ready_queue, prefer_real_ratio, allow_generated, allow_pastes",
+        ]
+        self._set_user_state(chat_id, "await_profile_setting_update", profile_slug=profile_slug)
+        await self.main_bot.send_message(chat_id, "\n".join(lines))
+
+    async def _send_profile_assign_channels_prompt(self, chat_id: int, profile_slug: str) -> None:
+        channels = await self.editorial_actions.list_channels()
+        lines = [
+            f"Выставление профиля {profile_slug}.",
+            "",
+            "Отправьте номера каналов:",
+            "1,2,3",
+            "1-20",
+            "all",
+            "",
+            f"Активных каналов: {len(channels)}",
+            "Используются id каналов из раздела 'Каналы и слоты'.",
+            "",
+            "Канал будет переведен в ручной режим: settings_profile_auto_enabled=false.",
+        ]
+        self._set_user_state(chat_id, "await_profile_assign_channels", profile_slug=profile_slug)
+        await self.main_bot.send_message(chat_id, "\n".join(lines))
+
+    async def _send_profile_create_prompt(self, chat_id: int) -> None:
+        self._set_user_state(chat_id, "await_profile_create")
+        await self.main_bot.send_message(
+            chat_id,
+            "Создание профиля.\n\n"
+            "Отправьте строку:\n"
+            "slug :: title :: min_subscribers :: max_subscribers\n\n"
+            "Примеры:\n"
+            "small :: Small channels :: 0 :: 49\n"
+            "huge :: Huge channels :: 10000 :: none",
+        )
 
     async def _send_channel_history_import_offer(self, chat_id: int, channel_id: int) -> None:
         label = await self._get_channel_label(channel_id)
@@ -999,6 +1235,8 @@ class MasterBot:
     def _format_channel_setting_value(value: Any) -> str:
         if isinstance(value, bool):
             return "true" if value else "false"
+        if isinstance(value, time):
+            return value.strftime("%H:%M")
         return str(value)
 
     async def _format_ad_blackout(self, channel_id: int, blackout) -> str:
@@ -1029,6 +1267,12 @@ class MasterBot:
         summary_fields = {
             "min_gap_minutes",
             "slot_jitter_minutes",
+            "auto_slots_enabled",
+            "auto_slots_plan_time",
+            "auto_slots_window_start",
+            "auto_slots_window_end",
+            "auto_slots_replace_manual",
+            "settings_profile_auto_enabled",
             "max_posts_per_day",
             "max_paste_per_day",
             "same_tag_cooldown_hours",
@@ -1045,6 +1289,8 @@ class MasterBot:
         text_lines = [
             f"Канал: {label}",
             f"tg_channel_id: {channel.tg_channel_id}",
+            f"subscribers: {channel.subscriber_count if channel.subscriber_count is not None else 'unknown'}",
+            f"settings_profile_id: {channel.settings_profile_id or 'none'}",
             f"timezone: {channel.timezone}",
             "",
             "Ключевые параметры:",
@@ -1125,6 +1371,8 @@ class MasterBot:
         else:
             for slot in slots:
                 slot_label = f"{self._weekday_label(slot.weekday)} {slot.slot_time.strftime('%H:%M')}"
+                if getattr(slot, "is_auto_managed", False):
+                    slot_label = f"{slot_label} auto"
                 slot_lines.append(f"#{slot.id} {slot_label}")
 
         await self.main_bot.send_message(
@@ -1994,6 +2242,96 @@ class MasterBot:
             await self._show_channel_menu(message.chat.id, channel_id, user_id=message.from_user.id if message.from_user else message.chat.id)
             return True
 
+        if action == "await_profile_setting_update":
+            meta_fields = {"title", "min_subscribers", "max_subscribers", "priority", "is_active"}
+            profile_slug_from_state = state.get("profile_slug")
+            try:
+                profile_slug, field_name, raw_profile_value = self._parse_profile_setting_input(
+                    text_value,
+                    profile_slug=profile_slug_from_state,
+                )
+                if field_name in meta_fields:
+                    profile = await self.editorial_actions.update_channel_setting_profile_meta(
+                        slug=profile_slug,
+                        field_name=field_name,
+                        raw_value=raw_profile_value,
+                    )
+                else:
+                    profile = await self.editorial_actions.update_channel_setting_profile_field(
+                        slug=profile_slug,
+                        field_name=field_name,
+                        raw_value=raw_profile_value,
+                    )
+            except ValueError as exc:
+                await self.main_bot.send_message(
+                    message.chat.id,
+                    f"{exc}\n\nExample:\nmax_posts_per_day 8\nauto_slots_window_start 10:00\nmax_subscribers none",
+                )
+                if profile_slug_from_state:
+                    await self._send_profile_settings_prompt(message.chat.id, profile_slug_from_state)
+                return True
+
+            self._clear_user_state(message.chat.id)
+            await self.main_bot.send_message(
+                message.chat.id,
+                f"Profile {profile.slug} updated: {field_name} = {raw_profile_value}",
+            )
+            await self._show_profile_card(message.chat.id, profile.slug)
+            return True
+
+        if action == "await_profile_create":
+            try:
+                profile_slug, title, min_subscribers, max_subscribers = self._parse_profile_create_input(text_value)
+                profile = await self.editorial_actions.upsert_channel_setting_profile(
+                    slug=profile_slug,
+                    title=title,
+                    min_subscribers=min_subscribers,
+                    max_subscribers=max_subscribers,
+                )
+            except ValueError as exc:
+                await self.main_bot.send_message(
+                    message.chat.id,
+                    f"{exc}\n\nExample:\nsmall :: Small channels :: 0 :: 49\nhuge :: Huge channels :: 10000 :: none",
+                )
+                await self._send_profile_create_prompt(message.chat.id)
+                return True
+
+            self._clear_user_state(message.chat.id)
+            await self.main_bot.send_message(message.chat.id, f"Profile {profile.slug} created.")
+            await self._show_profile_card(message.chat.id, profile.slug)
+            return True
+
+        if action == "await_profile_assign_channels":
+            channels = await self.editorial_actions.list_channels()
+            profile_slug = state.get("profile_slug")
+            if not profile_slug:
+                self._clear_user_state(message.chat.id)
+                await self.main_bot.send_message(message.chat.id, "Profile was not selected. Open Profiles again.")
+                await self._show_profiles_menu(message.chat.id)
+                return True
+            try:
+                channel_ids = self._parse_channel_id_list(text_value, {channel.id for channel in channels})
+                updated_channels = await self.editorial_actions.apply_profile_to_channels(
+                    channel_ids=channel_ids,
+                    profile_slug=profile_slug,
+                    auto_enabled=False,
+                )
+            except ValueError as exc:
+                await self.main_bot.send_message(
+                    message.chat.id,
+                    f"{exc}\n\nExample:\n1,2,3\n1-20\nall",
+                )
+                await self._send_profile_assign_channels_prompt(message.chat.id, profile_slug)
+                return True
+
+            self._clear_user_state(message.chat.id)
+            await self.main_bot.send_message(
+                message.chat.id,
+                f"Profile {profile_slug} applied to {len(updated_channels)} channels. Mode: manual.",
+            )
+            await self._show_profile_card(message.chat.id, profile_slug)
+            return True
+
         if action == "await_generate_posts":
             channel_id = state["channel_id"]
             try:
@@ -2530,6 +2868,10 @@ class MasterBot:
                         await self._safe_answer_callback(self.main_bot, call.id)
                         answered_early = True
                         await self._show_my_channels_menu(call.message.chat.id, user_id=call.from_user.id)
+                    case "profiles":
+                        await self._safe_answer_callback(self.main_bot, call.id)
+                        answered_early = True
+                        await self._show_profiles_menu(call.message.chat.id)
                     case "scheduler":
                         await self._safe_answer_callback(self.main_bot, call.id)
                         answered_early = True
@@ -2538,6 +2880,31 @@ class MasterBot:
                             call.message.chat.id,
                             f"Scheduler отработал.\nКаналов: {result.channels_checked}\n"
                             f"Слотов: {result.slots_checked}\nЗапланировано: {result.scheduled_items}",
+                        )
+                    case "auto_slots":
+                        await self._safe_answer_callback(self.main_bot, call.id)
+                        answered_early = True
+                        result = await self.editorial_actions.run_auto_slot_planner()
+                        await self.main_bot.send_message(
+                            call.message.chat.id,
+                            "Auto slots finished.\n"
+                            f"Channels checked: {result.channels_checked}\n"
+                            f"Channels planned: {result.channels_planned}\n"
+                            f"Slots deleted: {result.slots_deleted}\n"
+                            f"Slots created: {result.slots_created}",
+                        )
+                    case "profile_sync":
+                        await self._safe_answer_callback(self.main_bot, call.id)
+                        answered_early = True
+                        result = await self.editorial_actions.sync_channel_profiles()
+                        await self.main_bot.send_message(
+                            call.message.chat.id,
+                            "Channel profiles synced.\n"
+                            f"Channels checked: {result.channels_checked}\n"
+                            f"Subscriber counts updated: {result.subscriber_counts_updated}\n"
+                            f"Profiles changed: {result.profiles_changed}\n"
+                            f"Skipped manual: {result.skipped_manual}\n"
+                            f"Failed: {result.failed}",
                         )
                     case "publisher":
                         await self._safe_answer_callback(self.main_bot, call.id)
@@ -2555,6 +2922,10 @@ class MasterBot:
                     case "db_export":
                         await self._safe_answer_callback(self.main_bot, call.id)
                         await self._send_database_export(call.message.chat.id)
+                        return
+                    case "stats_export":
+                        await self._safe_answer_callback(self.main_bot, call.id)
+                        await self._send_statistics_export(call.message.chat.id)
                         return
                     case "sql_export":
                         await self._safe_answer_callback(self.main_bot, call.id)
@@ -2579,6 +2950,26 @@ class MasterBot:
                         await self._show_subbots_menu(call.message.chat.id, page=page)
                 if not answered_early:
                     await self._safe_answer_callback(self.main_bot, call.id)
+                return
+
+            if data.startswith("profiles:"):
+                parts = data.split(":")
+                action = parts[1]
+                profile_slug = parts[2] if len(parts) > 2 else None
+                await self._safe_answer_callback(self.main_bot, call.id)
+                if action == "add":
+                    await self._send_profile_create_prompt(call.message.chat.id)
+                    return
+                if action == "view" and profile_slug:
+                    await self._show_profile_card(call.message.chat.id, profile_slug)
+                    return
+                if action == "settings" and profile_slug:
+                    await self._send_profile_settings_prompt(call.message.chat.id, profile_slug)
+                    return
+                if action == "assign" and profile_slug:
+                    await self._send_profile_assign_channels_prompt(call.message.chat.id, profile_slug)
+                    return
+                await self._show_profiles_menu(call.message.chat.id)
                 return
 
             if data.startswith("submission:") and not data.startswith("submission:view:"):

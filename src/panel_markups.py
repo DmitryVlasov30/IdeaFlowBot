@@ -27,6 +27,8 @@ def build_main_panel(is_general_admin: bool) -> InlineKeyboardMarkup:
         InlineKeyboardButton("\u0417\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u044c scheduler", callback_data="panel:scheduler"),
         InlineKeyboardButton("\u0417\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u044c publisher", callback_data="panel:publisher"),
     )
+    markup.add(InlineKeyboardButton("\u0410\u0432\u0442\u043e\u0441\u043b\u043e\u0442\u044b", callback_data="panel:auto_slots"))
+    markup.add(InlineKeyboardButton("\u041f\u0440\u043e\u0444\u0438\u043b\u0438", callback_data="panel:profiles"))
     if is_general_admin:
         markup.add(
             InlineKeyboardButton("\u0421\u0430\u0431\u0431\u043e\u0442\u044b", callback_data="panel:subbots"),
@@ -41,7 +43,32 @@ def build_main_panel(is_general_admin: bool) -> InlineKeyboardMarkup:
 def build_extra_panel() -> InlineKeyboardMarkup:
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(InlineKeyboardButton("\u0412\u044b\u0433\u0440\u0443\u0437\u043a\u0430 \u0411\u0414", callback_data="panel:db_export"))
+    markup.add(InlineKeyboardButton("\u0412\u044b\u0433\u0440\u0443\u0437\u043a\u0430 \u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043a\u0438", callback_data="panel:stats_export"))
     markup.add(InlineKeyboardButton("SQL -> CSV", callback_data="panel:sql_export"))
+    markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u0432 \u043f\u0430\u043d\u0435\u043b\u044c", callback_data="panel:main"))
+    return markup
+
+
+def build_profiles_panel(profile_buttons: list[tuple[str, str, bool]] | None = None) -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup(row_width=1)
+    for slug, title, is_active in profile_buttons or []:
+        state = "" if is_active else " [off]"
+        markup.add(InlineKeyboardButton(f"{title} ({slug}){state}", callback_data=f"profiles:view:{slug}"))
+    markup.add(
+        InlineKeyboardButton("\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u043f\u0440\u043e\u0444\u0438\u043b\u044c", callback_data="profiles:add"),
+        InlineKeyboardButton("\u0421\u0438\u043d\u0445\u0440\u043e\u043d\u0438\u0437\u0438\u0440\u043e\u0432\u0430\u0442\u044c \u043f\u043e\u0434\u043f\u0438\u0441\u0447\u0438\u043a\u043e\u0432", callback_data="panel:profile_sync"),
+    )
+    markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u0432 \u043f\u0430\u043d\u0435\u043b\u044c", callback_data="panel:main"))
+    return markup
+
+
+def build_profile_actions(slug: str) -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("\u041d\u0430\u0441\u0442\u0440\u043e\u0438\u0442\u044c \u043f\u0440\u043e\u0444\u0438\u043b\u044c", callback_data=f"profiles:settings:{slug}"),
+        InlineKeyboardButton("\u0412\u044b\u0441\u0442\u0430\u0432\u0438\u0442\u044c \u043f\u0440\u043e\u0444\u0438\u043b\u044c", callback_data=f"profiles:assign:{slug}"),
+    )
+    markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u043a \u043f\u0440\u043e\u0444\u0438\u043b\u044f\u043c", callback_data="panel:profiles"))
     markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u0432 \u043f\u0430\u043d\u0435\u043b\u044c", callback_data="panel:main"))
     return markup
 

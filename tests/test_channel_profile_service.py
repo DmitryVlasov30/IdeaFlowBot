@@ -1,0 +1,76 @@
+from datetime import time
+
+from src.editorial.models.channel import Channel, ChannelSettingProfile
+from src.editorial.services.channel_profile_service import ChannelProfileService
+
+
+def _profile(slug: str, min_subscribers: int, max_subscribers: int | None, **overrides) -> ChannelSettingProfile:
+    values = {
+        "slug": slug,
+        "title": slug,
+        "min_subscribers": min_subscribers,
+        "max_subscribers": max_subscribers,
+        "priority": 100,
+        "min_gap_minutes": 1,
+        "slot_jitter_minutes": 30,
+        "auto_slots_enabled": True,
+        "auto_slots_plan_time": time(23, 30),
+        "auto_slots_window_start": time(10, 0),
+        "auto_slots_window_end": time(22, 0),
+        "auto_slots_replace_manual": True,
+        "max_posts_per_day": 6,
+        "max_generated_per_day": 1,
+        "max_paste_per_day": 3,
+        "same_tag_cooldown_hours": 0,
+        "same_template_cooldown_hours": 0,
+        "same_paste_cooldown_days": 120,
+        "min_ready_queue": 3,
+        "prefer_real_ratio": 70,
+        "allow_generated": True,
+        "allow_pastes": True,
+    }
+    values.update(overrides)
+    return ChannelSettingProfile(**values)
+
+
+def test_select_profile_uses_subscriber_thresholds() -> None:
+    profiles = [
+        _profile("starter", 0, 49),
+        _profile("growing", 50, 999),
+        _profile("large", 1000, None),
+    ]
+
+    assert ChannelProfileService._select_profile(profiles, 0).slug == "starter"
+    assert ChannelProfileService._select_profile(profiles, 50).slug == "growing"
+    assert ChannelProfileService._select_profile(profiles, 1000).slug == "large"
+
+
+def test_select_profile_prefers_highest_matching_min_subscribers() -> None:
+    profiles = [
+        _profile("base", 0, None, priority=100),
+        _profile("specific", 50, 100, priority=100),
+    ]
+
+    assert ChannelProfileService._select_profile(profiles, 75).slug == "specific"
+
+
+def test_apply_profile_copies_publication_policy_to_channel() -> None:
+    channel = Channel(tg_channel_id=1, short_code="test", timezone="Europe/Moscow")
+    profile = _profile(
+        "growing",
+        50,
+        999,
+        id=42,
+        max_posts_per_day=8,
+        max_paste_per_day=4,
+        auto_slots_window_start=time(9, 0),
+        auto_slots_window_end=time(23, 0),
+    )
+
+    ChannelProfileService._apply_profile(channel, profile)
+
+    assert channel.settings_profile_id == 42
+    assert channel.max_posts_per_day == 8
+    assert channel.max_paste_per_day == 4
+    assert channel.auto_slots_window_start == time(9, 0)
+    assert channel.auto_slots_window_end == time(23, 0)

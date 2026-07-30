@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, time
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from src.editorial.models.enums import (
     ContentItemStatus,
@@ -10,6 +10,8 @@ from src.editorial.models.enums import (
     ReviewDecision,
     SubmissionStatus,
 )
+from src.editorial.services.auto_slot_planner import AutoSlotPlannerResult
+from src.editorial.services.channel_profile_service import ChannelProfileSyncResult
 from src.editorial.services.import_legacy import ImportLegacyResult
 from src.editorial.services.publisher import PublisherRunResult
 from src.editorial.services.scheduler import SchedulerRunResult
@@ -40,6 +42,46 @@ class ChannelResponse(BaseModel):
     short_code: str
     is_active: bool
     timezone: str
+    auto_slots_enabled: bool
+    auto_slots_plan_time: time
+    auto_slots_window_start: time
+    auto_slots_window_end: time
+    auto_slots_replace_manual: bool
+    subscriber_count: int | None
+    subscriber_count_checked_at: datetime | None
+    settings_profile_id: int | None
+    settings_profile_auto_enabled: bool
+    settings_profile_applied_at: datetime | None
+
+
+class ChannelSettingProfileResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    slug: str
+    title: str
+    is_active: bool
+    priority: int
+    min_subscribers: int
+    max_subscribers: int | None
+    timezone: str | None
+    min_gap_minutes: int
+    slot_jitter_minutes: int
+    auto_slots_enabled: bool
+    auto_slots_plan_time: time
+    auto_slots_window_start: time
+    auto_slots_window_end: time
+    auto_slots_replace_manual: bool
+    max_posts_per_day: int
+    max_generated_per_day: int
+    max_paste_per_day: int
+    same_tag_cooldown_hours: int
+    same_template_cooldown_hours: int
+    same_paste_cooldown_days: int
+    min_ready_queue: int
+    prefer_real_ratio: int
+    allow_generated: bool
+    allow_pastes: bool
 
 
 class ContentItemResponse(BaseModel):
@@ -98,6 +140,21 @@ class SeedSlotsRequest(BaseModel):
     weekdays: list[int] | None = None
 
 
+class UpsertChannelSettingProfileRequest(BaseModel):
+    slug: str
+    title: str | None = None
+    min_subscribers: int | None = None
+    max_subscribers: int | None = None
+    priority: int | None = None
+    is_active: bool | None = None
+    settings: dict[str, str] = Field(default_factory=dict)
+
+
+class ApplyChannelSettingProfileRequest(BaseModel):
+    profile_slug: str
+    auto_enabled: bool = False
+
+
 class ImportLegacyResponse(BaseModel):
     scanned: int
     imported: int
@@ -118,6 +175,40 @@ class SchedulerRunResponse(BaseModel):
     @classmethod
     def from_result(cls, result: SchedulerRunResult) -> "SchedulerRunResponse":
         return cls(**result.__dict__)
+
+
+class AutoSlotPlannerRunResponse(BaseModel):
+    channels_checked: int
+    channels_planned: int
+    slots_deleted: int
+    slots_created: int
+
+    @classmethod
+    def from_result(cls, result: AutoSlotPlannerResult) -> "AutoSlotPlannerRunResponse":
+        return cls(
+            channels_checked=result.channels_checked,
+            channels_planned=result.channels_planned,
+            slots_deleted=result.slots_deleted,
+            slots_created=result.slots_created,
+        )
+
+
+class ChannelProfileSyncResponse(BaseModel):
+    channels_checked: int
+    subscriber_counts_updated: int
+    profiles_changed: int
+    skipped_manual: int
+    failed: int
+
+    @classmethod
+    def from_result(cls, result: ChannelProfileSyncResult) -> "ChannelProfileSyncResponse":
+        return cls(
+            channels_checked=result.channels_checked,
+            subscriber_counts_updated=result.subscriber_counts_updated,
+            profiles_changed=result.profiles_changed,
+            skipped_manual=result.skipped_manual,
+            failed=result.failed,
+        )
 
 
 class PublisherRunResponse(BaseModel):

@@ -158,6 +158,75 @@ Editorial-слой хранит управляемый словарь:
 
 ## 8. Планировщик
 
+### 8.1 Профили Каналов По Подписчикам
+
+Каналы могут автоматически получать настройки из профилей `channel_setting_profiles`.
+
+Профиль задает:
+
+- диапазон подписчиков: `min_subscribers` / `max_subscribers`;
+- параметры публикации: `max_posts_per_day`, `max_paste_per_day`, cooldown, gaps;
+- параметры автослотов: `auto_slots_enabled`, окно публикаций, время построения плана;
+- разрешения: `allow_pastes`, `allow_generated`.
+
+Фоновый sync:
+
+1. Берет привязки сабботов из legacy `bots_data`.
+2. Через токен саббота вызывает Telegram `get_chat_member_count`.
+3. Сохраняет `subscriber_count` и `subscriber_count_checked_at` в `channels`.
+4. Если `settings_profile_auto_enabled=true`, выбирает профиль по диапазону подписчиков.
+5. Применяет настройки профиля к каналу.
+
+Ручной override:
+
+- `settings_profile_auto_enabled=false` замораживает канал;
+- после этого профиль и отдельные настройки можно менять вручную;
+- следующий auto-sync такой канал пропускает.
+
+Команды:
+
+```bash
+python -m src.editorial.cli sync-channel-profiles
+python -m src.editorial.cli upsert-channel-profile --slug growing --min-subs 50 --max-subs 999 --set max_posts_per_day=6 --set max_paste_per_day=3
+python -m src.editorial.cli apply-channel-profile --channel-id 1 --profile growing
+```
+
+В Telegram-панели есть раздел `Профили`:
+
+- после входа показываются кнопки всех текущих профилей и кнопка `Добавить профиль`;
+- `Добавить профиль` принимает строку `slug :: title :: min_subscribers :: max_subscribers`;
+- при открытии профиля есть кнопки `Настроить профиль` и `Выставить профиль`;
+- `Настроить профиль` показывает текущие параметры и принимает строку `<field> <value>`, например `max_posts_per_day 8`;
+- `Выставить профиль` принимает номера каналов (`1,2,3`, `1-20`, `all`);
+- ручное выставление переводит каналы в manual mode (`settings_profile_auto_enabled=false`), чтобы auto-sync не перезаписал выбор.
+
+### 8.2 Автослоты
+
+Канал может сам строить слоты на следующий день через автополитику:
+
+- `auto_slots_enabled` — включает автоматическое построение слотов;
+- `auto_slots_plan_time` — локальное время канала, когда строится план на завтра;
+- `auto_slots_window_start` / `auto_slots_window_end` — рабочее окно, внутри которого слоты распределяются равномерно;
+- `auto_slots_replace_manual` — если включено, автоплан заменяет слоты выбранного дня недели;
+- `auto_slots_last_planned_for` — дата, для которой уже был построен последний план.
+
+Расчет:
+
+1. Считаются готовые `approved` записи канала из живого контента (`submission` и `editorial`), которые еще не запланированы.
+2. Если пасты разрешены, fallback равен `max_paste_per_day`; если пасты отключены, fallback равен `0`.
+3. `target_slots = max(approved_ready_count, fallback_paste_slots)`.
+4. `target_slots` ограничивается `max_posts_per_day` и вместимостью окна с учетом `min_gap_minutes`.
+5. `paste_slots = min(target_slots - approved_ready_count, fallback_paste_slots)`.
+6. Слоты равномерно раскладываются между `auto_slots_window_start` и `auto_slots_window_end`.
+
+Если живого контента мало или нет, оставшиеся слоты займут пасты. Если живого контента больше лимита паст, пасты вытесняются. Дальше обычный scheduler использует эти слоты и применяет уже существующий `slot_jitter_minutes`.
+
+Команда ручного запуска:
+
+```bash
+python -m src.editorial.cli auto-slots
+```
+
 Планировщик:
 
 - смотрит активные каналы;

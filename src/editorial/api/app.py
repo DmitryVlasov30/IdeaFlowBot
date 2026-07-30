@@ -4,7 +4,11 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.editorial.api.schemas import (
+    ApplyChannelSettingProfileRequest,
+    AutoSlotPlannerRunResponse,
     ChannelResponse,
+    ChannelProfileSyncResponse,
+    ChannelSettingProfileResponse,
     ContentItemResponse,
     CreateContentFromSubmissionRequest,
     CreateManualPasteRequest,
@@ -16,10 +20,13 @@ from src.editorial.api.schemas import (
     SeedSlotsRequest,
     SubmissionResponse,
     UpdateSubmissionStatusRequest,
+    UpsertChannelSettingProfileRequest,
 )
 from src.editorial.config import settings
 from src.editorial.db.session import get_session
 from src.editorial.models.enums import ContentItemStatus, SubmissionStatus
+from src.editorial.services.auto_slot_planner import AutoSlotPlannerService
+from src.editorial.services.channel_profile_service import ChannelProfileService
 from src.editorial.services.channel_service import ChannelService
 from src.editorial.services.generation.service import GenerationService
 from src.editorial.services.import_legacy import LegacyImporter
@@ -52,6 +59,48 @@ async def run_importer(session: AsyncSession = Depends(get_session)) -> ImportLe
 async def list_channels(session: AsyncSession = Depends(get_session)) -> list[ChannelResponse]:
     items = await ChannelService().list_channels(session)
     return [ChannelResponse.model_validate(item) for item in items]
+
+
+@app.get("/channel-setting-profiles", response_model=list[ChannelSettingProfileResponse], dependencies=[Depends(require_api_key)])
+async def list_channel_setting_profiles(
+    include_inactive: bool = False,
+    session: AsyncSession = Depends(get_session),
+) -> list[ChannelSettingProfileResponse]:
+    items = await ChannelProfileService().list_profiles(session, include_inactive=include_inactive)
+    return [ChannelSettingProfileResponse.model_validate(item) for item in items]
+
+
+@app.post("/channel-setting-profiles", response_model=ChannelSettingProfileResponse, dependencies=[Depends(require_api_key)])
+async def upsert_channel_setting_profile(
+    payload: UpsertChannelSettingProfileRequest,
+    session: AsyncSession = Depends(get_session),
+) -> ChannelSettingProfileResponse:
+    profile = await ChannelProfileService().upsert_profile(
+        session,
+        slug=payload.slug,
+        title=payload.title,
+        min_subscribers=payload.min_subscribers,
+        max_subscribers=payload.max_subscribers,
+        priority=payload.priority,
+        is_active=payload.is_active,
+        raw_settings=payload.settings,
+    )
+    return ChannelSettingProfileResponse.model_validate(profile)
+
+
+@app.post("/channels/{channel_id}/setting-profile", response_model=ChannelResponse, dependencies=[Depends(require_api_key)])
+async def apply_channel_setting_profile(
+    channel_id: int,
+    payload: ApplyChannelSettingProfileRequest,
+    session: AsyncSession = Depends(get_session),
+) -> ChannelResponse:
+    channel = await ChannelProfileService().apply_profile_to_channel(
+        session,
+        channel_id=channel_id,
+        profile_slug=payload.profile_slug,
+        auto_enabled=payload.auto_enabled,
+    )
+    return ChannelResponse.model_validate(channel)
 
 
 @app.post("/channels/{channel_id}/slots/seed", response_model=dict, dependencies=[Depends(require_api_key)])
@@ -194,6 +243,29 @@ async def create_content_item_from_paste(
 async def run_scheduler(session: AsyncSession = Depends(get_session)) -> SchedulerRunResponse:
     result = await SchedulerService().run(session)
     return SchedulerRunResponse.from_result(result)
+
+
+@app.post("/auto-slots/run", response_model=AutoSlotPlannerRunResponse, dependencies=[Depends(require_api_key)])
+async def run_auto_slots(
+    channel_id: int | None = None,
+    session: AsyncSession = Depends(get_session),
+) -> AutoSlotPlannerRunResponse:
+    result = await AutoSlotPlannerService().run(session, channel_id=channel_id)
+    return AutoSlotPlannerRunResponse.from_result(result)
+
+
+@app.post("/channel-profiles/sync", response_model=ChannelProfileSyncResponse, dependencies=[Depends(require_api_key)])
+async def sync_channel_profiles(
+    channel_id: int | None = None,
+    update_subscriber_counts: bool = True,
+    session: AsyncSession = Depends(get_session),
+) -> ChannelProfileSyncResponse:
+    result = await ChannelProfileService().sync_profiles_by_subscribers(
+        session,
+        channel_id=channel_id,
+        update_subscriber_counts=update_subscriber_counts,
+    )
+    return ChannelProfileSyncResponse.from_result(result)
 
 
 @app.post("/publisher/run", response_model=PublisherRunResponse, dependencies=[Depends(require_api_key)])

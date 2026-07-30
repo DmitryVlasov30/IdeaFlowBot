@@ -1,4 +1,4 @@
-from src.editorial.models.channel import Channel, ChannelSlot
+from src.editorial.models.channel import Channel, ChannelSettingProfile, ChannelSlot, ChannelSubscriberSnapshot
 from src.editorial.models.ad_blackout import ChannelAdBlackout
 from src.editorial.models.channel_history import ChannelHistoryMessage
 from src.editorial.models.content import ContentItem, ContentItemSource
@@ -29,7 +29,9 @@ __all__ = [
     "ChannelHistoryMessage",
     "ChannelPasteTagRule",
     "ChannelPasteTagRuleMode",
+    "ChannelSettingProfile",
     "ChannelSlot",
+    "ChannelSubscriberSnapshot",
     "ContentItem",
     "ContentItemSource",
     "ContentItemStatus",

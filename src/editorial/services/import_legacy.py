@@ -170,6 +170,7 @@ class LegacyImporter:
                     title=binding.bot_username,
                     short_code=short_code,
                     timezone=settings.default_timezone,
+                    settings_profile_auto_enabled=True,
                 )
             )
             created += 1
