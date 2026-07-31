@@ -41,9 +41,7 @@ def test_publisher_signature_is_disabled_by_default(monkeypatch) -> None:
     monkeypatch.delenv("PUBLICATION_SIGNATURE_ENABLED", raising=False)
     channel = Channel(tg_channel_id=-1001, short_code="MIITrussia", title="Подслушано РУТ МИИТ")
 
-    assert PublisherService().format_publication_text("Текст", channel, channel_signature="@MIITrussia") == (
-        "Текст\n\n@MIITrussia"
-    )
+    assert PublisherService().format_publication_text("Текст", channel, channel_signature="@MIITrussia") == "Текст"
     assert PublisherService.publication_parse_mode() is None
 
 

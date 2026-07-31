@@ -86,7 +86,6 @@ class PublisherService:
         if submission is not None and not submission.is_anonymous:
             parts.append(self._submission_author_signature(submission))
         if not publication_signature_enabled():
-            parts.append(self._channel_signature(channel, channel_signature))
             return "\n\n".join(parts)
         signature_html = channel_publication_signature_html(channel, channel_signature)
         return format_publication_html(
