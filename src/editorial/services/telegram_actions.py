@@ -1389,6 +1389,7 @@ class TelegramEditorialActions:
                             channel,
                             channel_signature=channel_signature,
                         ),
+                        parse_mode=self.publisher.publication_parse_mode(),
                     )
                 except Exception as ex:
                     item.status = ContentItemStatus.HOLD

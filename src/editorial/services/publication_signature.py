@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 from html import escape
+import os
 
 from src.editorial.models.channel import Channel
+
+
+def publication_signature_enabled() -> bool:
+    return os.getenv("PUBLICATION_SIGNATURE_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def public_channel_url(channel_ref: str | None) -> str | None:

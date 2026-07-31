@@ -17,7 +17,11 @@ from src.editorial.models.submission import Submission
 from src.editorial.services.legacy_audit import LEGACY_DELAYED_AUDIT_TEMPLATE_KEY
 from src.editorial.services.legacy_source import LegacyCollectorReader, LegacySenderRow
 from src.editorial.services.paste_service import PasteService
-from src.editorial.services.publication_signature import channel_publication_signature_html, format_publication_html
+from src.editorial.services.publication_signature import (
+    channel_publication_signature_html,
+    format_publication_html,
+    publication_signature_enabled,
+)
 from src.editorial.services.telegram_publisher import TelegramPublisherAdapter
 from src.editorial.utils.text import clean_text
 
@@ -64,6 +68,10 @@ class PublisherService:
             resolved_tag = None
         return self._channel_signature(channel, resolved_tag)
 
+    @staticmethod
+    def publication_parse_mode() -> str | None:
+        return "HTML" if publication_signature_enabled() else None
+
     def format_publication_text(
         self,
         text: str | None,
@@ -77,6 +85,9 @@ class PublisherService:
             parts.append(cleaned_text)
         if submission is not None and not submission.is_anonymous:
             parts.append(self._submission_author_signature(submission))
+        if not publication_signature_enabled():
+            parts.append(self._channel_signature(channel, channel_signature))
+            return "\n\n".join(parts)
         signature_html = channel_publication_signature_html(channel, channel_signature)
         return format_publication_html(
             "\n\n".join(parts),
@@ -149,6 +160,7 @@ class PublisherService:
                     channel,
                     channel_signature=channel_signature,
                 ),
+                parse_mode=self.publication_parse_mode(),
             )
 
         submission = await session.get(Submission, content_item.origin_submission_id)
@@ -205,6 +217,7 @@ class PublisherService:
                         if index == 0
                         else None
                     ),
+                    parse_mode=self.publication_parse_mode(),
                 )
                 if first_message_id is None:
                     first_message_id = copied_id
@@ -230,6 +243,7 @@ class PublisherService:
                         submission,
                         channel_signature=channel_signature,
                     ),
+                    parse_mode=self.publication_parse_mode(),
                 )
                 logger.info(
                     "Published content item {} via copy_message from {}:{}",
@@ -254,6 +268,7 @@ class PublisherService:
                     submission,
                     channel_signature=channel_signature,
                 ),
+                parse_mode=self.publication_parse_mode(),
             )
 
         source_text = self._get_related_submission_source_text(related_rows)
@@ -270,6 +285,7 @@ class PublisherService:
                 bot_token=bot_token,
                 channel_id=channel.tg_channel_id,
                 text=text_to_send,
+                parse_mode=self.publication_parse_mode(),
             )
             logger.info("Published content item {} via send_text from source text", content_item.id)
             return telegram_message_id
@@ -283,6 +299,7 @@ class PublisherService:
                 submission,
                 channel_signature=channel_signature,
             ),
+            parse_mode=self.publication_parse_mode(),
         )
         logger.info(
             "Published content item {} via plain send_text fallback",

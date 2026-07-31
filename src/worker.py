@@ -17,7 +17,11 @@ from src.core_database.database import (CrudChatAdmins, CrudBannedUser,
 from src.editorial.models.enums import SubmissionStatus
 from src.editorial.services.legacy_moderation_sync import LegacyModerationSyncService
 from src.editorial.services.legacy_publication_guard import LegacyPublicationGuard
-from src.editorial.services.publication_signature import format_publication_html, publication_signature_html
+from src.editorial.services.publication_signature import (
+    format_publication_html,
+    publication_signature_enabled,
+    publication_signature_html,
+)
 from src.legacy_delayed import delayed_publication_matches
 from src.utils import Utils, filter_chats
 from config import settings
@@ -984,34 +988,42 @@ class SubBot:
                 markup = InlineKeyboardMarkup()
                 markup.add(button)
 
-        signature_html = publication_signature_html(
-            title=self.channel_title,
-            channel_ref=self.channel_username,
-        )
-        legacy_row = await self.legacy_moderation_sync.legacy_reader.find_sender_row_by_review_message(
-            channel_id=self.channel_id,
-            review_chat_id=self.chat_suggest,
-            review_message_id=int(message_id),
-        )
-        source_text = legacy_row.text_post if legacy_row is not None else None
-        content_type = (legacy_row.content_type if legacy_row is not None else None) or "media"
-
-        if content_type == "text":
-            copied_message = await self.sup_bot.send_message(
-                chat_id=self.channel_id,
-                text=format_publication_html(source_text, signature_html=signature_html),
-                parse_mode="HTML",
-                reply_markup=markup,
-            )
-        else:
+        if not publication_signature_enabled():
             copied_message = await self.sup_bot.copy_message(
                 from_chat_id=self.chat_suggest,
                 chat_id=self.channel_id,
                 message_id=message_id,
-                caption=format_publication_html(source_text, signature_html=signature_html),
-                parse_mode="HTML",
                 reply_markup=markup,
             )
+        else:
+            signature_html = publication_signature_html(
+                title=self.channel_title,
+                channel_ref=self.channel_username,
+            )
+            legacy_row = await self.legacy_moderation_sync.legacy_reader.find_sender_row_by_review_message(
+                channel_id=self.channel_id,
+                review_chat_id=self.chat_suggest,
+                review_message_id=int(message_id),
+            )
+            source_text = legacy_row.text_post if legacy_row is not None else None
+            content_type = (legacy_row.content_type if legacy_row is not None else None) or "media"
+
+            if content_type == "text":
+                copied_message = await self.sup_bot.send_message(
+                    chat_id=self.channel_id,
+                    text=format_publication_html(source_text, signature_html=signature_html),
+                    parse_mode="HTML",
+                    reply_markup=markup,
+                )
+            else:
+                copied_message = await self.sup_bot.copy_message(
+                    from_chat_id=self.chat_suggest,
+                    chat_id=self.channel_id,
+                    message_id=message_id,
+                    caption=format_publication_html(source_text, signature_html=signature_html),
+                    parse_mode="HTML",
+                    reply_markup=markup,
+                )
         self.delayed_message.pop(message_id, None)
         if is_anonymous:
             self.anonym_send.discard(message_id)
