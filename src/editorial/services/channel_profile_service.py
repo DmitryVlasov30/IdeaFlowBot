@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import delete as sql_delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from telebot.async_telebot import AsyncTeleBot
 
@@ -34,6 +35,9 @@ PROFILE_SETTING_FIELDS = [
     "allow_pastes",
 ]
 
+MOSCOW_TZ = ZoneInfo("Europe/Moscow")
+SUBSCRIBER_SNAPSHOT_RETENTION_DAYS = 14
+
 
 @dataclass(slots=True)
 class ChannelProfileSyncItem:
@@ -54,6 +58,16 @@ class ChannelProfileSyncResult:
     skipped_manual: int = 0
     failed: int = 0
     items: list[ChannelProfileSyncItem] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class ChannelSubscriberSnapshotResult:
+    channels_checked: int = 0
+    subscriber_counts_updated: int = 0
+    snapshots_recorded: int = 0
+    snapshots_deleted: int = 0
+    failed: int = 0
+    errors: list[str] = field(default_factory=list)
 
 
 class ChannelProfileService:
@@ -180,6 +194,7 @@ class ChannelProfileService:
         *,
         channel_id: int | None = None,
         update_subscriber_counts: bool = True,
+        record_subscriber_snapshots: bool = False,
     ) -> ChannelProfileSyncResult:
         result = ChannelProfileSyncResult()
         profiles = await self.list_profiles(session)
@@ -201,7 +216,8 @@ class ChannelProfileService:
                 try:
                     channel.subscriber_count = await self._fetch_subscriber_count(binding)
                     channel.subscriber_count_checked_at = now
-                    self._record_subscriber_snapshot(session, channel, now)
+                    if record_subscriber_snapshots:
+                        self._record_subscriber_snapshot(session, channel, now)
                     result.subscriber_counts_updated += 1
                 except Exception as exc:
                     error = str(exc)
@@ -247,6 +263,62 @@ class ChannelProfileService:
         await session.commit()
         return result
 
+    async def record_daily_subscriber_snapshots(
+        self,
+        session: AsyncSession,
+        *,
+        now: datetime | None = None,
+        retention_days: int = SUBSCRIBER_SNAPSHOT_RETENTION_DAYS,
+    ) -> ChannelSubscriberSnapshotResult:
+        checked_at = self._ensure_aware_datetime(now or datetime.now(timezone.utc))
+        day_start_utc, day_end_utc = self._moscow_day_bounds_utc(checked_at)
+        result = ChannelSubscriberSnapshotResult()
+
+        bindings = await self.legacy_reader.fetch_all_bot_bindings()
+        bindings_by_tg_id = {int(binding.channel_id): binding for binding in bindings}
+        channels = list(
+            (
+                await session.execute(
+                    select(Channel)
+                    .where(Channel.is_active.is_(True))
+                    .order_by(Channel.id.asc())
+                )
+            ).scalars().all()
+        )
+
+        for channel in channels:
+            result.channels_checked += 1
+            binding = bindings_by_tg_id.get(channel.tg_channel_id)
+            if binding is None:
+                continue
+
+            try:
+                channel.subscriber_count = await self._fetch_subscriber_count(binding)
+                channel.subscriber_count_checked_at = checked_at
+                result.subscriber_counts_updated += 1
+            except Exception as exc:
+                result.failed += 1
+                result.errors.append(f"Channel {channel.id}: {exc}")
+                continue
+
+            await session.execute(
+                sql_delete(ChannelSubscriberSnapshot)
+                .where(ChannelSubscriberSnapshot.channel_id == channel.id)
+                .where(ChannelSubscriberSnapshot.checked_at >= day_start_utc)
+                .where(ChannelSubscriberSnapshot.checked_at < day_end_utc)
+            )
+            self._record_subscriber_snapshot(session, channel, checked_at)
+            result.snapshots_recorded += 1
+
+        deleted = await session.execute(
+            sql_delete(ChannelSubscriberSnapshot).where(
+                ChannelSubscriberSnapshot.checked_at < self._retention_cutoff_utc(checked_at, retention_days)
+            )
+        )
+        result.snapshots_deleted = deleted.rowcount or 0
+        await session.commit()
+        return result
+
     @staticmethod
     def _record_subscriber_snapshot(session: AsyncSession, channel: Channel, checked_at: datetime) -> None:
         if channel.subscriber_count is None:
@@ -258,6 +330,26 @@ class ChannelProfileService:
                 checked_at=checked_at,
             )
         )
+
+    @staticmethod
+    def _ensure_aware_datetime(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
+
+    @classmethod
+    def _moscow_day_bounds_utc(cls, value: datetime) -> tuple[datetime, datetime]:
+        local_value = cls._ensure_aware_datetime(value).astimezone(MOSCOW_TZ)
+        day_start = datetime.combine(local_value.date(), time.min, tzinfo=MOSCOW_TZ)
+        day_end = day_start + timedelta(days=1)
+        return day_start.astimezone(timezone.utc), day_end.astimezone(timezone.utc)
+
+    @classmethod
+    def _retention_cutoff_utc(cls, value: datetime, retention_days: int) -> datetime:
+        local_value = cls._ensure_aware_datetime(value).astimezone(MOSCOW_TZ)
+        cutoff_date = local_value.date() - timedelta(days=retention_days)
+        cutoff_start = datetime.combine(cutoff_date, time.min, tzinfo=MOSCOW_TZ)
+        return cutoff_start.astimezone(timezone.utc)
 
     async def _get_profile_by_slug(self, session: AsyncSession, slug: str) -> ChannelSettingProfile | None:
         return await session.scalar(

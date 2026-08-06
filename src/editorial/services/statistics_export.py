@@ -13,12 +13,26 @@ from src.core_database.config import BASE_DIR
 from src.editorial.models.channel import Channel, ChannelSubscriberSnapshot
 
 
+MAX_STATISTICS_DELTA_DAYS = 14
+DEFAULT_STATISTICS_DELTA_DAYS = 7
+
+
+def validate_statistics_delta_days(delta_days: int | str) -> int:
+    try:
+        value = int(delta_days)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Delta days must be an integer") from exc
+    if value < 1 or value > MAX_STATISTICS_DELTA_DAYS:
+        raise ValueError(f"Delta days must be from 1 to {MAX_STATISTICS_DELTA_DAYS}")
+    return value
+
+
 @dataclass(slots=True)
 class ChannelStatisticsRow:
     title: str
     tag: str
     subscriber_count: int | None
-    weekly_delta: int | None
+    delta_count: int | None
 
 
 class StatisticsExportService:
@@ -31,10 +45,12 @@ class StatisticsExportService:
         *,
         channel_titles: dict[int, str | None] | None = None,
         channel_tags: dict[int, str | None] | None = None,
+        delta_days: int = DEFAULT_STATISTICS_DELTA_DAYS,
         now: datetime | None = None,
     ) -> Path:
         self.export_dir.mkdir(parents=True, exist_ok=True)
         now = now or datetime.now(timezone.utc)
+        delta_days = validate_statistics_delta_days(delta_days)
         timestamp = now.strftime("%Y%m%d_%H%M%S")
         export_path = self.export_dir / f"channel_statistics_{timestamp}.xlsx"
 
@@ -42,9 +58,10 @@ class StatisticsExportService:
             session,
             channel_titles=channel_titles or {},
             channel_tags=channel_tags or {},
+            delta_days=delta_days,
             now=now,
         )
-        self._write_xlsx(export_path, rows)
+        self._write_xlsx(export_path, rows, delta_days=delta_days)
         return export_path
 
     async def _build_rows(
@@ -53,8 +70,10 @@ class StatisticsExportService:
         *,
         channel_titles: dict[int, str | None],
         channel_tags: dict[int, str | None],
+        delta_days: int,
         now: datetime,
     ) -> list[ChannelStatisticsRow]:
+        delta_days = validate_statistics_delta_days(delta_days)
         channels = list(
             (
                 await session.execute(
@@ -64,19 +83,25 @@ class StatisticsExportService:
                 )
             ).scalars().all()
         )
-        week_ago = now - timedelta(days=7)
         rows: list[ChannelStatisticsRow] = []
 
         for channel in channels:
-            current_count = channel.subscriber_count
-            if current_count is None:
-                latest_snapshot = await self._latest_snapshot(session, channel.id, before=None)
-                current_count = latest_snapshot.subscriber_count if latest_snapshot is not None else None
+            latest_snapshot = await self._latest_snapshot(session, channel.id, before=now)
+            current_count = (
+                latest_snapshot.subscriber_count
+                if latest_snapshot is not None
+                else channel.subscriber_count
+            )
 
-            baseline = await self._latest_snapshot(session, channel.id, before=week_ago)
-            weekly_delta = None
-            if current_count is not None:
-                weekly_delta = current_count - baseline.subscriber_count if baseline is not None else 0
+            delta_count = None
+            if latest_snapshot is not None:
+                baseline = await self._latest_snapshot(
+                    session,
+                    channel.id,
+                    before=latest_snapshot.checked_at - timedelta(days=delta_days),
+                )
+                if baseline is not None:
+                    delta_count = latest_snapshot.subscriber_count - baseline.subscriber_count
 
             title = (
                 channel_titles.get(channel.id)
@@ -90,7 +115,7 @@ class StatisticsExportService:
                     title=title,
                     tag=tag,
                     subscriber_count=current_count,
-                    weekly_delta=weekly_delta,
+                    delta_count=delta_count,
                 )
             )
         return rows
@@ -111,12 +136,24 @@ class StatisticsExportService:
             stmt = stmt.where(ChannelSubscriberSnapshot.checked_at <= before)
         return await session.scalar(stmt)
 
-    def _write_xlsx(self, path: Path, rows: list[ChannelStatisticsRow]) -> None:
+    def _write_xlsx(
+        self,
+        path: Path,
+        rows: list[ChannelStatisticsRow],
+        *,
+        delta_days: int = DEFAULT_STATISTICS_DELTA_DAYS,
+    ) -> None:
+        delta_days = validate_statistics_delta_days(delta_days)
         sheet_rows: list[list[str | int | None]] = [
-            ["Название канала", "Тэг канала", "Подписчики", "Изменение за неделю"],
+            [
+                "\u041d\u0430\u0437\u0432\u0430\u043d\u0438\u0435 \u043a\u0430\u043d\u0430\u043b\u0430",
+                "\u0422\u044d\u0433 \u043a\u0430\u043d\u0430\u043b\u0430",
+                "\u041f\u043e\u0434\u043f\u0438\u0441\u0447\u0438\u043a\u0438",
+                f"\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0435 \u0437\u0430 {delta_days} \u0434\u043d.",
+            ],
         ]
         sheet_rows.extend(
-            [row.title, row.tag, row.subscriber_count, row.weekly_delta]
+            [row.title, row.tag, row.subscriber_count, row.delta_count]
             for row in rows
         )
 
@@ -198,7 +235,7 @@ class StatisticsExportService:
             '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
             'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
-            '<sheets><sheet name="Статистика" sheetId="1" r:id="rId1"/></sheets>'
+            '<sheets><sheet name="\u0421\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043a\u0430" sheetId="1" r:id="rId1"/></sheets>'
             '</workbook>'
         )
 

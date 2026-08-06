@@ -25,6 +25,11 @@ from src.editorial.services.advertising import send_advertising_flow
 from src.editorial.services.db_export import DatabaseExportService
 from src.editorial.services.legacy_source import LegacyCollectorReader
 from src.editorial.services.sql_export import SqlExportService
+from src.editorial.services.statistics_export import (
+    DEFAULT_STATISTICS_DELTA_DAYS,
+    MAX_STATISTICS_DELTA_DAYS,
+    validate_statistics_delta_days,
+)
 from src.editorial.services.telegram_actions import TelegramEditorialActions
 from src.telegram_runtime import calculate_telegram_request_limit
 from src.panel_markups import (
@@ -74,6 +79,7 @@ PANEL_PAGE_SIZE = 10
 class MasterBot:
     def __init__(self, api_token_bot: str):
         self.delayed_task = None
+        self.subscriber_snapshot_task = None
         self.bot_info = None
         self.flag_register_push_message = False
         self.user_states: dict[int, dict[str, Any]] = {}
@@ -373,14 +379,14 @@ class MasterBot:
             if export_path and export_path.exists():
                 export_path.unlink(missing_ok=True)
 
-    async def _send_statistics_export(self, chat_id: int) -> None:
+    async def _send_statistics_export(self, chat_id: int, delta_days: int = DEFAULT_STATISTICS_DELTA_DAYS) -> None:
+        delta_days = validate_statistics_delta_days(delta_days)
         status_message = await self.main_bot.send_message(
             chat_id,
-            "Готовлю выгрузку статистики. Сначала обновлю подписчиков, потом соберу Excel.",
+            f"Готовлю выгрузку статистики с дельтой за {delta_days} дн.",
         )
         export_path = None
         try:
-            sync_result = await self.editorial_actions.sync_channel_profiles()
             channels = await self.editorial_actions.list_channels()
             channel_titles = {
                 channel.id: self._channel_title_from_runtime(channel.tg_channel_id) or channel.title
@@ -393,6 +399,7 @@ class MasterBot:
             export_path = await self.editorial_actions.export_channel_statistics(
                 channel_titles=channel_titles,
                 channel_tags=channel_tags,
+                delta_days=delta_days,
             )
             with export_path.open("rb") as export_file:
                 await self.main_bot.send_document(
@@ -401,9 +408,8 @@ class MasterBot:
                     visible_file_name=export_path.name,
                     caption=(
                         "Статистика каналов готова.\n"
-                        f"Каналов проверено: {sync_result.channels_checked}\n"
-                        f"Подписчики обновлены: {sync_result.subscriber_counts_updated}\n"
-                        f"Ошибок обновления: {sync_result.failed}"
+                        f"Дельта: за {delta_days} дн.\n"
+                        "Счётчики берутся из ежедневных снимков."
                     ),
                 )
         except Exception as ex:
@@ -2057,6 +2063,19 @@ class MasterBot:
             await self._show_channels_menu_for_input(message.chat.id, text_value)
             return True
 
+        if action == "await_statistics_delta_days":
+            try:
+                delta_days = validate_statistics_delta_days(text_value)
+            except ValueError:
+                self._set_user_state(message.chat.id, "await_statistics_delta_days")
+                await self.main_bot.send_message(
+                    message.chat.id,
+                    f"Введите число дней от 1 до {MAX_STATISTICS_DELTA_DAYS}. Например: {DEFAULT_STATISTICS_DELTA_DAYS}",
+                )
+                return True
+            await self._send_statistics_export(message.chat.id, delta_days=delta_days)
+            return True
+
         if action == "await_add_moderator":
             try:
                 user_id = int(text_value)
@@ -2705,6 +2724,33 @@ class MasterBot:
             await self.__send_post(delayed_posts)
             await asyncio.sleep(poll_interval)
 
+    @staticmethod
+    def _next_subscriber_snapshot_run_at(now_msk: datetime) -> datetime:
+        next_run = now_msk.replace(hour=2, minute=0, second=0, microsecond=0)
+        if now_msk >= next_run:
+            next_run += timedelta(days=1)
+        return next_run
+
+    @logger.catch
+    async def __subscriber_snapshot_scheduler(self) -> None:
+        while True:
+            now_msk = datetime.now(ZoneInfo("Europe/Moscow"))
+            next_run = self._next_subscriber_snapshot_run_at(now_msk)
+            await asyncio.sleep(max((next_run - now_msk).total_seconds(), 1))
+
+            try:
+                result = await self.editorial_actions.record_daily_subscriber_snapshots()
+                logger.info(
+                    "Daily subscriber snapshots finished: checked={}, updated={}, recorded={}, deleted={}, failed={}",
+                    result.channels_checked,
+                    result.subscriber_counts_updated,
+                    result.snapshots_recorded,
+                    result.snapshots_deleted,
+                    result.failed,
+                )
+            except Exception as ex:
+                logger.exception("Failed to record daily subscriber snapshots: {}", ex)
+
     @logger.catch
     async def callback_adv_send_message(self, call: CallbackQuery, channel_username: str, info_sender: User) -> None:
         text_adv = call.message.text if call.message.text is not None else call.message.caption
@@ -2927,7 +2973,15 @@ class MasterBot:
                         return
                     case "stats_export":
                         await self._safe_answer_callback(self.main_bot, call.id)
-                        await self._send_statistics_export(call.message.chat.id)
+                        self._set_user_state(call.message.chat.id, "await_statistics_delta_days")
+                        await self.main_bot.send_message(
+                            call.message.chat.id,
+                            (
+                                "Введите количество дней для расчёта дельты "
+                                f"от 1 до {MAX_STATISTICS_DELTA_DAYS}.\n"
+                                f"Например: {DEFAULT_STATISTICS_DELTA_DAYS}"
+                            ),
+                        )
                         return
                     case "sql_export":
                         await self._safe_answer_callback(self.main_bot, call.id)
@@ -3754,6 +3808,8 @@ class MasterBot:
                             channel_id,
                         )
             self.delayed_task = asyncio.create_task(self.__delayed_posts_checker())
+            if self.subscriber_snapshot_task is None or self.subscriber_snapshot_task.done():
+                self.subscriber_snapshot_task = asyncio.create_task(self.__subscriber_snapshot_scheduler())
             await self.main_bot.polling(none_stop=True)
         except Exception as ex:
             logger.error("bot: @{}, mistake: {}", self.bot_info.username if self.bot_info else "unknown", ex)

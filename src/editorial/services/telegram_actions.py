@@ -1421,6 +1421,10 @@ class TelegramEditorialActions:
         async with session_factory() as session:
             return await self.channel_profile_service.sync_profiles_by_subscribers(session, channel_id=channel_id)
 
+    async def record_daily_subscriber_snapshots(self):
+        async with session_factory() as session:
+            return await self.channel_profile_service.record_daily_subscriber_snapshots(session)
+
     async def list_channel_setting_profiles(self, include_inactive: bool = False):
         async with session_factory() as session:
             return await self.channel_profile_service.list_profiles(session, include_inactive=include_inactive)
@@ -1509,12 +1513,14 @@ class TelegramEditorialActions:
         *,
         channel_titles: dict[int, str | None] | None = None,
         channel_tags: dict[int, str | None] | None = None,
+        delta_days: int = 7,
     ):
         async with session_factory() as session:
             return await self.statistics_export_service.export_channel_statistics(
                 session,
                 channel_titles=channel_titles,
                 channel_tags=channel_tags,
+                delta_days=delta_days,
             )
 
     async def run_publisher(self):

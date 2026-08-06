@@ -1,4 +1,4 @@
-from datetime import time
+from datetime import datetime, time, timezone
 
 from src.editorial.models.channel import Channel, ChannelSettingProfile
 from src.editorial.services.channel_profile_service import ChannelProfileService
@@ -100,3 +100,14 @@ def test_profile_settings_match_detects_changed_profile_values() -> None:
     profile = _profile("growing", 50, 999, id=42, min_slots_per_day=3, max_posts_per_day=6)
 
     assert not ChannelProfileService._profile_settings_match(channel, profile)
+
+
+def test_subscriber_snapshot_moscow_day_bounds_and_retention_cutoff() -> None:
+    checked_at = datetime(2026, 8, 6, 23, 30, tzinfo=timezone.utc)
+
+    day_start, day_end = ChannelProfileService._moscow_day_bounds_utc(checked_at)
+    cutoff = ChannelProfileService._retention_cutoff_utc(checked_at, 14)
+
+    assert day_start == datetime(2026, 8, 6, 21, 0, tzinfo=timezone.utc)
+    assert day_end == datetime(2026, 8, 7, 21, 0, tzinfo=timezone.utc)
+    assert cutoff == datetime(2026, 7, 23, 21, 0, tzinfo=timezone.utc)
