@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import aiohttp
 
 from telebot.async_telebot import AsyncTeleBot, asyncio_helper
 
 from config import settings as legacy_settings
+
+
+@dataclass(slots=True)
+class TelegramChatInfo:
+    title: str | None = None
+    tag: str | None = None
 
 
 class TelegramPublisherAdapter:
@@ -35,12 +43,17 @@ class TelegramPublisherAdapter:
         return int(message.message_id)
 
     async def get_chat_tag(self, bot_token: str, channel_id: int) -> str | None:
+        return (await self.get_chat_info(bot_token=bot_token, channel_id=channel_id)).tag
+
+    async def get_chat_info(self, bot_token: str, channel_id: int) -> TelegramChatInfo:
         bot = AsyncTeleBot(bot_token)
         chat = await bot.get_chat(channel_id)
+        title = getattr(chat, "title", None)
         username = getattr(chat, "username", None)
-        if username:
-            return f"@{username}"
-        return None
+        return TelegramChatInfo(
+            title=title,
+            tag=f"@{username}" if username else None,
+        )
 
     async def send_text_with_entities(
         self,

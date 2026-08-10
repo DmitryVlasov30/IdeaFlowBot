@@ -1381,8 +1381,8 @@ class TelegramEditorialActions:
                         binding.bot_api_token,
                         channel,
                     )
-                    channel_signature = (
-                        await self.publisher.resolve_channel_signature(
+                    channel_publication_signature = (
+                        await self.publisher.resolve_channel_publication_signature(
                             binding.bot_api_token,
                             channel,
                         )
@@ -1395,7 +1395,16 @@ class TelegramEditorialActions:
                         text=self.publisher.format_publication_text(
                             cleaned_body,
                             channel,
-                            channel_signature=channel_signature,
+                            channel_signature=(
+                                channel_publication_signature.ref
+                                if channel_publication_signature
+                                else None
+                            ),
+                            channel_title=(
+                                channel_publication_signature.title
+                                if channel_publication_signature
+                                else None
+                            ),
                             add_channel_signature=add_channel_signature,
                         ),
                         parse_mode=self.publisher.channel_signature_parse_mode(add_channel_signature),

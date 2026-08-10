@@ -1,4 +1,6 @@
 from src.editorial.models.channel import Channel
+from src.editorial.models.content import ContentItem
+from src.editorial.models.enums import ContentSourceType
 from src.editorial.services.publisher import PublisherService
 from src.editorial.services.publication_signature import (
     channel_publication_signature_html,
@@ -7,6 +9,7 @@ from src.editorial.services.publication_signature import (
     publication_signature_html,
     should_add_publication_signature,
 )
+from src.editorial.services.telegram_publisher import TelegramChatInfo
 import src.editorial.services.publication_signature as signature_service
 
 import pytest
@@ -39,6 +42,18 @@ def test_channel_publication_signature_escapes_title() -> None:
 
     assert channel_publication_signature_html(channel, "@MIITrussia") == (
         '<a href="https://t.me/MIITrussia"><i>Подслушано &lt;РУТ&gt;</i></a>'
+    )
+
+
+def test_channel_publication_signature_can_use_resolved_title() -> None:
+    channel = Channel(
+        tg_channel_id=-1001,
+        short_code="orenspu_bot",
+        title="orenspu_bot",
+    )
+
+    assert channel_publication_signature_html(channel, "@orenspu", title="Oren SPU") == (
+        '<a href="https://t.me/orenspu"><i>Oren SPU</i></a>'
     )
 
 
@@ -104,3 +119,42 @@ async def test_should_add_publication_signature_keeps_signature_when_skip_bot_is
     monkeypatch.setattr(signature_service, "channel_has_signature_skip_bot", fake_channel_has_signature_skip_bot)
 
     assert await should_add_publication_signature(bot_token="token", channel_id=-1001) is True
+
+
+@pytest.mark.asyncio
+async def test_publisher_uses_resolved_channel_title_for_signature(monkeypatch) -> None:
+    monkeypatch.setenv("PUBLICATION_SIGNATURE_ENABLED", "true")
+    monkeypatch.delenv("PUBLICATION_SIGNATURE_SKIP_IF_ADMIN_BOT_USERNAME", raising=False)
+
+    class FakeAdapter:
+        def __init__(self) -> None:
+            self.sent_text: str | None = None
+
+        async def get_chat_info(self, bot_token: str, channel_id: int) -> TelegramChatInfo:
+            return TelegramChatInfo(title="Oren SPU", tag="@orenspu")
+
+        async def send_text(
+            self,
+            bot_token: str,
+            channel_id: int,
+            text: str,
+            parse_mode: str | None = None,
+            disable_web_page_preview: bool | None = None,
+        ) -> int:
+            self.sent_text = text
+            assert parse_mode == "HTML"
+            assert disable_web_page_preview is True
+            return 123
+
+    adapter = FakeAdapter()
+    service = PublisherService(telegram_adapter=adapter)
+    channel = Channel(tg_channel_id=-1001, short_code="orenspu_bot", title="orenspu_bot")
+    item = ContentItem(
+        channel_id=1,
+        source_type=ContentSourceType.EDITORIAL,
+        origin_submission_id=None,
+        body_text="Question",
+    )
+
+    assert await service._publish_submission_based_item(None, item, channel, "token") == 123
+    assert adapter.sent_text == 'Question\n\n<a href="https://t.me/orenspu"><i>Oren SPU</i></a>'

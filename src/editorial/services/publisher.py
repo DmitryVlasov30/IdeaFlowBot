@@ -34,6 +34,12 @@ class PublisherRunResult:
     failed: int = 0
 
 
+@dataclass(slots=True)
+class ChannelPublicationSignature:
+    title: str | None
+    ref: str | None
+
+
 class PublisherService:
     def __init__(
         self,
@@ -69,6 +75,27 @@ class PublisherService:
             resolved_tag = None
         return self._channel_signature(channel, resolved_tag)
 
+    async def resolve_channel_publication_signature(
+        self,
+        bot_token: str,
+        channel: Channel,
+    ) -> ChannelPublicationSignature:
+        try:
+            chat_info = await self.telegram_adapter.get_chat_info(
+                bot_token=bot_token,
+                channel_id=channel.tg_channel_id,
+            )
+        except Exception as ex:
+            logger.warning("Failed to resolve Telegram chat info for channel {}: {}", channel.id, ex)
+            return ChannelPublicationSignature(
+                title=channel.title,
+                ref=self._channel_signature(channel, None),
+            )
+        return ChannelPublicationSignature(
+            title=chat_info.title or channel.title,
+            ref=self._channel_signature(channel, chat_info.tag),
+        )
+
     @staticmethod
     def publication_parse_mode() -> str | None:
         return "HTML" if publication_signature_enabled() else None
@@ -89,6 +116,7 @@ class PublisherService:
         channel: Channel,
         submission: Submission | None = None,
         channel_signature: str | None = None,
+        channel_title: str | None = None,
         add_channel_signature: bool = True,
     ) -> str:
         parts: list[str] = []
@@ -99,7 +127,11 @@ class PublisherService:
             parts.append(self._submission_author_signature(submission))
         if not publication_signature_enabled() or not add_channel_signature:
             return "\n\n".join(parts)
-        signature_html = channel_publication_signature_html(channel, channel_signature)
+        signature_html = channel_publication_signature_html(
+            channel,
+            channel_signature,
+            title=channel_title,
+        )
         return format_publication_html(
             "\n\n".join(parts),
             signature_html=signature_html,
@@ -162,11 +194,13 @@ class PublisherService:
         bot_token: str,
     ) -> int:
         add_channel_signature = await self.should_add_channel_signature(bot_token, channel)
-        channel_signature = (
-            await self.resolve_channel_signature(bot_token, channel)
+        channel_publication_signature = (
+            await self.resolve_channel_publication_signature(bot_token, channel)
             if add_channel_signature
             else None
         )
+        channel_signature = channel_publication_signature.ref if channel_publication_signature else None
+        channel_title = channel_publication_signature.title if channel_publication_signature else None
         parse_mode = self.channel_signature_parse_mode(add_channel_signature)
         if content_item.origin_submission_id is None:
             return await self.telegram_adapter.send_text(
@@ -176,6 +210,7 @@ class PublisherService:
                     content_item.body_text,
                     channel,
                     channel_signature=channel_signature,
+                    channel_title=channel_title,
                     add_channel_signature=add_channel_signature,
                 ),
                 parse_mode=parse_mode,
@@ -232,6 +267,7 @@ class PublisherService:
                             channel,
                             submission,
                             channel_signature=channel_signature,
+                            channel_title=channel_title,
                             add_channel_signature=add_channel_signature,
                         )
                         if index == 0
@@ -262,6 +298,7 @@ class PublisherService:
                         channel,
                         submission,
                         channel_signature=channel_signature,
+                        channel_title=channel_title,
                         add_channel_signature=add_channel_signature,
                     ),
                     parse_mode=parse_mode,
@@ -288,6 +325,7 @@ class PublisherService:
                     channel,
                     submission,
                     channel_signature=channel_signature,
+                    channel_title=channel_title,
                     add_channel_signature=add_channel_signature,
                 ),
                 parse_mode=parse_mode,
@@ -302,6 +340,7 @@ class PublisherService:
                 channel,
                 submission,
                 channel_signature=channel_signature,
+                channel_title=channel_title,
                 add_channel_signature=add_channel_signature,
             )
             telegram_message_id = await self.telegram_adapter.send_text(
@@ -322,6 +361,7 @@ class PublisherService:
                 channel,
                 submission,
                 channel_signature=channel_signature,
+                channel_title=channel_title,
                 add_channel_signature=add_channel_signature,
             ),
             parse_mode=parse_mode,

@@ -100,9 +100,13 @@ def publication_signature_html(*, title: str | None, channel_ref: str | None) ->
     return f'<a href="{escape(url, quote=True)}">{label}</a>'
 
 
-def channel_publication_signature_html(channel: Channel, channel_ref: str | None = None) -> str:
+def channel_publication_signature_html(
+    channel: Channel,
+    channel_ref: str | None = None,
+    title: str | None = None,
+) -> str:
     fallback_ref = channel_ref or channel.short_code
-    return publication_signature_html(title=channel.title, channel_ref=fallback_ref)
+    return publication_signature_html(title=title or channel.title, channel_ref=fallback_ref)
 
 
 def format_publication_html(
