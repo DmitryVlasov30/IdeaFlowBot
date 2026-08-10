@@ -375,6 +375,7 @@ class MarkupButton:
                         chat_id=channel_id,
                         text=format_publication_html(call.message.text, signature_html=signature_html),
                         parse_mode="HTML",
+                        disable_web_page_preview=True,
                         reply_markup=markup_post,
                     )
                 else:

@@ -179,6 +179,7 @@ class PublisherService:
                     add_channel_signature=add_channel_signature,
                 ),
                 parse_mode=parse_mode,
+                disable_web_page_preview=add_channel_signature,
             )
 
         submission = await session.get(Submission, content_item.origin_submission_id)
@@ -308,6 +309,7 @@ class PublisherService:
                 channel_id=channel.tg_channel_id,
                 text=text_to_send,
                 parse_mode=parse_mode,
+                disable_web_page_preview=add_channel_signature,
             )
             logger.info("Published content item {} via send_text from source text", content_item.id)
             return telegram_message_id
@@ -323,6 +325,7 @@ class PublisherService:
                 add_channel_signature=add_channel_signature,
             ),
             parse_mode=parse_mode,
+            disable_web_page_preview=add_channel_signature,
         )
         logger.info(
             "Published content item {} via plain send_text fallback",

@@ -1018,6 +1018,7 @@ class SubBot:
                     chat_id=self.channel_id,
                     text=format_publication_html(source_text, signature_html=signature_html),
                     parse_mode="HTML",
+                    disable_web_page_preview=True,
                     reply_markup=markup,
                 )
             else:

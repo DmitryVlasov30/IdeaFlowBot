@@ -17,9 +17,21 @@ class TelegramPublisherAdapter:
         if proxy:
             asyncio_helper.proxy = proxy
 
-    async def send_text(self, bot_token: str, channel_id: int, text: str, parse_mode: str | None = None) -> int:
+    async def send_text(
+        self,
+        bot_token: str,
+        channel_id: int,
+        text: str,
+        parse_mode: str | None = None,
+        disable_web_page_preview: bool | None = None,
+    ) -> int:
         bot = AsyncTeleBot(bot_token)
-        message = await bot.send_message(chat_id=channel_id, text=text, parse_mode=parse_mode)
+        message = await bot.send_message(
+            chat_id=channel_id,
+            text=text,
+            parse_mode=parse_mode,
+            disable_web_page_preview=disable_web_page_preview,
+        )
         return int(message.message_id)
 
     async def get_chat_tag(self, bot_token: str, channel_id: int) -> str | None:
@@ -36,12 +48,15 @@ class TelegramPublisherAdapter:
         channel_id: int,
         text: str,
         entities: list[dict],
+        disable_web_page_preview: bool | None = None,
     ) -> int:
         payload = {
             "chat_id": channel_id,
             "text": text,
             "entities": entities,
         }
+        if disable_web_page_preview is not None:
+            payload["disable_web_page_preview"] = disable_web_page_preview
         request_kwargs = {}
         proxy = None
         try:

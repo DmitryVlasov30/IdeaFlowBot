@@ -1399,6 +1399,7 @@ class TelegramEditorialActions:
                             add_channel_signature=add_channel_signature,
                         ),
                         parse_mode=self.publisher.channel_signature_parse_mode(add_channel_signature),
+                        disable_web_page_preview=add_channel_signature,
                     )
                 except Exception as ex:
                     item.status = ContentItemStatus.HOLD
