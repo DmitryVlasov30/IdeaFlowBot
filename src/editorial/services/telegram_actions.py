@@ -1377,9 +1377,17 @@ class TelegramEditorialActions:
                     continue
 
                 try:
-                    channel_signature = await self.publisher.resolve_channel_signature(
+                    add_channel_signature = await self.publisher.should_add_channel_signature(
                         binding.bot_api_token,
                         channel,
+                    )
+                    channel_signature = (
+                        await self.publisher.resolve_channel_signature(
+                            binding.bot_api_token,
+                            channel,
+                        )
+                        if add_channel_signature
+                        else None
                     )
                     telegram_message_id = await self.publisher.telegram_adapter.send_text(
                         bot_token=binding.bot_api_token,
@@ -1388,8 +1396,9 @@ class TelegramEditorialActions:
                             cleaned_body,
                             channel,
                             channel_signature=channel_signature,
+                            add_channel_signature=add_channel_signature,
                         ),
-                        parse_mode=self.publisher.publication_parse_mode(),
+                        parse_mode=self.publisher.channel_signature_parse_mode(add_channel_signature),
                     )
                 except Exception as ex:
                     item.status = ContentItemStatus.HOLD

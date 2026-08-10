@@ -270,6 +270,7 @@ Publisher берёт записи со статусом `scheduled` и:
 - находит bot token через legacy `bots_data`;
 - отправляет текст в Telegram канал;
 - если `PUBLICATION_SIGNATURE_ENABLED=true`, добавляет в конец публикации кликабельную подпись канала со ссылкой на публичный `t.me`;
+- если `PUBLICATION_SIGNATURE_SKIP_IF_ADMIN_BOT_USERNAME` заполнен и этот бот уже является админом канала, подпись канала для публикации не добавляется;
 - при успехе ставит:
   - `content_item -> published`
   - `publication_log -> sent`

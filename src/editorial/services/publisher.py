@@ -21,6 +21,7 @@ from src.editorial.services.publication_signature import (
     channel_publication_signature_html,
     format_publication_html,
     publication_signature_enabled,
+    should_add_publication_signature,
 )
 from src.editorial.services.telegram_publisher import TelegramPublisherAdapter
 from src.editorial.utils.text import clean_text
@@ -72,12 +73,23 @@ class PublisherService:
     def publication_parse_mode() -> str | None:
         return "HTML" if publication_signature_enabled() else None
 
+    @staticmethod
+    def channel_signature_parse_mode(add_channel_signature: bool) -> str | None:
+        return "HTML" if add_channel_signature else None
+
+    async def should_add_channel_signature(self, bot_token: str, channel: Channel) -> bool:
+        return await should_add_publication_signature(
+            bot_token=bot_token,
+            channel_id=int(channel.tg_channel_id),
+        )
+
     def format_publication_text(
         self,
         text: str | None,
         channel: Channel,
         submission: Submission | None = None,
         channel_signature: str | None = None,
+        add_channel_signature: bool = True,
     ) -> str:
         parts: list[str] = []
         cleaned_text = (text or "").strip()
@@ -85,7 +97,7 @@ class PublisherService:
             parts.append(cleaned_text)
         if submission is not None and not submission.is_anonymous:
             parts.append(self._submission_author_signature(submission))
-        if not publication_signature_enabled():
+        if not publication_signature_enabled() or not add_channel_signature:
             return "\n\n".join(parts)
         signature_html = channel_publication_signature_html(channel, channel_signature)
         return format_publication_html(
@@ -149,7 +161,13 @@ class PublisherService:
         channel: Channel,
         bot_token: str,
     ) -> int:
-        channel_signature = await self.resolve_channel_signature(bot_token, channel)
+        add_channel_signature = await self.should_add_channel_signature(bot_token, channel)
+        channel_signature = (
+            await self.resolve_channel_signature(bot_token, channel)
+            if add_channel_signature
+            else None
+        )
+        parse_mode = self.channel_signature_parse_mode(add_channel_signature)
         if content_item.origin_submission_id is None:
             return await self.telegram_adapter.send_text(
                 bot_token=bot_token,
@@ -158,8 +176,9 @@ class PublisherService:
                     content_item.body_text,
                     channel,
                     channel_signature=channel_signature,
+                    add_channel_signature=add_channel_signature,
                 ),
-                parse_mode=self.publication_parse_mode(),
+                parse_mode=parse_mode,
             )
 
         submission = await session.get(Submission, content_item.origin_submission_id)
@@ -212,11 +231,12 @@ class PublisherService:
                             channel,
                             submission,
                             channel_signature=channel_signature,
+                            add_channel_signature=add_channel_signature,
                         )
                         if index == 0
                         else None
                     ),
-                    parse_mode=self.publication_parse_mode(),
+                    parse_mode=parse_mode,
                 )
                 if first_message_id is None:
                     first_message_id = copied_id
@@ -241,8 +261,9 @@ class PublisherService:
                         channel,
                         submission,
                         channel_signature=channel_signature,
+                        add_channel_signature=add_channel_signature,
                     ),
-                    parse_mode=self.publication_parse_mode(),
+                    parse_mode=parse_mode,
                 )
                 logger.info(
                     "Published content item {} via copy_message from {}:{}",
@@ -266,8 +287,9 @@ class PublisherService:
                     channel,
                     submission,
                     channel_signature=channel_signature,
+                    add_channel_signature=add_channel_signature,
                 ),
-                parse_mode=self.publication_parse_mode(),
+                parse_mode=parse_mode,
             )
 
         source_text = self._get_related_submission_source_text(related_rows)
@@ -279,12 +301,13 @@ class PublisherService:
                 channel,
                 submission,
                 channel_signature=channel_signature,
+                add_channel_signature=add_channel_signature,
             )
             telegram_message_id = await self.telegram_adapter.send_text(
                 bot_token=bot_token,
                 channel_id=channel.tg_channel_id,
                 text=text_to_send,
-                parse_mode=self.publication_parse_mode(),
+                parse_mode=parse_mode,
             )
             logger.info("Published content item {} via send_text from source text", content_item.id)
             return telegram_message_id
@@ -297,8 +320,9 @@ class PublisherService:
                 channel,
                 submission,
                 channel_signature=channel_signature,
+                add_channel_signature=add_channel_signature,
             ),
-            parse_mode=self.publication_parse_mode(),
+            parse_mode=parse_mode,
         )
         logger.info(
             "Published content item {} via plain send_text fallback",

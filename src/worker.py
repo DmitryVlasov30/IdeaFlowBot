@@ -19,8 +19,8 @@ from src.editorial.services.legacy_moderation_sync import LegacyModerationSyncSe
 from src.editorial.services.legacy_publication_guard import LegacyPublicationGuard
 from src.editorial.services.publication_signature import (
     format_publication_html,
-    publication_signature_enabled,
     publication_signature_html,
+    should_add_publication_signature,
 )
 from src.legacy_delayed import delayed_publication_matches
 from src.utils import Utils, filter_chats
@@ -988,7 +988,12 @@ class SubBot:
                 markup = InlineKeyboardMarkup()
                 markup.add(button)
 
-        if not publication_signature_enabled():
+        add_signature = await should_add_publication_signature(
+            bot_token=self.sup_bot.token,
+            channel_id=int(self.channel_id),
+        )
+
+        if not add_signature:
             copied_message = await self.sup_bot.copy_message(
                 from_chat_id=self.chat_suggest,
                 chat_id=self.channel_id,

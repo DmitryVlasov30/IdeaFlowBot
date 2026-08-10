@@ -5,8 +5,8 @@ from loguru import logger
 
 from src.editorial.services.publication_signature import (
     format_publication_html,
-    publication_signature_enabled,
     publication_signature_html,
+    should_add_publication_signature,
 )
 from src.utils import Utils
 from config import settings
@@ -353,7 +353,12 @@ class MarkupButton:
                 )
                 markup_post.add(info_post_sender)
 
-            if not publication_signature_enabled():
+            add_signature = await should_add_publication_signature(
+                bot_token=self.bot.token,
+                channel_id=int(channel_id),
+            )
+
+            if not add_signature:
                 await self.bot.copy_message(
                     chat_id=channel_id,
                     from_chat_id=call.message.chat.id,

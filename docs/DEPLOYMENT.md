@@ -107,6 +107,7 @@ python -m src.editorial.cli generate --channel-id 1
 
 - `BOT_API_TOKEN`
 - `GENERAL_ADMIN`
+- `PUBLICATION_SIGNATURE_SKIP_IF_ADMIN_BOT_USERNAME`, если подпись нужно отключать в каналах, где уже админит отдельный бот подписей
 - `EDITORIAL_POSTGRES_DSN`
 - `EDITORIAL_REVIEW_API_KEY`
 - `OPENROUTER_API_KEY`, если нужен OpenRouter
