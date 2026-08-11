@@ -5,6 +5,7 @@ from src.editorial.services.publisher import PublisherService
 from src.editorial.services.publication_signature import (
     channel_publication_signature_html,
     format_publication_html,
+    public_channel_url,
     publication_signature_skip_bot_username,
     publication_signature_html,
     should_add_publication_signature,
@@ -31,6 +32,10 @@ def test_format_publication_html_appends_signature_after_blank_line() -> None:
         "Как проходят семинары у Стоюхина?\n\n"
         '<a href="https://t.me/MIITrussia"><i>Подслушано РУТ МИИТ</i></a>'
     )
+
+
+def test_public_channel_url_accepts_private_invite_links() -> None:
+    assert public_channel_url("https://t.me/+abc123") == "https://t.me/+abc123"
 
 
 def test_channel_publication_signature_escapes_title() -> None:
@@ -158,3 +163,42 @@ async def test_publisher_uses_resolved_channel_title_for_signature(monkeypatch) 
 
     assert await service._publish_submission_based_item(None, item, channel, "token") == 123
     assert adapter.sent_text == 'Question\n\n<a href="https://t.me/orenspu"><i>Oren SPU</i></a>'
+
+
+@pytest.mark.asyncio
+async def test_publisher_uses_invite_link_when_channel_has_no_public_username(monkeypatch) -> None:
+    monkeypatch.setenv("PUBLICATION_SIGNATURE_ENABLED", "true")
+    monkeypatch.delenv("PUBLICATION_SIGNATURE_SKIP_IF_ADMIN_BOT_USERNAME", raising=False)
+
+    class FakeAdapter:
+        def __init__(self) -> None:
+            self.sent_text: str | None = None
+
+        async def get_chat_info(self, bot_token: str, channel_id: int) -> TelegramChatInfo:
+            return TelegramChatInfo(title="Podslushano SZU", invite_link="https://t.me/+privateLink")
+
+        async def send_text(
+            self,
+            bot_token: str,
+            channel_id: int,
+            text: str,
+            parse_mode: str | None = None,
+            disable_web_page_preview: bool | None = None,
+        ) -> int:
+            self.sent_text = text
+            return 123
+
+    adapter = FakeAdapter()
+    service = PublisherService(telegram_adapter=adapter)
+    channel = Channel(tg_channel_id=-1001, short_code="szu_bot", title="szu_bot")
+    item = ContentItem(
+        channel_id=1,
+        source_type=ContentSourceType.EDITORIAL,
+        origin_submission_id=None,
+        body_text="Question",
+    )
+
+    assert await service._publish_submission_based_item(None, item, channel, "token") == 123
+    assert adapter.sent_text == (
+        'Question\n\n<a href="https://t.me/+privateLink"><i>Podslushano SZU</i></a>'
+    )

@@ -75,6 +75,7 @@ class SubBot:
 
         self.token = api_token_bot
         self.channel_username = channel_username
+        self.channel_signature_ref = channel_username
         self.sup_bot = AsyncTeleBot(self.token)
         self.users_data = set()
 
@@ -151,6 +152,9 @@ class SubBot:
         channel_username = getattr(channel_chat, "username", None)
         if channel_username:
             self.channel_username = f"@{channel_username}"
+            self.channel_signature_ref = self.channel_username
+        else:
+            self.channel_signature_ref = getattr(channel_chat, "invite_link", None) or self.channel_username
         self.chat_suggest = await self._refresh_chat_suggest()
         logger.info(f"{self.chat_suggest}")
         users = await self.user_database.get_user_data(bot_username=self.bot_info.username)
@@ -561,7 +565,7 @@ class SubBot:
                     )
                     legacy_sent = await buttons_func.send_suggest(
                         call,
-                        self.channel_username,
+                        self.channel_signature_ref,
                         self.channel_id,
                         is_anon,
                         self.channel_title,
@@ -1003,7 +1007,7 @@ class SubBot:
         else:
             signature_html = publication_signature_html(
                 title=self.channel_title,
-                channel_ref=self.channel_username,
+                channel_ref=self.channel_signature_ref,
             )
             legacy_row = await self.legacy_moderation_sync.legacy_reader.find_sender_row_by_review_message(
                 channel_id=self.channel_id,

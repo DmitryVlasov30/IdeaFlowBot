@@ -13,6 +13,7 @@ from config import settings as legacy_settings
 class TelegramChatInfo:
     title: str | None = None
     tag: str | None = None
+    invite_link: str | None = None
 
 
 class TelegramPublisherAdapter:
@@ -50,9 +51,11 @@ class TelegramPublisherAdapter:
         chat = await bot.get_chat(channel_id)
         title = getattr(chat, "title", None)
         username = getattr(chat, "username", None)
+        invite_link = getattr(chat, "invite_link", None)
         return TelegramChatInfo(
             title=title,
             tag=f"@{username}" if username else None,
+            invite_link=invite_link,
         )
 
     async def send_text_with_entities(

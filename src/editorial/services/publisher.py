@@ -93,7 +93,7 @@ class PublisherService:
             )
         return ChannelPublicationSignature(
             title=chat_info.title or channel.title,
-            ref=self._channel_signature(channel, chat_info.tag),
+            ref=self._channel_signature(channel, chat_info.tag or chat_info.invite_link),
         )
 
     @staticmethod
