@@ -7,6 +7,8 @@ import aiohttp
 from telebot.async_telebot import AsyncTeleBot, asyncio_helper
 
 from config import settings as legacy_settings
+from src.editorial.config import settings
+from src.editorial.services.telegram_resilience import TelegramAPIError, run_telegram_operation
 
 
 @dataclass(slots=True)
@@ -35,11 +37,14 @@ class TelegramPublisherAdapter:
         disable_web_page_preview: bool | None = None,
     ) -> int:
         bot = AsyncTeleBot(bot_token)
-        message = await bot.send_message(
-            chat_id=channel_id,
-            text=text,
-            parse_mode=parse_mode,
-            disable_web_page_preview=disable_web_page_preview,
+        message = await run_telegram_operation(
+            bot.send_message(
+                chat_id=channel_id,
+                text=text,
+                parse_mode=parse_mode,
+                disable_web_page_preview=disable_web_page_preview,
+            ),
+            operation="sendMessage",
         )
         return int(message.message_id)
 
@@ -48,7 +53,10 @@ class TelegramPublisherAdapter:
 
     async def get_chat_info(self, bot_token: str, channel_id: int) -> TelegramChatInfo:
         bot = AsyncTeleBot(bot_token)
-        chat = await bot.get_chat(channel_id)
+        chat = await run_telegram_operation(
+            bot.get_chat(channel_id),
+            operation="getChat",
+        )
         title = getattr(chat, "title", None)
         username = getattr(chat, "username", None)
         invite_link = getattr(chat, "invite_link", None)
@@ -83,11 +91,19 @@ class TelegramPublisherAdapter:
             request_kwargs["proxy"] = proxy
 
         url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, **request_kwargs) as response:
-                result = await response.json()
+        timeout = aiohttp.ClientTimeout(total=settings.telegram_request_timeout_seconds)
+
+        async def request() -> dict:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, json=payload, **request_kwargs) as response:
+                    return await response.json()
+
+        result = await run_telegram_operation(
+            request(),
+            operation="sendMessageWithEntities",
+        )
         if not result.get("ok"):
-            raise RuntimeError(result.get("description", str(result)))
+            raise TelegramAPIError(result)
         return int(result["result"]["message_id"])
 
     async def copy_message(
@@ -100,12 +116,15 @@ class TelegramPublisherAdapter:
         parse_mode: str | None = None,
     ) -> int:
         bot = AsyncTeleBot(bot_token)
-        message = await bot.copy_message(
-            chat_id=channel_id,
-            from_chat_id=from_chat_id,
-            message_id=message_id,
-            caption=caption,
-            parse_mode=parse_mode,
+        message = await run_telegram_operation(
+            bot.copy_message(
+                chat_id=channel_id,
+                from_chat_id=from_chat_id,
+                message_id=message_id,
+                caption=caption,
+                parse_mode=parse_mode,
+            ),
+            operation="copyMessage",
         )
         return int(message.message_id)
 
@@ -139,11 +158,19 @@ class TelegramPublisherAdapter:
             request_kwargs["proxy"] = proxy
 
         url = f"https://api.telegram.org/bot{bot_token}/copyMessages"
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, **request_kwargs) as response:
-                result = await response.json()
+        timeout = aiohttp.ClientTimeout(total=settings.telegram_request_timeout_seconds)
+
+        async def request() -> dict:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, json=payload, **request_kwargs) as response:
+                    return await response.json()
+
+        result = await run_telegram_operation(
+            request(),
+            operation="copyMessages",
+        )
         if not result.get("ok"):
-            raise RuntimeError(result.get("description", str(result)))
+            raise TelegramAPIError(result)
 
         copied_items = result.get("result") or []
         if not copied_items:

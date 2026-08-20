@@ -330,7 +330,7 @@ class MarkupButton:
             reply_markup=markup
         )
 
-    @logger.catch
+    @logger.catch(reraise=True)
     async def send_suggest(self, call, channel_username, channel_id, is_anon, channel_title=None):
         try:
             markup_post = None
@@ -387,16 +387,29 @@ class MarkupButton:
                         parse_mode="HTML",
                         reply_markup=markup_post,
                     )
-            await self.bot.edit_message_reply_markup(
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                reply_markup=markup,
-            )
+            # The channel publication has already succeeded at this point. A
+            # temporary failure while updating the moderation markup must not
+            # turn that success into a delayed retry and duplicate the post.
+            try:
+                await self.bot.edit_message_reply_markup(
+                    chat_id=call.message.chat.id,
+                    message_id=call.message.message_id,
+                    reply_markup=markup,
+                )
+            except Exception as markup_ex:
+                logger.warning(
+                    "Post was published, but moderation markup update failed: {}",
+                    markup_ex,
+                )
             logger.info("send post success")
             return True
         except Exception as ex:
             logger.error(ex)
-            await self.bot.send_message(chat_id=call.message.chat.id, text=f"Произошла ошибка при обработки: {ex}")
+            try:
+                await self.bot.send_message(chat_id=call.message.chat.id, text=f"Произошла ошибка при обработки: {ex}")
+            except Exception as notify_ex:
+                logger.debug("Failed to notify moderator about publication error: {}", notify_ex)
+            raise
 
     @logger.catch
     async def add_ban_user(self, call: CallbackQuery, ban_database, channel_id, bot_info, chat_suggest):

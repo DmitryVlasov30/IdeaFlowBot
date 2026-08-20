@@ -1,0 +1,107 @@
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+
+from src.editorial.models.channel import Channel
+from src.editorial.models.content import ContentItem
+from src.editorial.models.enums import ContentItemStatus, ContentSourceType, PublicationStatus
+from src.editorial.models.publication import PublicationLog
+from src.editorial.services.publisher import PublisherService
+from src.editorial.services.telegram_resilience import TelegramOperationTimeout
+
+
+def _publication_objects(now: datetime) -> tuple[PublicationLog, ContentItem, Channel]:
+    channel = Channel(
+        id=7,
+        tg_channel_id=-1007,
+        short_code="test",
+        title="Test",
+        is_active=True,
+    )
+    item = ContentItem(
+        id=11,
+        channel_id=channel.id,
+        source_type=ContentSourceType.EDITORIAL,
+        body_text="Message",
+        status=ContentItemStatus.SCHEDULED,
+        scheduled_for=now,
+    )
+    log_item = PublicationLog(
+        id=13,
+        content_item_id=item.id,
+        channel_id=channel.id,
+        scheduled_for=now,
+        publish_status=PublicationStatus.SCHEDULED,
+        attempt_count=0,
+        created_at=now,
+    )
+    return log_item, item, channel
+
+
+@pytest.mark.asyncio
+async def test_transient_error_keeps_message_scheduled_for_later_retry(monkeypatch) -> None:
+    now = datetime(2026, 8, 20, 20, 20, tzinfo=timezone.utc)
+    log_item, item, channel = _publication_objects(now)
+    session = SimpleNamespace(
+        scalar=AsyncMock(side_effect=[log_item, None]),
+        get=AsyncMock(side_effect=[item, channel]),
+        commit=AsyncMock(),
+    )
+    legacy_reader = SimpleNamespace(
+        get_bot_binding=AsyncMock(return_value=SimpleNamespace(bot_api_token="1:token"))
+    )
+    service = PublisherService(
+        telegram_adapter=SimpleNamespace(),
+        legacy_reader=legacy_reader,
+    )
+    service._publish_submission_based_item = AsyncMock(
+        side_effect=TelegramOperationTimeout("Telegram sendMessage exceeded 15 seconds")
+    )
+
+    result = await service.run(session, now=now, limit=20)
+
+    assert result.attempted == 1
+    assert result.sent == 0
+    assert result.deferred == 1
+    assert result.failed == 0
+    assert log_item.publish_status == PublicationStatus.SCHEDULED
+    assert item.status == ContentItemStatus.SCHEDULED
+    assert log_item.attempt_count == 1
+    assert log_item.last_attempt_at == now
+    assert log_item.retry_after == now + timedelta(seconds=60)
+    assert "retry scheduled" in log_item.error_text
+    session.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_successful_retry_marks_message_sent(monkeypatch) -> None:
+    now = datetime(2026, 8, 20, 20, 22, tzinfo=timezone.utc)
+    log_item, item, channel = _publication_objects(now - timedelta(minutes=2))
+    log_item.attempt_count = 1
+    log_item.retry_after = now - timedelta(seconds=1)
+    session = SimpleNamespace(
+        scalar=AsyncMock(side_effect=[log_item, None, None]),
+        get=AsyncMock(side_effect=[item, channel]),
+        commit=AsyncMock(),
+    )
+    legacy_reader = SimpleNamespace(
+        get_bot_binding=AsyncMock(return_value=SimpleNamespace(bot_api_token="1:token"))
+    )
+    service = PublisherService(
+        telegram_adapter=SimpleNamespace(),
+        legacy_reader=legacy_reader,
+    )
+    service._publish_submission_based_item = AsyncMock(return_value=777)
+
+    result = await service.run(session, now=now, limit=1)
+
+    assert result.sent == 1
+    assert result.deferred == 0
+    assert log_item.publish_status == PublicationStatus.SENT
+    assert log_item.telegram_message_id == 777
+    assert log_item.published_at == now
+    assert log_item.retry_after is None
+    assert log_item.error_text is None
+    assert item.status == ContentItemStatus.PUBLISHED

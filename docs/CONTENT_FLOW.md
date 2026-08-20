@@ -274,8 +274,13 @@ Publisher берёт записи со статусом `scheduled` и:
 - при успехе ставит:
   - `content_item -> published`
   - `publication_log -> sent`
-- при ошибке ставит:
-  - `publication_log -> failed`
-  - `content_item -> approved`
+- при временной ошибке Telegram (`timeout`, `429`, `5xx`, сетевой сбой):
+  - оставляет `publication_log -> scheduled`;
+  - оставляет `content_item -> scheduled`;
+  - записывает `retry_after`, `attempt_count` и `last_attempt_at`;
+  - автоматически повторяет отправку позже с увеличивающейся паузой;
+- только при постоянной ошибке данных или конфигурации ставит:
+  - `publication_log -> failed`;
+  - `content_item -> approved`.
 
-То есть после ошибки item не теряется и его можно запланировать повторно.
+Telegram-вызовы имеют короткий общий timeout. Publisher блокирует в БД только одну публикацию и фиксирует результат после каждой записи, поэтому зависший канал не удерживает весь пакет.

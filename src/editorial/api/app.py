@@ -31,6 +31,11 @@ from src.editorial.services.channel_service import ChannelService
 from src.editorial.services.generation.service import GenerationService
 from src.editorial.services.import_legacy import LegacyImporter
 from src.editorial.services.moderation import ModerationService
+from src.editorial.services.moderation_case_service import (
+    MODERATION_APPROVED,
+    MODERATION_REJECTED,
+    ModerationCaseService,
+)
 from src.editorial.services.paste_service import PasteService
 from src.editorial.services.publisher import PublisherService
 from src.editorial.services.scheduler import SchedulerService
@@ -140,6 +145,35 @@ async def update_submission_status(
         status=payload.status,
         moderator_note=payload.moderator_note,
     )
+    if payload.reviewer_id is not None:
+        cases = ModerationCaseService()
+        if payload.status == SubmissionStatus.REJECTED:
+            await cases.record_submission_decision(
+                session,
+                submission_id=submission_id,
+                moderator_id=payload.reviewer_id,
+                decision=MODERATION_REJECTED,
+                source="api",
+                action="update_submission_status",
+            )
+        elif payload.status == SubmissionStatus.CONTENT_CREATED:
+            await cases.record_submission_decision(
+                session,
+                submission_id=submission_id,
+                moderator_id=payload.reviewer_id,
+                decision=MODERATION_APPROVED,
+                source="api",
+                action="update_submission_status",
+            )
+        elif payload.status == SubmissionStatus.HOLD:
+            await cases.void_submission_case(
+                session,
+                submission_id=submission_id,
+                moderator_id=payload.reviewer_id,
+                source="api",
+                action="update_submission_status",
+            )
+        await session.commit()
     return SubmissionResponse.model_validate(item)
 
 

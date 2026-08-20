@@ -22,6 +22,7 @@ from config import settings
 from src.core_database.database import CrudBotAdmins, CrudBotsData, CrudDelayedPosts
 from src.editorial.models.enums import ChannelPasteTagRuleMode, SubmissionStatus
 from src.editorial.services.advertising import send_advertising_flow
+from src.editorial.services.admin_statistics_export import parse_admin_statistics_month
 from src.editorial.services.db_export import DatabaseExportService
 from src.editorial.services.legacy_source import LegacyCollectorReader
 from src.editorial.services.sql_export import SqlExportService
@@ -80,6 +81,7 @@ class MasterBot:
     def __init__(self, api_token_bot: str):
         self.delayed_task = None
         self.subscriber_snapshot_task = None
+        self.main_polling_task = None
         self.bot_info = None
         self.flag_register_push_message = False
         self.user_states: dict[int, dict[str, Any]] = {}
@@ -113,6 +115,7 @@ class MasterBot:
             overhead_connections=settings.telegram_connection_overhead,
         )
         asyncio_helper.REQUEST_LIMIT = self._initial_request_limit
+        asyncio_helper.REQUEST_TIMEOUT = settings.telegram_request_timeout_seconds
         self.main_bot = AsyncTeleBot(self.api_token_bot)
         self.bots_work: list[SubBot] = []
 
@@ -150,6 +153,7 @@ class MasterBot:
             overhead_connections=settings.telegram_connection_overhead,
         )
         asyncio_helper.REQUEST_LIMIT = desired_limit
+        asyncio_helper.REQUEST_TIMEOUT = settings.telegram_request_timeout_seconds
         return desired_limit
 
     async def _reset_telegram_session(self) -> None:
@@ -212,10 +216,13 @@ class MasterBot:
         show_alert: bool = False,
     ) -> None:
         try:
-            await bot.answer_callback_query(
-                callback_query_id=callback_query_id,
-                text=text,
-                show_alert=show_alert,
+            await asyncio.wait_for(
+                bot.answer_callback_query(
+                    callback_query_id=callback_query_id,
+                    text=text,
+                    show_alert=show_alert,
+                ),
+                timeout=settings.telegram_request_timeout_seconds,
             )
         except Exception as ex:
             logger.debug("Failed to answer callback {}: {}", callback_query_id, ex)
@@ -335,7 +342,7 @@ class MasterBot:
                     "\u0440\u0430\u0437\u0440\u0435\u0448\u0430\u0435\u0442 \u0442\u043e\u043b\u044c\u043a\u043e SELECT-\u0437\u0430\u043f\u0440\u043e\u0441\u044b."
                 )
             ),
-            reply_markup=build_extra_panel(),
+            reply_markup=build_extra_panel(is_general_admin=is_general_admin),
         )
 
     async def _send_database_export(self, chat_id: int) -> None:
@@ -416,6 +423,57 @@ class MasterBot:
         except Exception as ex:
             logger.exception("Failed to export channel statistics")
             await self.main_bot.send_message(chat_id, f"Не удалось подготовить статистику: {ex}")
+        finally:
+            try:
+                await self.main_bot.delete_message(chat_id=chat_id, message_id=status_message.message_id)
+            except Exception:
+                pass
+            if export_path and export_path.exists():
+                export_path.unlink(missing_ok=True)
+
+    async def _admin_statistics_labels(self) -> dict[int, str]:
+        async def resolve(admin_id: int) -> tuple[int, str]:
+            try:
+                chat = await self.main_bot.get_chat(admin_id)
+            except Exception:
+                return admin_id, str(admin_id)
+            if getattr(chat, "username", None):
+                return admin_id, f"@{chat.username}"
+            full_name = " ".join(
+                part
+                for part in (getattr(chat, "first_name", None), getattr(chat, "last_name", None))
+                if part
+            ).strip()
+            return admin_id, full_name or str(admin_id)
+
+        admin_ids = sorted({int(item) for item in self.chats if item})
+        return dict(await asyncio.gather(*(resolve(admin_id) for admin_id in admin_ids)))
+
+    async def _send_admin_statistics_export(self, chat_id: int, month) -> None:
+        status_message = await self.main_bot.send_message(
+            chat_id,
+            f"Готовлю статистику по администраторам за {month:%m.%Y}.",
+        )
+        export_path = None
+        try:
+            export_path = await self.editorial_actions.export_admin_statistics(
+                month=month,
+                admin_labels=await self._admin_statistics_labels(),
+            )
+            with export_path.open("rb") as export_file:
+                await self.main_bot.send_document(
+                    chat_id=chat_id,
+                    document=export_file,
+                    visible_file_name=export_path.name,
+                    caption=(
+                        f"Статистика администраторов за {month:%m.%Y}.\n"
+                        "Сводка содержит итоговые количества, а лист «Детализация» — "
+                        "авторов и сохранённые тексты предложек. Повторные нажатия и отменённые решения не считаются."
+                    ),
+                )
+        except Exception as ex:
+            logger.exception("Failed to export admin statistics")
+            await self.main_bot.send_message(chat_id, f"Не удалось подготовить статистику администраторов: {ex}")
         finally:
             try:
                 await self.main_bot.delete_message(chat_id=chat_id, message_id=status_message.message_id)
@@ -1225,6 +1283,8 @@ class MasterBot:
         ]
         if result.blocked:
             lines.append(f"\u0417\u0430\u0431\u043b\u043e\u043a\u0438\u0440\u043e\u0432\u0430\u043d\u043e \u0440\u0435\u043a\u043b\u0430\u043c\u043d\u044b\u043c \u043e\u043a\u043d\u043e\u043c: {result.blocked}")
+        if result.deferred:
+            lines.append(f"Отложено до восстановления Telegram: {result.deferred}")
         if result.failed:
             lines.append(f"\u041e\u0448\u0438\u0431\u043e\u043a: {result.failed}")
         if result.content_item_ids:
@@ -2077,6 +2137,19 @@ class MasterBot:
             await self._send_statistics_export(message.chat.id, delta_days=delta_days)
             return True
 
+        if action == "await_admin_statistics_month":
+            if not self._is_general_admin(message.from_user.id if message.from_user else message.chat.id):
+                await self.main_bot.send_message(message.chat.id, "Доступно только генеральному администратору.")
+                return True
+            try:
+                month = parse_admin_statistics_month(text_value)
+            except ValueError as exc:
+                self._set_user_state(message.chat.id, "await_admin_statistics_month")
+                await self.main_bot.send_message(message.chat.id, str(exc))
+                return True
+            await self._send_admin_statistics_export(message.chat.id, month)
+            return True
+
         if action == "await_add_moderator":
             try:
                 user_id = int(text_value)
@@ -2696,7 +2769,10 @@ class MasterBot:
                     continue
                 if await bots_data[bot].reschedule_delayed_if_publication_blocked(message_id, sender_id, time_post):
                     continue
-                sent = await bots_data[bot].send_delayed_message(message_id, sender_id, time_post)
+                sent = await asyncio.wait_for(
+                    bots_data[bot].send_delayed_message(message_id, sender_id, time_post),
+                    timeout=settings.telegram_request_timeout_seconds,
+                )
                 if not sent:
                     continue
                 await self.delayed_database.delete_delayed_posts(
@@ -2962,7 +3038,9 @@ class MasterBot:
                         await self.main_bot.send_message(
                             call.message.chat.id,
                             f"Publisher отработал.\nПопыток: {result.attempted}\n"
-                            f"Успешно: {result.sent}\nОшибок: {result.failed}",
+                            f"Успешно: {result.sent}\n"
+                            f"Отложено до восстановления Telegram: {result.deferred}\n"
+                            f"Ошибок: {result.failed}",
                         )
                     case "extra":
                         await self._safe_answer_callback(self.main_bot, call.id)
@@ -2981,6 +3059,25 @@ class MasterBot:
                                 "Введите количество дней для расчёта дельты "
                                 f"от 1 до {MAX_STATISTICS_DELTA_DAYS}.\n"
                                 f"Например: {DEFAULT_STATISTICS_DELTA_DAYS}"
+                            ),
+                        )
+                        return
+                    case "admin_stats_export":
+                        if not self._is_general_admin(call.from_user.id):
+                            await self.main_bot.answer_callback_query(
+                                call.id,
+                                "Доступно только генеральному администратору.",
+                                show_alert=True,
+                            )
+                            return
+                        await self._safe_answer_callback(self.main_bot, call.id)
+                        self._set_user_state(call.message.chat.id, "await_admin_statistics_month")
+                        await self.main_bot.send_message(
+                            call.message.chat.id,
+                            (
+                                "Введите месяц в формате ГГГГ-ММ или ММ.ГГГГ.\n"
+                                "Например: 2026-08\n"
+                                "Для текущего месяца можно написать: текущий"
                             ),
                         )
                         return
@@ -3054,11 +3151,11 @@ class MasterBot:
                         await self.main_bot.send_message(call.message.chat.id, f"Создана паста #{paste.id}: {paste.title}")
                         await self._show_first_pending_submission(call.message.chat.id, current_id=submission_id, user_id=call.from_user.id)
                     case "hold":
-                        await self.editorial_actions.hold_submission(submission_id)
+                        await self.editorial_actions.hold_submission(submission_id, reviewer_id)
                         await self.main_bot.send_message(call.message.chat.id, f"Сообщение {submission_id} отправлено в hold.")
                         await self._show_first_pending_submission(call.message.chat.id, current_id=submission_id, user_id=call.from_user.id)
                     case "reject":
-                        await self.editorial_actions.reject_submission(submission_id)
+                        await self.editorial_actions.reject_submission(submission_id, reviewer_id)
                         await self.editorial_actions.sync_panel_submission_rejected(submission_id)
                         await self.main_bot.send_message(call.message.chat.id, f"Сообщение {submission_id} отклонено.")
                         await self._show_first_pending_submission(call.message.chat.id, current_id=submission_id, user_id=call.from_user.id)
@@ -3786,6 +3883,15 @@ class MasterBot:
                 request_limit,
                 len(bots_lst),
             )
+            # Start the admin bot before the potentially long initialization of
+            # hundreds of subbots. Panel callbacks remain available during a
+            # collector restart instead of waiting for the whole network.
+            self.main_polling_task = asyncio.create_task(
+                self.main_bot.infinity_polling(
+                    timeout=10,
+                    request_timeout=settings.telegram_request_timeout_seconds,
+                )
+            )
             async with aiohttp.ClientSession() as session:
                 for api_token, bot_username, channel_id, _id_row in bots_lst:
                     try:
@@ -3811,6 +3917,6 @@ class MasterBot:
             self.delayed_task = asyncio.create_task(self.__delayed_posts_checker())
             if self.subscriber_snapshot_task is None or self.subscriber_snapshot_task.done():
                 self.subscriber_snapshot_task = asyncio.create_task(self.__subscriber_snapshot_scheduler())
-            await self.main_bot.polling(none_stop=True)
+            await self.main_polling_task
         except Exception as ex:
             logger.error("bot: @{}, mistake: {}", self.bot_info.username if self.bot_info else "unknown", ex)

@@ -33,6 +33,18 @@ class EditorialSettings:
     scheduler_window_minutes: int = _get_int("EDITORIAL_SCHEDULER_WINDOW_MINUTES", 15)
     scheduler_commit_batch_size: int = max(1, _get_int("EDITORIAL_SCHEDULER_COMMIT_BATCH_SIZE", 25))
     publisher_batch_size: int = _get_int("EDITORIAL_PUBLISHER_BATCH_SIZE", 20)
+    telegram_request_timeout_seconds: int = max(
+        1,
+        _get_int("TELEGRAM_REQUEST_TIMEOUT_SECONDS", 15),
+    )
+    publisher_retry_base_seconds: int = max(
+        1,
+        _get_int("EDITORIAL_PUBLISHER_RETRY_BASE_SECONDS", 60),
+    )
+    publisher_retry_max_seconds: int = max(
+        publisher_retry_base_seconds,
+        _get_int("EDITORIAL_PUBLISHER_RETRY_MAX_SECONDS", 900),
+    )
     generation_default_provider: str = os.getenv("EDITORIAL_GENERATION_PROVIDER", "stub")
     generation_openrouter_base_url: str = os.getenv(
         "OPENROUTER_BASE_URL",

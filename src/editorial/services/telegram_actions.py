@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Iterable
 
 from sqlalchemy import delete as sql_delete, func, or_, select, update as sql_update
@@ -29,6 +29,7 @@ from src.editorial.models.publication import PublicationLog
 from src.editorial.models.submission import Submission
 from src.editorial.models.tag import ChannelPasteTagRule, GlobalPasteTagRule, TagDefinition, TagKeyword
 from src.editorial.services.advertising import send_advertising_flow
+from src.editorial.services.admin_statistics_export import AdminStatisticsExportService
 from src.editorial.services.auto_slot_planner import AutoSlotPlannerService
 from src.editorial.services.channel_profile_service import ChannelProfileService
 from src.editorial.services.channel_history_service import ChannelHistoryImportResult, ChannelHistoryService
@@ -38,11 +39,16 @@ from src.editorial.services.import_legacy import LegacyImporter
 from src.editorial.services.legacy_moderation_sync import LegacyModerationSyncService
 from src.editorial.services.legacy_source import LegacyCollectorReader
 from src.editorial.services.moderation import ModerationService
+from src.editorial.services.moderation_case_service import (
+    MODERATION_REJECTED,
+    ModerationCaseService,
+)
 from src.editorial.services.paste_service import PasteService
 from src.editorial.services.publisher import PublisherService
 from src.editorial.services.scheduler import SchedulerService
 from src.editorial.services.statistics_export import StatisticsExportService
 from src.editorial.services.tag_service import PasteTagSummary, TagService
+from src.editorial.services.telegram_resilience import is_transient_telegram_error
 from src.editorial.utils.text import clean_text, compute_raw_text_hash, compute_text_hash, normalize_text
 
 
@@ -71,6 +77,7 @@ class SubmissionBanResult:
 class ManualChannelMessageResult:
     requested: int = 0
     sent: int = 0
+    deferred: int = 0
     blocked: int = 0
     failed: int = 0
     content_item_ids: list[int] = field(default_factory=list)
@@ -114,6 +121,7 @@ class TelegramEditorialActions:
             importer=self.importer,
         )
         self.moderation = ModerationService()
+        self.moderation_cases = ModerationCaseService()
         self.paste_service = PasteService()
         self.channel_history_service = ChannelHistoryService()
         self.channel_service = ChannelService()
@@ -123,6 +131,7 @@ class TelegramEditorialActions:
         self.scheduler = SchedulerService()
         self.publisher = PublisherService()
         self.statistics_export_service = StatisticsExportService()
+        self.admin_statistics_export_service = AdminStatisticsExportService()
         self.banned_users = CrudBannedUser()
         self._legacy_bot_id_cache: dict[str, int] = {}
 
@@ -615,14 +624,15 @@ class TelegramEditorialActions:
             if channel is None or not channel.is_active:
                 raise ValueError("Channel is inactive or unlinked")
             item = await self._get_or_create_content_item(session, submission_id)
-            if item.status != ContentItemStatus.APPROVED:
-                item = await self.moderation.review_content_item(
-                    session=session,
-                    content_item_id=item.id,
-                    reviewer_id=reviewer_id,
-                    decision=ReviewDecision.APPROVE,
-                    review_note="Approved in Telegram panel",
-                )
+            item = await self.moderation.review_content_item(
+                session=session,
+                content_item_id=item.id,
+                reviewer_id=reviewer_id,
+                decision=ReviewDecision.APPROVE,
+                review_note="Approved in Telegram panel",
+                moderation_source="panel",
+                moderation_action="approve_submission",
+            )
             return item
 
     async def publish_submission_now(self, submission_id: int, reviewer_id: int) -> PublicationLog:
@@ -639,35 +649,65 @@ class TelegramEditorialActions:
                     "Сейчас для этого канала активно рекламное окно. Publish now временно заблокирован, чтобы не перебить рекламу."
                 )
             item = await self._get_or_create_content_item(session, submission_id)
-            if item.status != ContentItemStatus.APPROVED:
-                item = await self.moderation.review_content_item(
-                    session=session,
-                    content_item_id=item.id,
-                    reviewer_id=reviewer_id,
-                    decision=ReviewDecision.APPROVE,
-                    review_note="Approved and published in Telegram panel",
-                )
+            item = await self.moderation.review_content_item(
+                session=session,
+                content_item_id=item.id,
+                reviewer_id=reviewer_id,
+                decision=ReviewDecision.APPROVE,
+                review_note="Approved and published in Telegram panel",
+                moderation_source="panel",
+                moderation_action="publish_submission",
+            )
             log_item = await self._schedule_now(session, item)
             await self.publisher.run(session, now=datetime.now(timezone.utc), limit=20)
             return log_item
 
-    async def reject_submission(self, submission_id: int, note: str = "Rejected in Telegram panel") -> Submission:
+    async def reject_submission(
+        self,
+        submission_id: int,
+        reviewer_id: int,
+        note: str = "Rejected in Telegram panel",
+    ) -> Submission:
         async with session_factory() as session:
-            return await self.moderation.set_submission_status(
+            submission = await self.moderation.set_submission_status(
                 session=session,
                 submission_id=submission_id,
                 status=SubmissionStatus.REJECTED,
                 moderator_note=note,
             )
+            await self.moderation_cases.record_submission_decision(
+                session,
+                submission_id=submission_id,
+                moderator_id=reviewer_id,
+                decision=MODERATION_REJECTED,
+                source="panel",
+                action="reject_submission",
+            )
+            await session.commit()
+            return submission
 
-    async def hold_submission(self, submission_id: int, note: str = "Hold in Telegram panel") -> Submission:
+    async def hold_submission(
+        self,
+        submission_id: int,
+        reviewer_id: int,
+        note: str = "Hold in Telegram panel",
+    ) -> Submission:
         async with session_factory() as session:
-            return await self.moderation.set_submission_status(
+            submission = await self.moderation.set_submission_status(
                 session=session,
                 submission_id=submission_id,
                 status=SubmissionStatus.HOLD,
                 moderator_note=note,
             )
+            await self.moderation_cases.void_submission_case(
+                session,
+                submission_id=submission_id,
+                moderator_id=reviewer_id,
+                source="panel",
+                action="hold_submission",
+            )
+            await session.commit()
+            return submission
 
     async def paste_submission(self, submission_id: int, reviewer_id: int):
         async with session_factory() as session:
@@ -763,6 +803,16 @@ class TelegramEditorialActions:
                     else "Banned in Telegram panel"
                 ),
             )
+            if reviewer_id is not None:
+                await self.moderation_cases.record_submission_decision(
+                    session,
+                    submission_id=submission_id,
+                    moderator_id=reviewer_id,
+                    decision=MODERATION_REJECTED,
+                    source="panel",
+                    action="ban_submission_author",
+                )
+                await session.commit()
             user_id = int(submission.source_user_id)
             username = submission.username
             tg_channel_id = int(channel.tg_channel_id)
@@ -1244,6 +1294,8 @@ class TelegramEditorialActions:
                 reviewer_id=reviewer_id,
                 decision=ReviewDecision.APPROVE,
                 review_note="Approved in Telegram panel",
+                moderation_source="panel",
+                moderation_action="approve_content_item",
             )
 
     async def sync_panel_submission_approved(self, submission_id: int) -> int:
@@ -1268,14 +1320,15 @@ class TelegramEditorialActions:
                 raise ValueError(
                     "Сейчас для этого канала активно рекламное окно. Publish now временно заблокирован, чтобы не перебить рекламу."
                 )
-            if item.status != ContentItemStatus.APPROVED:
-                item = await self.moderation.review_content_item(
-                    session=session,
-                    content_item_id=item.id,
-                    reviewer_id=reviewer_id,
-                    decision=ReviewDecision.APPROVE,
-                    review_note="Approved and published in Telegram panel",
-                )
+            item = await self.moderation.review_content_item(
+                session=session,
+                content_item_id=item.id,
+                reviewer_id=reviewer_id,
+                decision=ReviewDecision.APPROVE,
+                review_note="Approved and published in Telegram panel",
+                moderation_source="panel",
+                moderation_action="publish_content_item",
+            )
             log_item = await self._schedule_now(session, item)
             await self.publisher.run(session, now=datetime.now(timezone.utc), limit=20)
             return log_item
@@ -1288,6 +1341,8 @@ class TelegramEditorialActions:
                 reviewer_id=reviewer_id,
                 decision=ReviewDecision.REJECT,
                 review_note="Rejected in Telegram panel",
+                moderation_source="panel",
+                moderation_action="reject_content_item",
             )
 
     async def hold_content_item(self, content_item_id: int, reviewer_id: int) -> ContentItem:
@@ -1298,6 +1353,8 @@ class TelegramEditorialActions:
                 reviewer_id=reviewer_id,
                 decision=ReviewDecision.HOLD,
                 review_note="Hold in Telegram panel",
+                moderation_source="panel",
+                moderation_action="hold_content_item",
             )
 
     async def publish_manual_message_to_channels(
@@ -1319,6 +1376,7 @@ class TelegramEditorialActions:
         normalized_text = normalize_text(cleaned_body) or cleaned_body
         text_hash = compute_text_hash(cleaned_body) or compute_raw_text_hash(cleaned_body) or ""
         now = datetime.now(timezone.utc)
+        circuit_retry_after: datetime | None = None
 
         async with session_factory() as session:
             tags, primary_tag = await self.tag_service.apply_tags_to_content_cache(session, cleaned_body)
@@ -1367,6 +1425,12 @@ class TelegramEditorialActions:
                 result.content_item_ids.append(int(item.id))
                 result.publication_log_ids.append(int(log_item.id))
 
+                if circuit_retry_after is not None:
+                    log_item.retry_after = circuit_retry_after
+                    log_item.error_text = "Deferred because Telegram is temporarily unavailable"
+                    result.deferred += 1
+                    continue
+
                 binding = await self.legacy_reader.get_bot_binding(channel.tg_channel_id)
                 if binding is None:
                     item.status = ContentItemStatus.HOLD
@@ -1376,6 +1440,8 @@ class TelegramEditorialActions:
                     result.errors.append(log_item.error_text)
                     continue
 
+                log_item.attempt_count = int(log_item.attempt_count or 0) + 1
+                log_item.last_attempt_at = now
                 try:
                     add_channel_signature = await self.publisher.should_add_channel_signature(
                         binding.bot_api_token,
@@ -1411,6 +1477,19 @@ class TelegramEditorialActions:
                         disable_web_page_preview=add_channel_signature,
                     )
                 except Exception as ex:
+                    if is_transient_telegram_error(ex):
+                        self.publisher.defer_transient_publication(
+                            log_item=log_item,
+                            content_item=item,
+                            exc=ex,
+                            attempted_at=now,
+                        )
+                        circuit_retry_after = log_item.retry_after
+                        result.deferred += 1
+                        result.errors.append(
+                            f"Channel {channel_id}: Telegram временно недоступен, публикация будет повторена позже"
+                        )
+                        continue
                     item.status = ContentItemStatus.HOLD
                     log_item.publish_status = PublicationStatus.FAILED
                     log_item.error_text = str(ex)
@@ -1422,6 +1501,8 @@ class TelegramEditorialActions:
                 log_item.publish_status = PublicationStatus.SENT
                 log_item.telegram_message_id = telegram_message_id
                 log_item.published_at = now
+                log_item.retry_after = None
+                log_item.error_text = None
                 result.sent += 1
 
             await session.commit()
@@ -1542,6 +1623,19 @@ class TelegramEditorialActions:
                 delta_days=delta_days,
             )
 
+    async def export_admin_statistics(
+        self,
+        *,
+        month: date,
+        admin_labels: dict[int, str] | None = None,
+    ):
+        async with session_factory() as session:
+            return await self.admin_statistics_export_service.export_admin_statistics(
+                session,
+                month=month,
+                admin_labels=admin_labels,
+            )
+
     async def run_publisher(self):
         async with session_factory() as session:
             return await self.publisher.run(session)
@@ -1597,8 +1691,12 @@ class TelegramEditorialActions:
             select(PublicationLog)
             .where(
                 PublicationLog.content_item_id == item.id,
-                PublicationLog.publish_status == PublicationStatus.SCHEDULED,
+                PublicationLog.publish_status.in_({
+                    PublicationStatus.SCHEDULED,
+                    PublicationStatus.SENT,
+                }),
             )
+            .order_by(PublicationLog.created_at.desc())
             .limit(1)
         )
         if existing is not None:

@@ -2,12 +2,23 @@ from __future__ import annotations
 
 from html import escape
 import os
+from time import monotonic
 
 import aiohttp
 from loguru import logger
 
 from config import settings as legacy_settings
+from src.editorial.config import settings
 from src.editorial.models.channel import Channel
+from src.editorial.services.telegram_resilience import (
+    TelegramAPIError,
+    is_transient_telegram_error,
+    run_telegram_operation,
+)
+
+
+SIGNATURE_ADMIN_CACHE_TTL_SECONDS = 3600
+_signature_admin_cache: dict[tuple[str, int, str], tuple[float, bool]] = {}
 
 
 def publication_signature_enabled() -> bool:
@@ -28,6 +39,12 @@ async def channel_has_signature_skip_bot(*, bot_token: str, channel_id: int) -> 
     if not target_username:
         return False
 
+    bot_id = bot_token.split(":", 1)[0]
+    cache_key = (bot_id, int(channel_id), target_username)
+    cached = _signature_admin_cache.get(cache_key)
+    if cached is not None and cached[0] > monotonic():
+        return cached[1]
+
     request_kwargs = {}
     try:
         proxy = legacy_settings.proxies.get("http")
@@ -41,20 +58,35 @@ async def channel_has_signature_skip_bot(*, bot_token: str, channel_id: int) -> 
         "return_bots": True,
     }
     url = f"https://api.telegram.org/bot{bot_token}/getChatAdministrators"
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=payload, **request_kwargs) as response:
-            result = await response.json()
+    timeout = aiohttp.ClientTimeout(total=settings.telegram_request_timeout_seconds)
+
+    async def request() -> dict:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, json=payload, **request_kwargs) as response:
+                return await response.json()
+
+    result = await run_telegram_operation(
+        request(),
+        operation="getChatAdministrators",
+    )
 
     if not result.get("ok"):
-        raise RuntimeError(result.get("description", str(result)))
+        raise TelegramAPIError(result)
 
+    has_skip_bot = False
     for admin in result.get("result") or []:
         user = admin.get("user") or {}
         if not user.get("is_bot"):
             continue
         if normalize_bot_username(user.get("username")) == target_username:
-            return True
-    return False
+            has_skip_bot = True
+            break
+
+    _signature_admin_cache[cache_key] = (
+        monotonic() + SIGNATURE_ADMIN_CACHE_TTL_SECONDS,
+        has_skip_bot,
+    )
+    return has_skip_bot
 
 
 async def should_add_publication_signature(*, bot_token: str, channel_id: int) -> bool:
@@ -68,6 +100,8 @@ async def should_add_publication_signature(*, bot_token: str, channel_id: int) -
             channel_id=channel_id,
         )
     except Exception as ex:
+        if is_transient_telegram_error(ex):
+            raise
         logger.warning(
             "Failed to check publication signature skip bot for channel {}: {}",
             channel_id,

@@ -20,6 +20,7 @@ from src.editorial.services.legacy_audit import (
 )
 from src.editorial.services.legacy_source import LegacyCollectorReader
 from src.editorial.services.moderation import ModerationService
+from src.editorial.services.moderation_case_service import ModerationCaseService
 
 
 class LegacyModerationSyncService:
@@ -32,6 +33,7 @@ class LegacyModerationSyncService:
         self.legacy_reader = legacy_reader or LegacyCollectorReader()
         self.importer = importer or LegacyImporter(self.legacy_reader)
         self.moderation = moderation or ModerationService()
+        self.moderation_cases = ModerationCaseService()
 
     async def mark_panel_submission_approved(self, submission_id: int) -> int:
         return await self._sync_panel_review_markup(submission_id, state="approved")
@@ -51,6 +53,9 @@ class LegacyModerationSyncService:
         status: SubmissionStatus,
         moderator_note: str | None = None,
         legacy_scheduled_for: datetime | None = None,
+        reviewer_id: int | None = None,
+        moderation_decision: str | None = None,
+        moderation_action: str = "legacy_status",
     ) -> bool:
         async with session_factory() as session:
             row = await self.legacy_reader.find_sender_row_by_review_message(
@@ -72,6 +77,16 @@ class LegacyModerationSyncService:
                     scheduled_for=legacy_scheduled_for,
                     moderator_note=moderator_note,
                 )
+                if reviewer_id is not None and moderation_decision is not None:
+                    await self.moderation_cases.record_submission_decision(
+                        session,
+                        submission_id=submission.id,
+                        moderator_id=reviewer_id,
+                        decision=moderation_decision,
+                        source="legacy",
+                        action=moderation_action,
+                    )
+                    await session.commit()
                 return True
 
             await self.moderation.set_submission_status(
@@ -85,6 +100,16 @@ class LegacyModerationSyncService:
                     session=session,
                     submission=submission,
                 )
+            if reviewer_id is not None and moderation_decision is not None:
+                await self.moderation_cases.record_submission_decision(
+                    session,
+                    submission_id=submission.id,
+                    moderator_id=reviewer_id,
+                    decision=moderation_decision,
+                    source="legacy",
+                    action=moderation_action,
+                )
+                await session.commit()
             return True
 
     async def approve_review_message(
@@ -125,6 +150,8 @@ class LegacyModerationSyncService:
                     reviewer_id=reviewer_id,
                     decision=ReviewDecision.APPROVE,
                     review_note="Approved in legacy moderation chat for slot pipeline",
+                    moderation_source="legacy",
+                    moderation_action="approve_to_slot",
                 )
 
             related = await self.moderation.get_related_submissions(session, submission)
@@ -133,6 +160,14 @@ class LegacyModerationSyncService:
                 related_submission.status = SubmissionStatus.CONTENT_CREATED
                 related_submission.reviewed_at = reviewed_at
                 related_submission.moderator_note = "Handled in legacy moderation: approved to slot"
+            await self.moderation_cases.record_submission_decision(
+                session,
+                submission_id=submission.id,
+                moderator_id=reviewer_id,
+                decision="approved",
+                source="legacy",
+                action="approve_to_slot",
+            )
             await session.commit()
             await session.refresh(item)
             return item
@@ -166,6 +201,13 @@ class LegacyModerationSyncService:
                     related_submission.status = SubmissionStatus.HOLD
                     related_submission.reviewed_at = reviewed_at
                     related_submission.moderator_note = "Legacy slot approval cancelled"
+                await self.moderation_cases.void_submission_case(
+                    session,
+                    submission_id=submission.id,
+                    moderator_id=reviewer_id,
+                    source="legacy",
+                    action="cancel_approve_to_slot",
+                )
                 await session.commit()
                 return None
 
@@ -202,6 +244,8 @@ class LegacyModerationSyncService:
                     reviewer_id=reviewer_id,
                     decision=ReviewDecision.HOLD,
                     review_note="Legacy slot approval cancelled",
+                    moderation_source="legacy",
+                    moderation_action="cancel_approve_to_slot",
                 )
 
             related = await self.moderation.get_related_submissions(session, submission)
@@ -210,6 +254,13 @@ class LegacyModerationSyncService:
                 related_submission.status = SubmissionStatus.HOLD
                 related_submission.reviewed_at = reviewed_at
                 related_submission.moderator_note = "Legacy slot approval cancelled"
+            await self.moderation_cases.void_submission_case(
+                session,
+                submission_id=submission.id,
+                moderator_id=reviewer_id,
+                source="legacy",
+                action="cancel_approve_to_slot",
+            )
             await session.commit()
             await session.refresh(item)
             return item

@@ -40,10 +40,17 @@ def build_main_panel(is_general_admin: bool) -> InlineKeyboardMarkup:
     return markup
 
 
-def build_extra_panel() -> InlineKeyboardMarkup:
+def build_extra_panel(is_general_admin: bool = False) -> InlineKeyboardMarkup:
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(InlineKeyboardButton("\u0412\u044b\u0433\u0440\u0443\u0437\u043a\u0430 \u0411\u0414", callback_data="panel:db_export"))
     markup.add(InlineKeyboardButton("\u0412\u044b\u0433\u0440\u0443\u0437\u043a\u0430 \u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043a\u0438", callback_data="panel:stats_export"))
+    if is_general_admin:
+        markup.add(
+            InlineKeyboardButton(
+                "Статистика по администраторам",
+                callback_data="panel:admin_stats_export",
+            )
+        )
     markup.add(InlineKeyboardButton("SQL -> CSV", callback_data="panel:sql_export"))
     markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u0432 \u043f\u0430\u043d\u0435\u043b\u044c", callback_data="panel:main"))
     return markup

@@ -22,6 +22,7 @@ from src.editorial.services.publication_signature import (
     publication_signature_html,
     should_add_publication_signature,
 )
+from src.editorial.services.telegram_resilience import is_transient_telegram_error
 from src.legacy_delayed import delayed_publication_matches
 from src.utils import Utils, filter_chats
 from config import settings
@@ -93,10 +94,13 @@ class SubBot:
         show_alert: bool = False,
     ) -> None:
         try:
-            await self.sup_bot.answer_callback_query(
-                callback_query_id=call.id,
-                text=text,
-                show_alert=show_alert,
+            await asyncio.wait_for(
+                self.sup_bot.answer_callback_query(
+                    callback_query_id=call.id,
+                    text=text,
+                    show_alert=show_alert,
+                ),
+                timeout=settings.telegram_request_timeout_seconds,
             )
         except Exception as ex:
             logger.debug("Failed to answer callback {}: {}", call.id, ex)
@@ -564,6 +568,9 @@ class SubBot:
                         review_message_id=call.message.message_id,
                         status=SubmissionStatus.REJECTED,
                         moderator_note="Handled in legacy moderation: banned",
+                        reviewer_id=call.from_user.id,
+                        moderation_decision="rejected",
+                        moderation_action="ban_submission_author",
                     )
                 case "add_info":
                     await utils_func.save_admin_action(call)
@@ -581,31 +588,66 @@ class SubBot:
                     logger.debug(info_sender)
                     if info_sender.username is None:
                         is_anon = False
-                    if call.message.message_id in self.anonym_send:
-                        self.anonym_send.remove(call.message.message_id)
                     logger.debug(self.bot_info)
-                    await self.anonym_message_database.delete_posts({
-                        "message_id": call.message.message_id,
-                        "chat_id": call.message.chat.id,
-                    })
                     await utils_func.save_post(
                         call,
                         self.channel_id,
                         info_sender,
                         self.bot_info.username,
                     )
-                    legacy_sent = await buttons_func.send_suggest(
-                        call,
-                        self.channel_signature_ref,
-                        self.channel_id,
-                        is_anon,
-                        self.channel_title,
-                    )
+                    try:
+                        legacy_sent = await asyncio.wait_for(
+                            buttons_func.send_suggest(
+                                call,
+                                self.channel_signature_ref,
+                                self.channel_id,
+                                is_anon,
+                                self.channel_title,
+                            ),
+                            timeout=settings.telegram_request_timeout_seconds,
+                        )
+                    except Exception as ex:
+                        if not is_transient_telegram_error(ex):
+                            logger.error("Permanent legacy publication error: {}", ex)
+                            return
+
+                        retry_at = int(datetime.now(timezone.utc).timestamp()) + settings.telegram_retry_delay_seconds
+                        self.delayed_message[call.message.message_id] = [retry_at, sender_id]
+                        await self.delayed_database.upsert_delayed_post({
+                            "bot_id": self.bot_info.id,
+                            "time_seconds": retry_at,
+                            "message_id": call.message.message_id,
+                            "sender_id": sender_id,
+                        })
+                        await self._sync_editorial_submission_status(
+                            review_message_id=call.message.message_id,
+                            status=SubmissionStatus.CONTENT_CREATED,
+                            moderator_note="Handled in legacy moderation: publish deferred after Telegram outage",
+                            legacy_scheduled_for=datetime.fromtimestamp(retry_at, tz=timezone.utc),
+                            reviewer_id=call.from_user.id,
+                            moderation_decision="approved",
+                            moderation_action="publish_now_deferred",
+                        )
+                        logger.warning(
+                            "Deferred legacy publication message {} for retry at {} after transient Telegram error: {}",
+                            call.message.message_id,
+                            retry_at,
+                            ex,
+                        )
+                        return
                     if legacy_sent:
+                        self.anonym_send.discard(call.message.message_id)
+                        await self.anonym_message_database.delete_posts({
+                            "message_id": call.message.message_id,
+                            "chat_id": call.message.chat.id,
+                        })
                         await self._sync_editorial_submission_status(
                             review_message_id=call.message.message_id,
                             status=SubmissionStatus.CONTENT_CREATED,
                             moderator_note="Handled in legacy moderation: approved",
+                            reviewer_id=call.from_user.id,
+                            moderation_decision="approved",
+                            moderation_action="publish_now",
                         )
                 case "approve_to_slot":
                     sender_id = int(call.data.split(";")[1])
@@ -678,6 +720,9 @@ class SubBot:
                         review_message_id=call.message.message_id,
                         status=SubmissionStatus.REJECTED,
                         moderator_note="Handled in legacy moderation: rejected",
+                        reviewer_id=call.from_user.id,
+                        moderation_decision="rejected",
+                        moderation_action="reject",
                     )
                 case "delayed_button":
                     await buttons_func.delayed_post(call)
@@ -717,6 +762,9 @@ class SubBot:
                         status=SubmissionStatus.CONTENT_CREATED,
                         moderator_note="Handled in legacy moderation: delayed",
                         legacy_scheduled_for=datetime.fromtimestamp(float(time_public), tz=timezone.utc),
+                        reviewer_id=call.from_user.id,
+                        moderation_decision="approved",
+                        moderation_action="schedule_delayed",
                     )
                     logger.debug(call.data)
                     await buttons_func.delayed_buttons_times(
@@ -735,6 +783,9 @@ class SubBot:
                         review_message_id=review_message_id,
                         status=SubmissionStatus.REJECTED,
                         moderator_note="Handled in legacy moderation: delayed rejected",
+                        reviewer_id=call.from_user.id,
+                        moderation_decision="rejected",
+                        moderation_action="reject_delayed",
                     )
                 case "anonym_button":
                     data = {
@@ -871,6 +922,9 @@ class SubBot:
         status: SubmissionStatus,
         moderator_note: str,
         legacy_scheduled_for: datetime | None = None,
+        reviewer_id: int | None = None,
+        moderation_decision: str | None = None,
+        moderation_action: str = "legacy_status",
     ) -> None:
         if self.chat_suggest is None:
             return
@@ -882,6 +936,9 @@ class SubBot:
                 status=status,
                 moderator_note=moderator_note,
                 legacy_scheduled_for=legacy_scheduled_for,
+                reviewer_id=reviewer_id,
+                moderation_decision=moderation_decision,
+                moderation_action=moderation_action,
             )
         except Exception as ex:
             logger.error("Failed to sync legacy moderation action to editorial submission: {}", ex)
@@ -1088,6 +1145,11 @@ class SubBot:
         self.bot_info = await self.sup_bot.get_me()
         try:
             logger.info(f"[OK] bot @{self.bot_info.username} working")
-            self.polling_task = asyncio.create_task(self.sup_bot.infinity_polling(timeout=10))
+            self.polling_task = asyncio.create_task(
+                self.sup_bot.infinity_polling(
+                    timeout=10,
+                    request_timeout=settings.telegram_request_timeout_seconds,
+                )
+            )
         except Exception as ex:
             logger.error(f"bot: @{self.bot_info.username}, mistake: {ex}")

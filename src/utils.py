@@ -202,7 +202,10 @@ class Utils:
         data = {
             "message_id": call.message.id,
             "chat_id": call.message.chat.id,
-            "admin_id": call.message.from_user.id,
+            # CallbackQuery.from_user is the administrator who pressed the
+            # button. Message.from_user is the bot that sent the moderation
+            # card, so storing it made every legacy action look bot-owned.
+            "admin_id": call.from_user.id,
             "timestamp": int(timestamp),
             "button": call.data.split(";")[0],
         }

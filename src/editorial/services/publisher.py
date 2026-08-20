@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from time import perf_counter
 
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.editorial.config import settings
@@ -24,6 +25,10 @@ from src.editorial.services.publication_signature import (
     should_add_publication_signature,
 )
 from src.editorial.services.telegram_publisher import TelegramPublisherAdapter
+from src.editorial.services.telegram_resilience import (
+    is_transient_telegram_error,
+    publisher_retry_delay,
+)
 from src.editorial.utils.text import clean_text
 
 
@@ -31,6 +36,7 @@ from src.editorial.utils.text import clean_text
 class PublisherRunResult:
     attempted: int = 0
     sent: int = 0
+    deferred: int = 0
     failed: int = 0
 
 
@@ -50,6 +56,7 @@ class PublisherService:
         self.telegram_adapter = telegram_adapter or TelegramPublisherAdapter()
         self.legacy_reader = legacy_reader or LegacyCollectorReader()
         self.paste_service = paste_service or PasteService()
+        self._channel_signature_cache: dict[tuple[str, int], ChannelPublicationSignature] = {}
 
     @staticmethod
     def _submission_author_signature(submission: Submission) -> str:
@@ -71,6 +78,8 @@ class PublisherService:
                 channel_id=channel.tg_channel_id,
             )
         except Exception as ex:
+            if is_transient_telegram_error(ex):
+                raise
             logger.warning("Failed to resolve Telegram username for channel {}: {}", channel.id, ex)
             resolved_tag = None
         return self._channel_signature(channel, resolved_tag)
@@ -80,21 +89,29 @@ class PublisherService:
         bot_token: str,
         channel: Channel,
     ) -> ChannelPublicationSignature:
+        cache_key = (bot_token.split(":", 1)[0], int(channel.tg_channel_id))
+        cached = self._channel_signature_cache.get(cache_key)
+        if cached is not None:
+            return cached
         try:
             chat_info = await self.telegram_adapter.get_chat_info(
                 bot_token=bot_token,
                 channel_id=channel.tg_channel_id,
             )
         except Exception as ex:
+            if is_transient_telegram_error(ex):
+                raise
             logger.warning("Failed to resolve Telegram chat info for channel {}: {}", channel.id, ex)
             return ChannelPublicationSignature(
                 title=channel.title,
                 ref=self._channel_signature(channel, None),
             )
-        return ChannelPublicationSignature(
+        resolved = ChannelPublicationSignature(
             title=chat_info.title or channel.title,
             ref=self._channel_signature(channel, chat_info.tag or chat_info.invite_link),
         )
+        self._channel_signature_cache[cache_key] = resolved
+        return resolved
 
     @staticmethod
     def publication_parse_mode() -> str | None:
@@ -373,23 +390,37 @@ class PublisherService:
         )
         return telegram_message_id
 
-    async def _is_channel_in_ad_blackout(
+    async def _get_channel_ad_blackout(
         self,
         session: AsyncSession,
         channel_id: int,
         when: datetime,
-    ) -> bool:
+    ) -> ChannelAdBlackout | None:
         when_utc = when.astimezone(timezone.utc)
-        blackout_id = await session.scalar(
-            select(ChannelAdBlackout.id)
+        return await session.scalar(
+            select(ChannelAdBlackout)
             .where(
                 ChannelAdBlackout.channel_id == channel_id,
                 ChannelAdBlackout.starts_at <= when_utc,
                 ChannelAdBlackout.ends_at > when_utc,
             )
+            .order_by(ChannelAdBlackout.ends_at.desc())
             .limit(1)
         )
-        return blackout_id is not None
+
+    @staticmethod
+    def defer_transient_publication(
+        log_item: PublicationLog,
+        content_item: ContentItem,
+        exc: BaseException,
+        attempted_at: datetime,
+    ) -> None:
+        delay = publisher_retry_delay(log_item.attempt_count, exc)
+        log_item.publish_status = PublicationStatus.SCHEDULED
+        log_item.retry_after = attempted_at + delay
+        log_item.error_text = f"Transient Telegram error; retry scheduled: {exc}"[:4000]
+        content_item.status = ContentItemStatus.SCHEDULED
+        content_item.scheduled_for = log_item.scheduled_for
 
     async def run(
         self,
@@ -399,30 +430,35 @@ class PublisherService:
     ) -> PublisherRunResult:
         now = now or datetime.now(timezone.utc)
         result = PublisherRunResult()
+        run_started = perf_counter()
+        batch_size = limit or settings.publisher_batch_size
 
-        scheduled_logs = list(
-            (
-                await session.execute(
-                    select(PublicationLog)
-                    .where(
-                        PublicationLog.publish_status == PublicationStatus.SCHEDULED,
-                        PublicationLog.scheduled_for <= now,
-                        PublicationLog.content_item_id.not_in(
-                            select(ContentItem.id).where(
-                                ContentItem.template_key == LEGACY_DELAYED_AUDIT_TEMPLATE_KEY
-                            )
-                        ),
-                    )
-                    .order_by(PublicationLog.scheduled_for.asc())
-                    .limit(limit or settings.publisher_batch_size)
-                    # Protect against concurrent manual/background publisher runs.
-                    # Once one session claims these rows, others skip them until commit.
-                    .with_for_update(skip_locked=True)
+        for _ in range(batch_size):
+            current_time = now
+            log_item = await session.scalar(
+                select(PublicationLog)
+                .where(
+                    PublicationLog.publish_status == PublicationStatus.SCHEDULED,
+                    PublicationLog.scheduled_for <= current_time,
+                    or_(
+                        PublicationLog.retry_after.is_(None),
+                        PublicationLog.retry_after <= current_time,
+                    ),
+                    PublicationLog.content_item_id.not_in(
+                        select(ContentItem.id).where(
+                            ContentItem.template_key == LEGACY_DELAYED_AUDIT_TEMPLATE_KEY
+                        )
+                    ),
                 )
-            ).scalars().all()
-        )
+                .order_by(PublicationLog.scheduled_for.asc(), PublicationLog.id.asc())
+                .limit(1)
+                # Claim only one row while Telegram is called. A slow channel no
+                # longer locks an entire publisher batch.
+                .with_for_update(skip_locked=True)
+            )
+            if log_item is None:
+                break
 
-        for log_item in scheduled_logs:
             content_item = await session.get(ContentItem, log_item.content_item_id)
             channel = await session.get(Channel, log_item.channel_id)
             if content_item is None or channel is None:
@@ -430,9 +466,11 @@ class PublisherService:
                 log_item.publish_status = PublicationStatus.FAILED
                 log_item.error_text = "Missing content item or channel"
                 result.failed += 1
+                await session.commit()
                 continue
 
             if not channel.is_active:
+                result.attempted += 1
                 log_item.publish_status = PublicationStatus.CANCELLED
                 log_item.error_text = "Channel is inactive or unlinked"
                 if content_item.status == ContentItemStatus.SCHEDULED:
@@ -443,17 +481,26 @@ class PublisherService:
                     log_item.id,
                     channel.id,
                 )
+                await session.commit()
                 continue
 
-            if await self._is_channel_in_ad_blackout(session, channel.id, now):
+            blackout = await self._get_channel_ad_blackout(session, channel.id, current_time)
+            if blackout is not None:
+                log_item.retry_after = blackout.ends_at
+                log_item.error_text = f"Deferred by ad blackout until {blackout.ends_at.isoformat()}"
+                result.deferred += 1
                 logger.info(
-                    "Skipping publication log {} for channel {} because an ad blackout is active",
+                    "Deferred publication log {} for channel {} until ad blackout ends at {}",
                     log_item.id,
                     channel.id,
+                    blackout.ends_at,
                 )
+                await session.commit()
                 continue
 
             result.attempted += 1
+            log_item.attempt_count = int(log_item.attempt_count or 0) + 1
+            log_item.last_attempt_at = current_time
 
             binding = await self.legacy_reader.get_bot_binding(channel.tg_channel_id)
             if binding is None:
@@ -461,8 +508,10 @@ class PublisherService:
                 log_item.error_text = f"Legacy bot binding for channel {channel.tg_channel_id} not found"
                 content_item.status = ContentItemStatus.APPROVED
                 result.failed += 1
+                await session.commit()
                 continue
 
+            operation_started = perf_counter()
             try:
                 telegram_message_id = await self._publish_submission_based_item(
                     session=session,
@@ -472,7 +521,9 @@ class PublisherService:
                 )
                 log_item.telegram_message_id = telegram_message_id
                 log_item.publish_status = PublicationStatus.SENT
-                log_item.published_at = now
+                log_item.published_at = current_time
+                log_item.retry_after = None
+                log_item.error_text = None
                 content_item.status = ContentItemStatus.PUBLISHED
                 if content_item.origin_paste_id is not None:
                     await self.paste_service.register_usage(
@@ -483,11 +534,42 @@ class PublisherService:
                     )
                 result.sent += 1
             except Exception as ex:
+                if is_transient_telegram_error(ex):
+                    self.defer_transient_publication(
+                        log_item=log_item,
+                        content_item=content_item,
+                        exc=ex,
+                        attempted_at=current_time,
+                    )
+                    result.deferred += 1
+                    await session.commit()
+                    logger.warning(
+                        "Deferred publication log {} after transient Telegram error in {:.2f}s; retry after {}: {}",
+                        log_item.id,
+                        perf_counter() - operation_started,
+                        log_item.retry_after,
+                        ex,
+                    )
+                    # Treat the first transport failure as a circuit breaker for
+                    # this run. The next container pass will continue with other
+                    # due rows while this one observes its retry_after value.
+                    break
+
                 logger.exception("Failed to publish content item {}", content_item.id)
                 log_item.publish_status = PublicationStatus.FAILED
-                log_item.error_text = str(ex)
+                log_item.retry_after = None
+                log_item.error_text = str(ex)[:4000]
                 content_item.status = ContentItemStatus.APPROVED
                 result.failed += 1
 
-        await session.commit()
+            await session.commit()
+
+        logger.info(
+            "Publisher run completed in {:.2f}s: attempted={}, sent={}, deferred={}, failed={}",
+            perf_counter() - run_started,
+            result.attempted,
+            result.sent,
+            result.deferred,
+            result.failed,
+        )
         return result

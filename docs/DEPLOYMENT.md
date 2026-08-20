@@ -115,6 +115,15 @@ python -m src.editorial.cli generate --channel-id 1
 - `OPENROUTER_API_KEY`, если нужен OpenRouter
 - слоты публикации `channel_slots`
 
+Рекомендуемые настройки защиты от сетевых зависаний Telegram:
+
+```env
+TELEGRAM_REQUEST_TIMEOUT_SECONDS=15
+TELEGRAM_RETRY_DELAY_SECONDS=60
+EDITORIAL_PUBLISHER_RETRY_BASE_SECONDS=60
+EDITORIAL_PUBLISHER_RETRY_MAX_SECONDS=900
+```
+
 Без слотов scheduler ничего не запланирует, и это нормально.
 
 Если пока хочешь жить без генерации, просто выставь:

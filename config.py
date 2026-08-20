@@ -89,6 +89,14 @@ class Settings:
     max_subbots: int = int(os.getenv("MAX_SUBBOTS", "200"))
     telegram_connections_per_bot: int = int(os.getenv("TELEGRAM_CONNECTIONS_PER_BOT", "4"))
     telegram_connection_overhead: int = int(os.getenv("TELEGRAM_CONNECTION_OVERHEAD", "20"))
+    telegram_request_timeout_seconds: int = max(
+        1,
+        int(os.getenv("TELEGRAM_REQUEST_TIMEOUT_SECONDS", "15")),
+    )
+    telegram_retry_delay_seconds: int = max(
+        1,
+        int(os.getenv("TELEGRAM_RETRY_DELAY_SECONDS", "60")),
+    )
     enabled_subbot_usernames: list[str] = field(
         default_factory=_load_enabled_subbot_usernames
     )

@@ -14,6 +14,7 @@ from src.editorial.models.enums import (
 )
 from src.editorial.models.review import Review
 from src.editorial.models.submission import Submission
+from src.editorial.services.moderation_case_service import ModerationCaseService
 from src.editorial.services.tag_service import TagService
 from src.editorial.utils.text import clean_text, compute_raw_text_hash, compute_text_hash, normalize_text
 
@@ -21,6 +22,7 @@ from src.editorial.utils.text import clean_text, compute_raw_text_hash, compute_
 class ModerationService:
     def __init__(self, tag_service: TagService | None = None) -> None:
         self.tag_service = tag_service or TagService()
+        self.moderation_cases = ModerationCaseService()
 
     @staticmethod
     def _visible_submission_filter():
@@ -228,10 +230,45 @@ class ModerationService:
         decision: ReviewDecision,
         review_note: str | None = None,
         edited_text: str | None = None,
+        moderation_source: str = "api",
+        moderation_action: str = "content_review",
     ) -> ContentItem:
         item = await session.get(ContentItem, content_item_id)
         if item is None:
             raise ValueError(f"Content item {content_item_id} not found")
+
+        if item.status in {ContentItemStatus.SCHEDULED, ContentItemStatus.PUBLISHED}:
+            if decision in {ReviewDecision.APPROVE, ReviewDecision.EDIT_AND_APPROVE}:
+                await self.moderation_cases.record_content_decision(
+                    session,
+                    content_item=item,
+                    moderator_id=reviewer_id,
+                    decision=ReviewDecision.APPROVE,
+                    source=moderation_source,
+                    action=moderation_action,
+                )
+                await session.commit()
+                await session.refresh(item)
+                return item
+            raise ValueError("Scheduled or published content cannot be reviewed again")
+
+        target_status = {
+            ReviewDecision.APPROVE: ContentItemStatus.APPROVED,
+            ReviewDecision.REJECT: ContentItemStatus.REJECTED,
+            ReviewDecision.HOLD: ContentItemStatus.HOLD,
+        }.get(decision)
+        if target_status is not None and item.status == target_status:
+            await self.moderation_cases.record_content_decision(
+                session,
+                content_item=item,
+                moderator_id=reviewer_id,
+                decision=decision,
+                source=moderation_source,
+                action=moderation_action,
+            )
+            await session.commit()
+            await session.refresh(item)
+            return item
 
         if decision == ReviewDecision.APPROVE:
             item.status = ContentItemStatus.APPROVED
@@ -267,6 +304,14 @@ class ModerationService:
                 edited_text=edited_text,
                 created_at=datetime.now(timezone.utc),
             )
+        )
+        await self.moderation_cases.record_content_decision(
+            session,
+            content_item=item,
+            moderator_id=reviewer_id,
+            decision=decision,
+            source=moderation_source,
+            action=moderation_action,
         )
         await session.commit()
         await session.refresh(item)

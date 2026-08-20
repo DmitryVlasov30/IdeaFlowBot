@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from sqlalchemy import BigInteger, Date, DateTime, ForeignKey, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Date, DateTime, ForeignKey, Integer, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.editorial.db.base import BaseIdMixin, EditorialBase
@@ -33,4 +33,12 @@ class PublicationLog(EditorialBase, BaseIdMixin):
         index=True,
     )
     error_text: Mapped[str | None] = mapped_column(Text)
+    attempt_count: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
+        nullable=False,
+    )
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    retry_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

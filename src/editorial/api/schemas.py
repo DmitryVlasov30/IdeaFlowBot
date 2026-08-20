@@ -116,6 +116,7 @@ class PasteResponse(BaseModel):
 class UpdateSubmissionStatusRequest(BaseModel):
     status: SubmissionStatus
     moderator_note: str | None = None
+    reviewer_id: int | None = None
 
 
 class CreateContentFromSubmissionRequest(BaseModel):
@@ -215,8 +216,14 @@ class ChannelProfileSyncResponse(BaseModel):
 class PublisherRunResponse(BaseModel):
     attempted: int
     sent: int
+    deferred: int
     failed: int
 
     @classmethod
     def from_result(cls, result: PublisherRunResult) -> "PublisherRunResponse":
-        return cls(**result.__dict__)
+        return cls(
+            attempted=result.attempted,
+            sent=result.sent,
+            deferred=result.deferred,
+            failed=result.failed,
+        )
