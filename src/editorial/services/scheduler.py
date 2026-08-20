@@ -16,7 +16,7 @@ from src.editorial.models.content import ContentItem
 from src.editorial.models.enums import ContentItemStatus, ContentSourceType, PublicationStatus
 from src.editorial.models.paste import PasteLibrary
 from src.editorial.models.publication import PublicationLog
-from src.editorial.services.paste_service import PasteService
+from src.editorial.services.paste_service import PasteAvailabilityContext, PasteService
 from src.editorial.utils.text import similarity_score
 
 
@@ -46,63 +46,161 @@ class SchedulerService:
         now = now or datetime.now(timezone.utc)
         result = SchedulerRunResult()
         channels = list((await session.execute(select(Channel).where(Channel.is_active.is_(True)))).scalars().all())
+        channel_ids = [channel.id for channel in channels]
+        slots_by_channel = await self._load_active_slots(session, channel_ids)
+        used_slot_keys = await self._load_recent_used_slot_keys(session, now, channel_ids)
+        paste_channel_ids = [channel.id for channel in channels if channel.allow_pastes]
+        availability_context = await self.paste_service.build_availability_context(
+            session,
+            channel_ids=paste_channel_ids,
+            now=now,
+        )
+        pending_items = 0
 
         for channel in channels:
             result.channels_checked += 1
-            for due_slot in await self._get_due_slots(session, channel, now):
+            for due_slot in await self._get_due_slots(
+                session,
+                channel,
+                now,
+                slots=slots_by_channel.get(channel.id, []),
+                used_slot_keys=used_slot_keys,
+            ):
                 result.slots_checked += 1
                 if await self._slot_already_used(session, channel.id, due_slot.slot_id, due_slot.slot_date):
                     continue
                 if not await self._channel_can_publish(session, channel, due_slot.scheduled_for):
                     continue
 
-                candidate = await self._pick_candidate(session, channel, due_slot.scheduled_for)
-                if candidate is None:
+                candidate: ContentItem | None = None
+                try:
+                    async with session.begin_nested():
+                        candidate = await self._pick_candidate(
+                            session,
+                            channel,
+                            due_slot.scheduled_for,
+                            availability_context=availability_context,
+                        )
+                        if candidate is None:
+                            continue
+
+                        candidate.status = ContentItemStatus.SCHEDULED
+                        candidate.scheduled_for = due_slot.scheduled_for
+                        session.add(
+                            PublicationLog(
+                                content_item_id=candidate.id,
+                                channel_id=channel.id,
+                                slot_id=due_slot.slot_id,
+                                slot_date=due_slot.slot_date,
+                                scheduled_for=due_slot.scheduled_for,
+                                publish_status=PublicationStatus.SCHEDULED,
+                                created_at=now,
+                            )
+                        )
+                        await session.flush()
+                except IntegrityError:
                     continue
 
-                candidate.status = ContentItemStatus.SCHEDULED
-                candidate.scheduled_for = due_slot.scheduled_for
-                session.add(
-                    PublicationLog(
-                        content_item_id=candidate.id,
-                        channel_id=channel.id,
-                        slot_id=due_slot.slot_id,
-                        slot_date=due_slot.slot_date,
-                        scheduled_for=due_slot.scheduled_for,
-                        publish_status=PublicationStatus.SCHEDULED,
-                        created_at=now,
-                    )
-                )
-                try:
-                    await session.flush()
-                except IntegrityError:
-                    await session.rollback()
+                if candidate is None:
                     continue
                 result.scheduled_items += 1
-                await session.commit()
+                pending_items += 1
+                used_slot_keys.add((channel.id, due_slot.slot_id, due_slot.slot_date))
+                if candidate.origin_paste_id is not None:
+                    availability_context.record_reservation(
+                        candidate.origin_paste_id,
+                        channel.id,
+                        due_slot.scheduled_for,
+                    )
+                if pending_items >= settings.scheduler_commit_batch_size:
+                    await session.commit()
+                    pending_items = 0
 
         await session.commit()
         return result
+
+    async def _load_active_slots(
+        self,
+        session: AsyncSession,
+        channel_ids: list[int],
+    ) -> dict[int, list[ChannelSlot]]:
+        if not channel_ids:
+            return {}
+        slots = list(
+            (
+                await session.execute(
+                    select(ChannelSlot)
+                    .where(
+                        ChannelSlot.channel_id.in_(channel_ids),
+                        ChannelSlot.is_active.is_(True),
+                    )
+                    .order_by(
+                        ChannelSlot.channel_id.asc(),
+                        ChannelSlot.weekday.asc(),
+                        ChannelSlot.slot_time.asc(),
+                    )
+                )
+            ).scalars().all()
+        )
+        slots_by_channel: dict[int, list[ChannelSlot]] = {}
+        for slot in slots:
+            slots_by_channel.setdefault(slot.channel_id, []).append(slot)
+        return slots_by_channel
+
+    async def _load_recent_used_slot_keys(
+        self,
+        session: AsyncSession,
+        now: datetime,
+        channel_ids: list[int],
+    ) -> set[tuple[int, int, date]]:
+        if not channel_ids:
+            return set()
+        first_date = now.date() - timedelta(days=2)
+        last_date = now.date() + timedelta(days=2)
+        rows = (
+            await session.execute(
+                select(
+                    PublicationLog.channel_id,
+                    PublicationLog.slot_id,
+                    PublicationLog.slot_date,
+                ).where(
+                    PublicationLog.channel_id.in_(channel_ids),
+                    PublicationLog.slot_id.is_not(None),
+                    PublicationLog.slot_date.is_not(None),
+                    PublicationLog.slot_date >= first_date,
+                    PublicationLog.slot_date <= last_date,
+                    PublicationLog.publish_status.in_([PublicationStatus.SCHEDULED, PublicationStatus.SENT]),
+                )
+            )
+        ).all()
+        return {
+            (int(channel_id), int(slot_id), slot_date)
+            for channel_id, slot_id, slot_date in rows
+        }
 
     async def _get_due_slots(
         self,
         session: AsyncSession,
         channel: Channel,
         now: datetime,
+        *,
+        slots: list[ChannelSlot] | None = None,
+        used_slot_keys: set[tuple[int, int, date]] | None = None,
     ) -> list[DueSlot]:
         local_now = now.astimezone(ZoneInfo(channel.timezone))
-        slots = list(
-            (
-                await session.execute(
-                    select(ChannelSlot)
-                    .where(
-                        ChannelSlot.channel_id == channel.id,
-                        ChannelSlot.is_active.is_(True),
+        if slots is None:
+            slots = list(
+                (
+                    await session.execute(
+                        select(ChannelSlot)
+                        .where(
+                            ChannelSlot.channel_id == channel.id,
+                            ChannelSlot.is_active.is_(True),
+                        )
+                        .order_by(ChannelSlot.weekday.asc(), ChannelSlot.slot_time.asc())
                     )
-                    .order_by(ChannelSlot.weekday.asc(), ChannelSlot.slot_time.asc())
-                )
-            ).scalars().all()
-        )
+                ).scalars().all()
+            )
 
         due_slots: list[DueSlot] = []
         candidate_dates = [
@@ -124,7 +222,10 @@ class SchedulerService:
                     continue
                 if local_now > planning_deadline:
                     continue
-                if await self._slot_already_used(session, channel.id, slot.id, slot_date):
+                slot_key = (channel.id, slot.id, slot_date)
+                if used_slot_keys is not None and slot_key in used_slot_keys:
+                    continue
+                if used_slot_keys is None and await self._slot_already_used(session, channel.id, slot.id, slot_date):
                     continue
 
                 scheduled_for = await self._choose_scheduled_time(
@@ -272,12 +373,19 @@ class SchedulerService:
         session: AsyncSession,
         channel: Channel,
         slot_dt: datetime,
+        *,
+        availability_context: PasteAvailabilityContext | None = None,
     ) -> ContentItem | None:
         candidate = await self._pick_existing_candidate(session, channel, slot_dt, include_generated=False)
         if candidate is not None:
             return candidate
 
-        candidate = await self._pick_library_paste_candidate(session, channel, slot_dt)
+        candidate = await self._pick_library_paste_candidate(
+            session,
+            channel,
+            slot_dt,
+            availability_context=availability_context,
+        )
         if candidate is not None:
             return candidate
 
@@ -328,11 +436,18 @@ class SchedulerService:
         session: AsyncSession,
         channel: Channel,
         slot_dt: datetime,
+        *,
+        availability_context: PasteAvailabilityContext | None = None,
     ) -> ContentItem | None:
         if not channel.allow_pastes:
             return None
 
-        for paste in await self.paste_service.list_available_for_channel(session, channel.id, limit=20):
+        for paste in await self.paste_service.list_available_for_channel(
+            session,
+            channel.id,
+            limit=20,
+            availability_context=availability_context,
+        ):
             draft_candidate = ContentItem(
                 channel_id=channel.id,
                 source_type=ContentSourceType.PASTE,
@@ -356,6 +471,7 @@ class SchedulerService:
                 channel_id=channel.id,
                 status=ContentItemStatus.APPROVED,
                 review_required=False,
+                commit=False,
             )
         return None
 

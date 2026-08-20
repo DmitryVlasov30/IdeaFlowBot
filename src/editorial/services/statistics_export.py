@@ -6,11 +6,12 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core_database.config import BASE_DIR
 from src.editorial.models.channel import Channel, ChannelSubscriberSnapshot
+from src.editorial.models.submission import Submission
 
 
 MAX_STATISTICS_DELTA_DAYS = 14
@@ -33,6 +34,7 @@ class ChannelStatisticsRow:
     tag: str
     subscriber_count: int | None
     delta_count: int | None
+    submission_count: int
 
 
 class StatisticsExportService:
@@ -83,6 +85,12 @@ class StatisticsExportService:
                 )
             ).scalars().all()
         )
+        submission_counts = await self._submission_counts(
+            session,
+            channel_ids=[channel.id for channel in channels],
+            started_at=now - timedelta(days=delta_days),
+            ended_at=now,
+        )
         rows: list[ChannelStatisticsRow] = []
 
         for channel in channels:
@@ -116,9 +124,33 @@ class StatisticsExportService:
                     tag=tag,
                     subscriber_count=current_count,
                     delta_count=delta_count,
+                    submission_count=submission_counts.get(channel.id, 0),
                 )
             )
         return rows
+
+    @staticmethod
+    async def _submission_counts(
+        session: AsyncSession,
+        *,
+        channel_ids: list[int],
+        started_at: datetime,
+        ended_at: datetime,
+    ) -> dict[int, int]:
+        if not channel_ids:
+            return {}
+
+        result = await session.execute(
+            select(Submission.channel_id, func.count(Submission.id))
+            .where(
+                Submission.channel_id.in_(channel_ids),
+                Submission.created_at >= started_at,
+                Submission.created_at <= ended_at,
+                or_(Submission.source_chat_id.is_(None), Submission.source_chat_id >= 0),
+            )
+            .group_by(Submission.channel_id)
+        )
+        return {int(channel_id): int(count) for channel_id, count in result.all()}
 
     @staticmethod
     async def _latest_snapshot(
@@ -150,10 +182,11 @@ class StatisticsExportService:
                 "\u0422\u044d\u0433 \u043a\u0430\u043d\u0430\u043b\u0430",
                 "\u041f\u043e\u0434\u043f\u0438\u0441\u0447\u0438\u043a\u0438",
                 f"\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0435 \u0437\u0430 {delta_days} \u0434\u043d.",
+                f"\u0421\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0439 \u0432 \u043f\u0440\u0435\u0434\u043b\u043e\u0436\u043a\u0443 \u0437\u0430 {delta_days} \u0434\u043d.",
             ],
         ]
         sheet_rows.extend(
-            [row.title, row.tag, row.subscriber_count, row.delta_count]
+            [row.title, row.tag, row.subscriber_count, row.delta_count, row.submission_count]
             for row in rows
         )
 
@@ -190,7 +223,7 @@ class StatisticsExportService:
                     cells.append(f'<c r="{ref}" t="inlineStr"{style}><is><t>{text}</t></is></c>')
             row_xml.append(f'<row r="{row_index}">{"".join(cells)}</row>')
 
-        filter_ref = f"A1:D{max(len(rows), 1)}"
+        filter_ref = f"A1:E{max(len(rows), 1)}"
         return (
             '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
@@ -201,6 +234,7 @@ class StatisticsExportService:
             '<col min="1" max="1" width="34" customWidth="1"/>'
             '<col min="2" max="2" width="24" customWidth="1"/>'
             '<col min="3" max="4" width="18" customWidth="1"/>'
+            '<col min="5" max="5" width="32" customWidth="1"/>'
             '</cols>'
             f'<sheetData>{"".join(row_xml)}</sheetData>'
             f'<autoFilter ref="{filter_ref}"/>'

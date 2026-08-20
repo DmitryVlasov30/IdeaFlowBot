@@ -31,6 +31,7 @@ class EditorialSettings:
     review_api_key: str | None = os.getenv("EDITORIAL_REVIEW_API_KEY")
     legacy_import_batch_size: int = _get_int("EDITORIAL_IMPORT_BATCH_SIZE", 200)
     scheduler_window_minutes: int = _get_int("EDITORIAL_SCHEDULER_WINDOW_MINUTES", 15)
+    scheduler_commit_batch_size: int = max(1, _get_int("EDITORIAL_SCHEDULER_COMMIT_BATCH_SIZE", 25))
     publisher_batch_size: int = _get_int("EDITORIAL_PUBLISHER_BATCH_SIZE", 20)
     generation_default_provider: str = os.getenv("EDITORIAL_GENERATION_PROVIDER", "stub")
     generation_openrouter_base_url: str = os.getenv(

@@ -470,23 +470,54 @@ class SubBot:
                 except Exception as ex:
                     logger.error(ex)
 
-        async def save_advertising(message: Message) -> None:
+        async def save_advertising(message: Message) -> bool:
             time = await Utils.conversion_to_moscow_time(message.date)
+            advertising_key = (message.message_id, time)
+            is_new = advertising_key not in self.advertising_data
             self.advertising_data.add((message.message_id, time))
-            await self.advertising_database.add_advertising(
+            existing = await self.advertising_database.get_advertising(
                 channel_id=self.channel_id,
                 post_id=message.message_id,
-                time=time
             )
+            if not existing:
+                await self.advertising_database.add_advertising(
+                    channel_id=self.channel_id,
+                    post_id=message.message_id,
+                    time=time,
+                )
+            try:
+                blackout = await self.publication_guard.ensure_automatic_ad_blackout_for_channel_post(
+                    tg_channel_id=self.channel_id,
+                    telegram_message_id=message.message_id,
+                    published_at=datetime.fromtimestamp(message.date, tz=timezone.utc),
+                )
+                if blackout is None:
+                    logger.warning(
+                        "Could not create automatic ad blackout: editorial channel for Telegram channel {} not found",
+                        self.channel_id,
+                    )
+            except Exception as ex:
+                logger.error(
+                    "Failed to create automatic ad blackout for channel post {} in {}: {}",
+                    message.message_id,
+                    self.channel_id,
+                    ex,
+                )
             logger.info(f"advertising data: {self.advertising_data}, time: {time}")
+            return is_new
 
         @logger.catch
-        @self.sup_bot.channel_post_handler(content_types=['text', 'photo', 'video'])
+        @self.sup_bot.edited_channel_post_handler(
+            content_types=['text', 'photo', 'video', 'animation', 'document', 'audio']
+        )
+        @self.sup_bot.channel_post_handler(
+            content_types=['text', 'photo', 'video', 'animation', 'document', 'audio']
+        )
         async def snipe_post(message: Message) -> None:
-            check_link = await Utils.check_link(message, ignored_channel_ref=self.channel_username)
+            check_link = await Utils.check_link(message, ignored_channel_ref=self.channel_signature_ref)
             if check_link:
-                await save_advertising(message)
-                await shift_timer()
+                if await save_advertising(message):
+                    await shift_timer()
 
         @logger.catch
         async def save_delayed_post(call: CallbackQuery) -> bool:

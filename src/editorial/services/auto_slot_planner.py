@@ -12,6 +12,7 @@ from src.editorial.models.channel import Channel, ChannelSlot
 from src.editorial.models.content import ContentItem
 from src.editorial.models.enums import ContentItemStatus, ContentSourceType, PublicationStatus
 from src.editorial.models.publication import PublicationLog
+from src.editorial.config import settings
 
 
 @dataclass(slots=True)
@@ -49,6 +50,7 @@ class AutoSlotPlannerService:
         if channel_id is not None:
             stmt = stmt.where(Channel.id == channel_id)
         channels = list((await session.execute(stmt.order_by(Channel.id.asc()))).scalars().all())
+        pending_plans = 0
 
         for channel in channels:
             result.channels_checked += 1
@@ -66,7 +68,10 @@ class AutoSlotPlannerService:
             result.slots_deleted += plan.deleted_slots
             result.slots_created += plan.created_slots
             result.plans.append(plan)
-            await session.commit()
+            pending_plans += 1
+            if pending_plans >= settings.scheduler_commit_batch_size:
+                await session.commit()
+                pending_plans = 0
 
         await session.commit()
         return result

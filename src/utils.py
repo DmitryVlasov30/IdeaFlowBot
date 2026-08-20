@@ -246,7 +246,7 @@ class Utils:
     @classmethod
     def _extract_message_links(cls, message: Message) -> list[str]:
         text = cls._message_text_for_links(message)
-        links = re.findall(r"https?://[^\s<>)]+", text)
+        links = re.findall(r"(?:https?://|www\.|t\.me/|telegram\.me/)[^\s<>)]+", text, flags=re.IGNORECASE)
         entities = message.entities or message.caption_entities or []
         for entity in entities:
             entity_type = getattr(entity, "type", None)
@@ -259,6 +259,23 @@ class Utils:
                 length = getattr(entity, "length", 0)
                 if length:
                     links.append(text[offset:offset + length])
+
+        reply_markup = getattr(message, "reply_markup", None)
+        keyboard = (
+            getattr(reply_markup, "keyboard", None)
+            or getattr(reply_markup, "inline_keyboard", None)
+            or []
+        )
+        for row in keyboard:
+            for button in row:
+                button_url = button.get("url") if isinstance(button, dict) else getattr(button, "url", None)
+                if button_url:
+                    links.append(button_url)
+                for nested_name in ("login_url", "web_app"):
+                    nested = button.get(nested_name) if isinstance(button, dict) else getattr(button, nested_name, None)
+                    nested_url = nested.get("url") if isinstance(nested, dict) else getattr(nested, "url", None)
+                    if nested_url:
+                        links.append(nested_url)
         return links
 
     @classmethod

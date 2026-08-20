@@ -89,6 +89,8 @@ python -m src.editorial.cli schedule
 
 `editorial-scheduler` in `docker-compose.yml` runs auto-slot planning before every scheduler pass. The planner changes only channels with `auto_slots_enabled=true` and skips a channel/date after a successful plan.
 
+Each scheduler pass preloads active slots, paste cooldown history, reservations, and tag rules in bulk. `EDITORIAL_SCHEDULER_COMMIT_BATCH_SIZE` controls how many database-only scheduling changes are committed together (default: `25`). This does not change slot or paste eligibility rules.
+
 `editorial-profile-sync` in `docker-compose.yml` updates channel subscriber counts and applies subscriber-based profiles once per hour.
 
 Publisher:
