@@ -68,6 +68,50 @@ def build_slot_status_markup(
     return markup
 
 
+def build_rejection_status_markup(
+        *,
+        sender_id: int | None,
+        sender_username: str | None,
+        sender_first_name: str | None,
+        moderator_id: int,
+        moderator_username: str | None,
+        moderator_first_name: str | None,
+) -> InlineKeyboardMarkup:
+    sender_username = (sender_username or "").lstrip("@")
+    sender_text = (
+        f"@{sender_username}"
+        if sender_username
+        else sender_first_name or str(sender_id or 0)
+    )
+    moderator_username = (moderator_username or "").lstrip("@")
+    moderator_text = (
+        f"@{moderator_username}"
+        if moderator_username
+        else moderator_first_name or str(moderator_id)
+    )
+
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton(
+            text=f"\U0001f464 {sender_text}",
+            callback_data=f"add_info;{sender_id or 0}",
+        )
+    )
+    markup.add(
+        InlineKeyboardButton(
+            text=f"\u274c {moderator_text} (\u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u043e)",
+            callback_data=f"add_info;{moderator_id}",
+        )
+    )
+    markup.add(
+        InlineKeyboardButton(
+            text="\u21a9\ufe0f \u041e\u0442\u043c\u0435\u043d\u0438\u0442\u044c \u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u0438\u0435",
+            callback_data=f"cancel_reject;{sender_id or 0}",
+        )
+    )
+    return markup
+
+
 class MarkupButton:
     def __init__(self, bot: AsyncTeleBot):
         self.bot = bot
@@ -229,15 +273,32 @@ class MarkupButton:
         )
 
     @logger.catch
-    async def reject_post(self, call: CallbackQuery):
+    async def reject_post(
+            self,
+            call: CallbackQuery,
+            *,
+            moderator_id: int,
+            moderator_username: str | None = None,
+            moderator_first_name: str | None = None,
+    ):
         message_id = call.message.message_id
-        user_info = await self.bot.get_chat(call.data.split(";")[1])
-        markup = InlineKeyboardMarkup(row_width=2)
-        button_info = InlineKeyboardButton(
-            text=f"@{user_info.username} (Отклонено)",
-            callback_data=f"add_info;{user_info.id}"
+        sender_id = int(call.data.split(";")[1])
+        try:
+            user_info = await self.bot.get_chat(sender_id)
+            sender_username = getattr(user_info, "username", None)
+            sender_first_name = getattr(user_info, "first_name", None)
+        except Exception as ex:
+            logger.warning("Failed to resolve rejected submission sender {}: {}", sender_id, ex)
+            sender_username = None
+            sender_first_name = None
+        markup = build_rejection_status_markup(
+            sender_id=sender_id,
+            sender_username=sender_username,
+            sender_first_name=sender_first_name,
+            moderator_id=moderator_id,
+            moderator_username=moderator_username,
+            moderator_first_name=moderator_first_name,
         )
-        markup.add(button_info)
         await self.bot.edit_message_reply_markup(
             chat_id=call.message.chat.id,
             message_id=message_id,

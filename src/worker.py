@@ -711,7 +711,12 @@ class SubBot:
                         text=f"\u041e\u0434\u043e\u0431\u0440\u0435\u043d\u0438\u0435 \u0432 \u0441\u043b\u043e\u0442 \u043e\u0442\u043c\u0435\u043d\u0435\u043d\u043e.{suffix}",
                     )
                 case "reject":
-                    await buttons_func.reject_post(call)
+                    await buttons_func.reject_post(
+                        call,
+                        moderator_id=call.from_user.id,
+                        moderator_username=getattr(call.from_user, "username", None),
+                        moderator_first_name=getattr(call.from_user, "first_name", None),
+                    )
                     await self._sync_editorial_submission_status(
                         review_message_id=call.message.message_id,
                         status=SubmissionStatus.REJECTED,
@@ -719,6 +724,36 @@ class SubBot:
                         reviewer_id=call.from_user.id,
                         moderation_decision="rejected",
                         moderation_action="reject",
+                    )
+                case "cancel_reject":
+                    sender_id = int(call.data.split(";")[1])
+                    try:
+                        restored = await self.legacy_moderation_sync.cancel_review_message_rejection(
+                            channel_tg_id=self.channel_id,
+                            review_chat_id=call.message.chat.id,
+                            review_message_id=call.message.message_id,
+                            reviewer_id=call.from_user.id,
+                        )
+                    except Exception as ex:
+                        logger.error("Failed to cancel legacy rejection: {}", ex)
+                        await self.sup_bot.send_message(
+                            chat_id=call.message.chat.id,
+                            text=f"\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043e\u0442\u043c\u0435\u043d\u0438\u0442\u044c \u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u0438\u0435: {ex}",
+                        )
+                        return
+                    if not restored:
+                        await self.sup_bot.send_message(
+                            chat_id=call.message.chat.id,
+                            text="\u041d\u0435 \u043d\u0430\u0448\u0451\u043b \u044d\u0442\u0443 \u043f\u0440\u0435\u0434\u043b\u043e\u0436\u043a\u0443 \u0432 legacy-\u0431\u0430\u0437\u0435.",
+                        )
+                        return
+                    await buttons_func.main_menu(
+                        sender_id=call.message.chat.id,
+                        chat_id=sender_id,
+                        message_id=call.message.message_id,
+                        chat_suggest=self.chat_suggest,
+                        is_send=False,
+                        is_anon=(call.message.message_id in self.anonym_send),
                     )
                 case "delayed_button":
                     await buttons_func.delayed_post(call)
@@ -774,7 +809,12 @@ class SubBot:
                         "message_id": review_message_id,
                     })
                     self.delayed_message.pop(review_message_id, None)
-                    await buttons_func.reject_post(call)
+                    await buttons_func.reject_post(
+                        call,
+                        moderator_id=call.from_user.id,
+                        moderator_username=getattr(call.from_user, "username", None),
+                        moderator_first_name=getattr(call.from_user, "first_name", None),
+                    )
                     await self._sync_editorial_submission_status(
                         review_message_id=review_message_id,
                         status=SubmissionStatus.REJECTED,

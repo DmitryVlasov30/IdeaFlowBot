@@ -265,6 +265,49 @@ class LegacyModerationSyncService:
             await session.refresh(item)
             return item
 
+    async def cancel_review_message_rejection(
+        self,
+        *,
+        channel_tg_id: int,
+        review_chat_id: int,
+        review_message_id: int,
+        reviewer_id: int,
+    ) -> bool:
+        async with session_factory() as session:
+            row = await self.legacy_reader.find_sender_row_by_review_message(
+                channel_id=channel_tg_id,
+                review_chat_id=review_chat_id,
+                review_message_id=review_message_id,
+            )
+            if row is None:
+                return False
+
+            submission = await self.importer.ensure_submission_for_legacy_row(session, row)
+            if submission is None:
+                return False
+
+            related = await self.moderation.get_related_submissions(session, submission)
+            reviewed_at = datetime.now(timezone.utc)
+            for related_submission in related:
+                related_submission.status = SubmissionStatus.HOLD
+                related_submission.reviewed_at = reviewed_at
+                related_submission.moderator_note = "Legacy rejection cancelled"
+
+            audit_item = await self._get_legacy_delayed_audit_item(session, submission)
+            if audit_item is not None and audit_item.status == ContentItemStatus.REJECTED:
+                audit_item.status = ContentItemStatus.HOLD
+                audit_item.scheduled_for = None
+
+            await self.moderation_cases.void_submission_case(
+                session,
+                submission_id=submission.id,
+                moderator_id=reviewer_id,
+                source="legacy",
+                action="cancel_reject",
+            )
+            await session.commit()
+            return True
+
     async def mark_legacy_delayed_published(
         self,
         *,
