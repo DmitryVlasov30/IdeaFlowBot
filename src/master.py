@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, time, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -1612,6 +1613,13 @@ class MasterBot:
         if preview is None or not preview.review_message_ids:
             return
 
+        if (
+            preview.media_group_id
+            and len(preview.preview_file_ids) > 1
+            and await self._send_submission_preview_fallback(chat_id, preview)
+        ):
+            return
+
         try:
             if len(preview.review_message_ids) == 1:
                 await self.main_bot.copy_message(
@@ -1639,9 +1647,9 @@ class MasterBot:
             logger.error("Failed to send submission preview for {}: {}", submission_id, ex)
             await self._send_submission_preview_fallback(chat_id, preview)
 
-    async def _send_submission_preview_fallback(self, chat_id: int, preview) -> None:
+    async def _send_submission_preview_fallback(self, chat_id: int, preview) -> bool:
         if not preview.preview_file_ids:
-            return
+            return False
 
         max_preview_bytes = settings.media_preview_max_mb * 1024 * 1024
         if any(size and size > max_preview_bytes for size in preview.preview_file_sizes):
@@ -1652,24 +1660,23 @@ class MasterBot:
                     "Его всё ещё можно approve и публиковать, но превью здесь пропущено."
                 ),
             )
-            return
+            return True
 
         binding = await self.legacy_reader.get_bot_binding(preview.channel_tg_id)
         if binding is None:
             logger.error("Failed to build preview fallback: no bot binding for channel {}", preview.channel_tg_id)
-            return
+            return False
 
         try:
             if preview.media_group_id and len(preview.preview_file_ids) > 1:
-                for index, file_id in enumerate(preview.preview_file_ids):
-                    item_type = preview.preview_content_types[index] if index < len(preview.preview_content_types) else preview.content_type
-                    await self._send_binary_preview_item(
-                        chat_id=chat_id,
-                        bot_token=binding.bot_api_token,
-                        file_id=file_id,
-                        content_type=item_type,
-                    )
-                return
+                await self._send_binary_preview_media_group(
+                    chat_id=chat_id,
+                    bot_token=binding.bot_api_token,
+                    file_ids=preview.preview_file_ids,
+                    content_types=preview.preview_content_types,
+                    default_content_type=preview.content_type,
+                )
+                return True
 
             first_type = preview.preview_content_types[0] if preview.preview_content_types else preview.content_type
             await self._send_binary_preview_item(
@@ -1678,8 +1685,92 @@ class MasterBot:
                 file_id=preview.preview_file_ids[0],
                 content_type=first_type,
             )
+            return True
         except Exception as ex:
             logger.error("Failed to send preview fallback for submission: {}", ex)
+            return False
+
+    async def _download_binary_preview_item(
+        self,
+        *,
+        bot_token: str,
+        file_id: str,
+        content_type: str,
+    ) -> tuple[bytes, str, str, str]:
+        subbot = AsyncTeleBot(bot_token)
+        try:
+            file_info = await subbot.get_file(file_id)
+        finally:
+            await subbot.close_session()
+        file_url = f"https://api.telegram.org/file/bot{bot_token}/{file_info.file_path}"
+
+        request_kwargs = {}
+        if settings.proxies["http"]:
+            request_kwargs["proxy"] = settings.proxies["http"]
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(file_url, **request_kwargs) as response:
+                response.raise_for_status()
+                payload = await response.read()
+
+        filename = file_info.file_path.split("/")[-1] or "preview.bin"
+        if content_type == "photo":
+            return payload, filename, "photo", "image/jpeg"
+        if content_type == "video":
+            return payload, filename, "video", "video/mp4"
+        if content_type == "document":
+            return payload, filename, "document", "application/octet-stream"
+        if content_type == "audio":
+            return payload, filename, "audio", "audio/mpeg"
+        raise ValueError(f"Unsupported media group preview type: {content_type}")
+
+    async def _send_binary_preview_media_group(
+        self,
+        *,
+        chat_id: int,
+        bot_token: str,
+        file_ids: list[str],
+        content_types: list[str],
+        default_content_type: str,
+    ) -> None:
+        downloaded_items = []
+        for index, file_id in enumerate(file_ids):
+            content_type = (
+                content_types[index]
+                if index < len(content_types)
+                else default_content_type
+            )
+            downloaded_items.append(
+                await self._download_binary_preview_item(
+                    bot_token=bot_token,
+                    file_id=file_id,
+                    content_type=content_type,
+                )
+            )
+
+        form = aiohttp.FormData()
+        form.add_field("chat_id", str(chat_id))
+        media = []
+        for index, (payload, filename, item_type, mime_type) in enumerate(downloaded_items):
+            field_name = f"media_{index}"
+            media.append({"type": item_type, "media": f"attach://{field_name}"})
+            form.add_field(
+                field_name,
+                payload,
+                filename=filename,
+                content_type=mime_type,
+            )
+        form.add_field("media", json.dumps(media))
+
+        request_kwargs = {}
+        if settings.proxies["http"]:
+            request_kwargs["proxy"] = settings.proxies["http"]
+        api_url = f"https://api.telegram.org/bot{self.api_token_bot}/sendMediaGroup"
+        async with aiohttp.ClientSession() as session:
+            async with session.post(api_url, data=form, **request_kwargs) as response:
+                result = await response.json()
+        if not result.get("ok"):
+            raise RuntimeError(result.get("description", str(result)))
 
     async def _send_binary_preview_item(
         self,

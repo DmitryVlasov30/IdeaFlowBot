@@ -24,12 +24,15 @@ from src.editorial.services.publication_signature import (
 )
 from src.editorial.services.telegram_resilience import is_transient_telegram_error
 from src.legacy_delayed import delayed_publication_matches
+from src.legacy_media_groups import fetch_sender_media_group_rows
 from src.utils import Utils, filter_chats
 from config import settings
 from src.markups import MarkupButton
 
 
 class SubBot:
+    MEDIA_GROUP_SETTLE_SECONDS = 0.8
+
     def __init__(
             self,
             main_bot_username: str,
@@ -86,6 +89,9 @@ class SubBot:
 
         self.chat_suggest = None
         self.chat_suggests = None
+        self._media_group_messages: dict[tuple[int, str], list[Message]] = {}
+        self._media_group_flush_tasks: dict[tuple[int, str], asyncio.Task] = {}
+        self._media_group_lock = asyncio.Lock()
 
     async def _safe_answer_callback(
         self,
@@ -408,23 +414,13 @@ class SubBot:
                 logger.info("bot not chat")
                 return
 
+            if getattr(message, "media_group_id", None):
+                await self._queue_media_group(message)
+                return
+
             review_message = await self._send_review_message_to_legacy_chat(message)
-            await Utils().save_incoming_message_with_review(
-                message=message,
-                channel_id=self.channel_id,
-                bot_info=self.bot_info.username,
-                review_chat_id=self.chat_suggest,
-                review_message_id=getattr(review_message, "message_id", None),
-            )
-            if self.callback_new_submission is not None and review_message is not None:
-                try:
-                    await self.callback_new_submission(
-                        channel_tg_id=self.channel_id,
-                        review_chat_id=self.chat_suggest,
-                        review_message_id=review_message.message_id,
-                    )
-                except Exception as ex:
-                    logger.error("Failed to send moderator notifications: {}", ex)
+            await self._save_incoming_message(message, review_message)
+            await self._notify_new_submission(review_message)
 
         async def shift_timer():
             interval_lst = list(map(
@@ -595,6 +591,10 @@ class SubBot:
                         info_sender,
                         self.bot_info.username,
                     )
+                    media_group_message_ids = await self._get_review_media_group_message_ids(
+                        review_chat_id=call.message.chat.id,
+                        review_message_id=call.message.message_id,
+                    )
                     try:
                         legacy_sent = await asyncio.wait_for(
                             buttons_func.send_suggest(
@@ -603,6 +603,7 @@ class SubBot:
                                 self.channel_id,
                                 is_anon,
                                 self.channel_title,
+                                media_group_message_ids=media_group_message_ids,
                             ),
                             timeout=settings.telegram_request_timeout_seconds,
                         )
@@ -889,6 +890,165 @@ class SubBot:
                 .main_menu(message.chat.id, message.chat.id, message.message_id, self.chat_suggest)
             )
 
+    async def _save_incoming_message(self, message: Message, review_message) -> None:
+        await Utils().save_incoming_message_with_review(
+            message=message,
+            channel_id=self.channel_id,
+            bot_info=self.bot_info.username,
+            review_chat_id=self.chat_suggest,
+            review_message_id=getattr(review_message, "message_id", None),
+        )
+
+    async def _notify_new_submission(self, review_message) -> None:
+        if self.callback_new_submission is None or review_message is None:
+            return
+        try:
+            await self.callback_new_submission(
+                channel_tg_id=self.channel_id,
+                review_chat_id=self.chat_suggest,
+                review_message_id=review_message.message_id,
+            )
+        except Exception as ex:
+            logger.error("Failed to send moderator notifications: {}", ex)
+
+    async def _queue_media_group(self, message: Message) -> None:
+        key = (int(message.chat.id), str(message.media_group_id))
+        async with self._media_group_lock:
+            messages = self._media_group_messages.setdefault(key, [])
+            if not any(item.message_id == message.message_id for item in messages):
+                messages.append(message)
+
+            previous_task = self._media_group_flush_tasks.get(key)
+            if previous_task is not None:
+                previous_task.cancel()
+            self._media_group_flush_tasks[key] = asyncio.create_task(
+                self._flush_media_group_after_delay(key)
+            )
+
+    async def _flush_media_group_after_delay(self, key: tuple[int, str]) -> None:
+        try:
+            await asyncio.sleep(self.MEDIA_GROUP_SETTLE_SECONDS)
+        except asyncio.CancelledError:
+            return
+
+        async with self._media_group_lock:
+            if self._media_group_flush_tasks.get(key) is not asyncio.current_task():
+                return
+            messages = self._media_group_messages.pop(key, [])
+            self._media_group_flush_tasks.pop(key, None)
+
+        if not messages:
+            return
+        try:
+            await self._send_media_group_to_legacy_chat(messages)
+        except Exception as ex:
+            logger.exception(
+                "Failed to forward media group {} for bot @{} to legacy chat {}: {}",
+                key[1],
+                self.bot_info.username,
+                self.chat_suggest,
+                ex,
+            )
+
+    async def _send_media_group_to_legacy_chat(self, messages: list[Message]) -> None:
+        messages = sorted(messages, key=lambda item: item.message_id)
+        try:
+            copied_messages = await self._copy_media_group_to_current_legacy_chat(messages)
+        except ApiTelegramException as ex:
+            if ex.error_code != 403:
+                raise
+            logger.warning(
+                "Failed to forward media group for bot @{} to legacy chat {}: {}. Refreshing chat binding.",
+                self.bot_info.username,
+                self.chat_suggest,
+                ex,
+            )
+            await self._drop_invalid_chat_suggest(self.chat_suggest)
+            self.chat_suggest = await self._refresh_chat_suggest()
+            if self.chat_suggest is None:
+                await self.sup_bot.send_message(
+                    chat_id=settings.general_admin,
+                    text=(
+                        f"Битая привязка легаси-чата у @{self.bot_info.username} была очищена. "
+                        f"Добавьте саббота заново в нужный модер-чат для канала "
+                        f"{self.channel_username or self.channel_title or self.channel_id}."
+                    ),
+                )
+                return
+            copied_messages = await self._copy_media_group_to_current_legacy_chat(messages)
+
+        if len(copied_messages) != len(messages):
+            raise RuntimeError(
+                f"Telegram copied {len(copied_messages)} of {len(messages)} media group messages"
+            )
+
+        for message, copied_message in zip(messages, copied_messages):
+            await self._save_incoming_message(message, copied_message)
+
+        preferred_control_index = next(
+            (index for index, message in enumerate(messages) if message.caption),
+            0,
+        )
+        markup = await MarkupButton(self.sup_bot).get_main_menu_markup(messages[0].chat.id)
+        control_message = None
+        control_indexes = [preferred_control_index] + [
+            index for index in range(len(copied_messages))
+            if index != preferred_control_index
+        ]
+        for control_index in control_indexes:
+            candidate = copied_messages[control_index]
+            try:
+                await self.sup_bot.edit_message_reply_markup(
+                    chat_id=self.chat_suggest,
+                    message_id=candidate.message_id,
+                    reply_markup=markup,
+                )
+                control_message = candidate
+                break
+            except Exception as ex:
+                logger.warning(
+                    "Failed to attach media group controls to review message {}: {}",
+                    candidate.message_id,
+                    ex,
+                )
+        if control_message is None:
+            raise RuntimeError("Could not attach moderation controls to copied media group")
+
+        await self._notify_new_submission(control_message)
+
+    async def _copy_media_group_to_current_legacy_chat(self, messages: list[Message]):
+        return await self.sup_bot.copy_messages(
+            chat_id=self.chat_suggest,
+            from_chat_id=messages[0].chat.id,
+            message_ids=[message.message_id for message in messages],
+        )
+
+    async def _get_review_media_group_message_ids(
+        self,
+        *,
+        review_chat_id: int,
+        review_message_id: int,
+    ) -> list[int] | None:
+        row = await self.legacy_moderation_sync.legacy_reader.find_sender_row_by_review_message(
+            channel_id=self.channel_id,
+            review_chat_id=review_chat_id,
+            review_message_id=review_message_id,
+        )
+        if row is None or not row.media_group_id or row.chat_id is None:
+            return None
+        rows = await fetch_sender_media_group_rows(
+            self.legacy_moderation_sync.legacy_reader,
+            channel_id=self.channel_id,
+            source_chat_id=int(row.chat_id),
+            media_group_id=row.media_group_id,
+        )
+        message_ids = [
+            int(item.review_message_id)
+            for item in rows
+            if item.review_chat_id == review_chat_id and item.review_message_id is not None
+        ]
+        return list(dict.fromkeys(message_ids)) or None
+
     async def _refresh_chat_suggest(self) -> int | None:
         candidates = await self.admins_database.get_chat_admin_rows(self.bot_info.id)
         if not candidates:
@@ -1061,6 +1221,13 @@ class SubBot:
         return True
 
     async def stop_bot(self) -> None:
+        media_group_tasks = list(self._media_group_flush_tasks.values())
+        self._media_group_flush_tasks.clear()
+        self._media_group_messages.clear()
+        for task in media_group_tasks:
+            task.cancel()
+        if media_group_tasks:
+            await asyncio.gather(*media_group_tasks, return_exceptions=True)
         if self.polling_task:
             self.polling_task.cancel()
             try:

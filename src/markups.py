@@ -316,19 +316,15 @@ class MarkupButton:
             parse_mode="Markdown",
         )
 
-    @logger.catch
-    async def main_menu(self,
-                        sender_id,
-                        chat_id,
-                        message_id,
-                        chat_suggest,
-                        is_send: bool = True,
-                        is_anon: bool = False
-                        ):
+    async def get_main_menu_markup(
+            self,
+            chat_id,
+            *,
+            is_anon: bool = False,
+    ) -> InlineKeyboardMarkup:
+        info_user = await self.bot.get_chat(chat_id)
         markup = InlineKeyboardMarkup(row_width=3)
 
-        logger.debug(chat_id)
-        info_user = await self.bot.get_chat(chat_id)
         banned_user = InlineKeyboardButton(
             text="👮‍♂️бан",
             callback_data=f"banned_user;{chat_id}"
@@ -349,17 +345,14 @@ class MarkupButton:
             text="❌Отклонить",
             callback_data=f"reject;{chat_id}"
         )
-
         delayed_button = InlineKeyboardButton(
             text="⌛️Отложка",
             callback_data=f"delayed_button;{chat_id}"
         )
-
         anon_button = InlineKeyboardButton(
-            text=f"🥷АНОН" if not is_anon else "🤵НЕ АНОН",
+            text="🥷АНОН" if not is_anon else "🤵НЕ АНОН",
             callback_data=f"anonym_button;{chat_id}"
         )
-
         advertising_button = InlineKeyboardButton(
             text="💵Реклама",
             callback_data=f"advertising_button;{chat_id}"
@@ -369,6 +362,19 @@ class MarkupButton:
         markup.add(send_button, reject_button)
         markup.add(approve_to_slot_button)
         markup.add(delayed_button, advertising_button)
+        return markup
+
+    @logger.catch
+    async def main_menu(self,
+                        sender_id,
+                        chat_id,
+                        message_id,
+                        chat_suggest,
+                        is_send: bool = True,
+                        is_anon: bool = False
+                        ):
+        logger.debug(chat_id)
+        markup = await self.get_main_menu_markup(chat_id, is_anon=is_anon)
         if is_send:
             return await self.bot.copy_message(
                 chat_id=chat_suggest,
@@ -462,7 +468,15 @@ class MarkupButton:
         )
 
     @logger.catch(reraise=True)
-    async def send_suggest(self, call, channel_username, channel_id, is_anon, channel_title=None):
+    async def send_suggest(
+            self,
+            call,
+            channel_username,
+            channel_id,
+            is_anon,
+            channel_title=None,
+            media_group_message_ids: list[int] | None = None,
+    ):
         try:
             markup_post = None
 
@@ -489,7 +503,44 @@ class MarkupButton:
                 channel_id=int(channel_id),
             )
 
-            if not add_signature:
+            if media_group_message_ids and len(media_group_message_ids) > 1:
+                copied_messages = await self.bot.copy_messages(
+                    chat_id=channel_id,
+                    from_chat_id=call.message.chat.id,
+                    message_ids=media_group_message_ids,
+                )
+                copied_message_ids = [int(item.message_id) for item in copied_messages]
+                if not copied_message_ids:
+                    raise RuntimeError("Telegram returned no copied media group messages")
+                try:
+                    control_index = media_group_message_ids.index(call.message.message_id)
+                except ValueError:
+                    control_index = 0
+                control_index = min(control_index, len(copied_message_ids) - 1)
+                published_control_message_id = copied_message_ids[control_index]
+
+                if add_signature:
+                    signature_html = publication_signature_html(
+                        title=channel_title,
+                        channel_ref=channel_username,
+                    )
+                    await self.bot.edit_message_caption(
+                        chat_id=channel_id,
+                        message_id=published_control_message_id,
+                        caption=format_publication_html(
+                            call.message.caption,
+                            signature_html=signature_html,
+                        ),
+                        parse_mode="HTML",
+                        reply_markup=markup_post,
+                    )
+                elif markup_post is not None:
+                    await self.bot.edit_message_reply_markup(
+                        chat_id=channel_id,
+                        message_id=published_control_message_id,
+                        reply_markup=markup_post,
+                    )
+            elif not add_signature:
                 await self.bot.copy_message(
                     chat_id=channel_id,
                     from_chat_id=call.message.chat.id,
