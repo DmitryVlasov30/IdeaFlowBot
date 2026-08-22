@@ -93,8 +93,20 @@ class LegacyPublicationStatusService:
                 sender_id = row.user_id or (
                     related_submission.source_user_id if related_submission is not None else None
                 )
+                sender_username = getattr(row, "username", None) or (
+                    getattr(related_submission, "username", None)
+                    if related_submission is not None
+                    else None
+                )
+                sender_first_name = getattr(row, "first_name", None) or (
+                    getattr(related_submission, "first_name", None)
+                    if related_submission is not None
+                    else None
+                )
                 markup = build_slot_status_markup(
                     sender_id=sender_id,
+                    sender_username=sender_username,
+                    sender_first_name=sender_first_name,
                     moderator_id=moderator_id,
                     moderator_username=moderator_username,
                     moderator_first_name=moderator_first_name,

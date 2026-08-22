@@ -19,23 +19,43 @@ def build_slot_status_markup(
         moderator_username: str | None,
         moderator_first_name: str | None,
         state: str,
+        sender_username: str | None = None,
+        sender_first_name: str | None = None,
         allow_cancel: bool = False,
 ) -> InlineKeyboardMarkup:
     status_labels = {
         "approved": "\u043e\u0434\u043e\u0431\u0440\u0435\u043d\u043e \u0432 \u0441\u043b\u043e\u0442",
         "published": "\u043e\u043f\u0443\u0431\u043b\u0438\u043a\u043e\u0432\u0430\u043d\u043e",
     }
-    username = (moderator_username or "").lstrip("@")
+    sender_username = (sender_username or "").lstrip("@")
+    sender_text = (
+        f"@{sender_username}"
+        if sender_username
+        else sender_first_name or str(sender_id or 0)
+    )
+    moderator_username = (moderator_username or "").lstrip("@")
     moderator_text = (
-        f"@{username}"
-        if username
+        f"@{moderator_username}"
+        if moderator_username
         else moderator_first_name or str(moderator_id)
     )
     markup = InlineKeyboardMarkup(row_width=1)
+    if sender_username or sender_first_name:
+        markup.add(
+            InlineKeyboardButton(
+                text=f"\U0001f464 {sender_text}",
+                callback_data=f"add_info;{sender_id or 0}",
+            )
+        )
+        status_prefix = "\u2705 "
+        status_callback_id = moderator_id
+    else:
+        status_prefix = ""
+        status_callback_id = sender_id or 0
     markup.add(
         InlineKeyboardButton(
-            text=f"{moderator_text} ({status_labels[state]})",
-            callback_data=f"add_info;{sender_id or 0}",
+            text=f"{status_prefix}{moderator_text} ({status_labels[state]})",
+            callback_data=f"add_info;{status_callback_id}",
         )
     )
     if allow_cancel:
@@ -356,8 +376,18 @@ class MarkupButton:
             moderator_username=None,
             moderator_first_name=None,
     ):
+        try:
+            info_sender = await self.bot.get_chat(sender_id)
+            sender_username = getattr(info_sender, "username", None)
+            sender_first_name = getattr(info_sender, "first_name", None)
+        except Exception as ex:
+            logger.warning("Failed to resolve slot submission sender {}: {}", sender_id, ex)
+            sender_username = None
+            sender_first_name = None
         markup = build_slot_status_markup(
             sender_id=sender_id,
+            sender_username=sender_username,
+            sender_first_name=sender_first_name,
             moderator_id=moderator_id,
             moderator_username=moderator_username,
             moderator_first_name=moderator_first_name,
