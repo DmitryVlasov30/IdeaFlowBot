@@ -24,7 +24,11 @@ from src.editorial.services.publication_signature import (
 )
 from src.editorial.services.telegram_resilience import is_transient_telegram_error
 from src.legacy_delayed import delayed_publication_matches
-from src.legacy_media_groups import fetch_sender_media_group_rows
+from src.legacy_media_groups import (
+    LegacyMediaGroupReference,
+    build_media_group_reference,
+    fetch_sender_media_group_rows,
+)
 from src.utils import Utils, filter_chats
 from config import settings
 from src.markups import MarkupButton
@@ -591,7 +595,7 @@ class SubBot:
                         info_sender,
                         self.bot_info.username,
                     )
-                    media_group_message_ids = await self._get_review_media_group_message_ids(
+                    media_group = await self._get_review_media_group(
                         review_chat_id=call.message.chat.id,
                         review_message_id=call.message.message_id,
                     )
@@ -603,7 +607,7 @@ class SubBot:
                                 self.channel_id,
                                 is_anon,
                                 self.channel_title,
-                                media_group_message_ids=media_group_message_ids,
+                                media_group=media_group,
                             ),
                             timeout=settings.telegram_request_timeout_seconds,
                         )
@@ -849,13 +853,21 @@ class SubBot:
                 case "advertising_button":
                     sender_id = call.data.split(";")[1]
                     info_sender = await self.sup_bot.get_chat(sender_id)
+                    media_group = await self._get_review_media_group(
+                        review_chat_id=call.message.chat.id,
+                        review_message_id=call.message.message_id,
+                    )
                     await buttons_func.advertising_button(call)
                     await self.callback_adv_action(
                         call,
                         self.sup_bot,
                         self.channel_username or self.channel_title or str(self.channel_id),
                         info_sender,
-                        call.message.text or call.message.caption,
+                        (
+                            media_group.caption
+                            if media_group is not None
+                            else call.message.text or call.message.caption
+                        ),
                     )
 
     async def _send_review_message_to_legacy_chat(self, message: Message):
@@ -982,37 +994,18 @@ class SubBot:
                 f"Telegram copied {len(copied_messages)} of {len(messages)} media group messages"
             )
 
-        for message, copied_message in zip(messages, copied_messages):
-            await self._save_incoming_message(message, copied_message)
-
-        preferred_control_index = next(
-            (index for index, message in enumerate(messages) if message.caption),
-            0,
-        )
         markup = await MarkupButton(self.sup_bot).get_main_menu_markup(messages[0].chat.id)
-        control_message = None
-        control_indexes = [preferred_control_index] + [
-            index for index in range(len(copied_messages))
-            if index != preferred_control_index
-        ]
-        for control_index in control_indexes:
-            candidate = copied_messages[control_index]
-            try:
-                await self.sup_bot.edit_message_reply_markup(
-                    chat_id=self.chat_suggest,
-                    message_id=candidate.message_id,
-                    reply_markup=markup,
-                )
-                control_message = candidate
-                break
-            except Exception as ex:
-                logger.warning(
-                    "Failed to attach media group controls to review message {}: {}",
-                    candidate.message_id,
-                    ex,
-                )
-        if control_message is None:
-            raise RuntimeError("Could not attach moderation controls to copied media group")
+        control_message = await self.sup_bot.send_message(
+            chat_id=self.chat_suggest,
+            text=(
+                f"🖼 Медиагруппа: {len(messages)} влож.\n"
+                "Действия ниже применяются ко всему альбому."
+            ),
+            reply_markup=markup,
+        )
+
+        for message in messages:
+            await self._save_incoming_message(message, control_message)
 
         await self._notify_new_submission(control_message)
 
@@ -1023,12 +1016,12 @@ class SubBot:
             message_ids=[message.message_id for message in messages],
         )
 
-    async def _get_review_media_group_message_ids(
+    async def _get_review_media_group(
         self,
         *,
         review_chat_id: int,
         review_message_id: int,
-    ) -> list[int] | None:
+    ) -> LegacyMediaGroupReference | None:
         row = await self.legacy_moderation_sync.legacy_reader.find_sender_row_by_review_message(
             channel_id=self.channel_id,
             review_chat_id=review_chat_id,
@@ -1042,12 +1035,7 @@ class SubBot:
             source_chat_id=int(row.chat_id),
             media_group_id=row.media_group_id,
         )
-        message_ids = [
-            int(item.review_message_id)
-            for item in rows
-            if item.review_chat_id == review_chat_id and item.review_message_id is not None
-        ]
-        return list(dict.fromkeys(message_ids)) or None
+        return build_media_group_reference(rows)
 
     async def _refresh_chat_suggest(self) -> int | None:
         candidates = await self.admins_database.get_chat_admin_rows(self.bot_info.id)
@@ -1288,7 +1276,44 @@ class SubBot:
             channel_id=int(self.channel_id),
         )
 
-        if not add_signature:
+        media_group = await self._get_review_media_group(
+            review_chat_id=self.chat_suggest,
+            review_message_id=int(message_id),
+        )
+
+        if media_group is not None and media_group.source_message_ids:
+            copied_messages = await self.sup_bot.copy_messages(
+                from_chat_id=media_group.source_chat_id,
+                chat_id=self.channel_id,
+                message_ids=media_group.source_message_ids,
+            )
+            if not copied_messages:
+                raise RuntimeError("Telegram returned no copied delayed media group messages")
+            copied_message = copied_messages[0]
+            caption_index = min(media_group.caption_index, len(copied_messages) - 1)
+            published_caption_message = copied_messages[caption_index]
+            if add_signature:
+                signature_html = publication_signature_html(
+                    title=self.channel_title,
+                    channel_ref=self.channel_signature_ref,
+                )
+                await self.sup_bot.edit_message_caption(
+                    chat_id=self.channel_id,
+                    message_id=published_caption_message.message_id,
+                    caption=format_publication_html(
+                        media_group.caption,
+                        signature_html=signature_html,
+                    ),
+                    parse_mode="HTML",
+                    reply_markup=markup,
+                )
+            elif markup is not None:
+                await self.sup_bot.edit_message_reply_markup(
+                    chat_id=self.channel_id,
+                    message_id=published_caption_message.message_id,
+                    reply_markup=markup,
+                )
+        elif not add_signature:
             copied_message = await self.sup_bot.copy_message(
                 from_chat_id=self.chat_suggest,
                 chat_id=self.channel_id,

@@ -263,45 +263,64 @@ class PublisherService:
                 row for row in related_legacy_rows
                 if row.review_chat_id is not None and row.review_message_id is not None
             ]
-            if len(review_rows) == len(related_rows) and len({row.review_chat_id for row in review_rows}) == 1:
-                from_chat_id = int(review_rows[0].review_chat_id)
-                message_ids = [int(row.review_message_id) for row in review_rows]
-            else:
-                message_ids = [
-                    int(item.source_message_id)
-                    for item in related_rows
-                    if item.source_message_id is not None
-                ]
-                if submission.source_chat_id is None or not message_ids:
-                    raise ValueError("Media group submission has no source chat or message ids")
+            source_message_ids = [
+                int(item.source_message_id)
+                for item in related_rows
+                if item.source_message_id is not None
+            ]
+            review_message_ids = [int(row.review_message_id) for row in review_rows]
+            if (
+                submission.source_chat_id is not None
+                and len(source_message_ids) == len(related_rows)
+            ):
                 from_chat_id = int(submission.source_chat_id)
+                message_ids = source_message_ids
+            elif (
+                len(review_rows) == len(related_rows)
+                and len({row.review_chat_id for row in review_rows}) == 1
+                and len(set(review_message_ids)) == len(review_message_ids)
+            ):
+                from_chat_id = int(review_rows[0].review_chat_id)
+                message_ids = review_message_ids
+            else:
+                if submission.source_chat_id is None:
+                    raise ValueError("Media group submission has no source chat or message ids")
+                raise ValueError("Media group submission has incomplete source message ids")
             source_text = self._get_related_submission_source_text(related_rows)
-            first_message_id: int | None = None
-            for index, message_id in enumerate(message_ids):
-                copied_id = await self.telegram_adapter.copy_message(
+            copied_message_ids = await self.telegram_adapter.copy_messages(
+                bot_token=bot_token,
+                channel_id=channel.tg_channel_id,
+                from_chat_id=from_chat_id,
+                message_ids=message_ids,
+            )
+            if not copied_message_ids:
+                raise RuntimeError("Telegram returned no copied media group messages")
+
+            formatted_caption = self.format_publication_text(
+                source_text,
+                channel,
+                submission,
+                channel_signature=channel_signature,
+                channel_title=channel_title,
+                add_channel_signature=add_channel_signature,
+            )
+            if formatted_caption != source_text:
+                caption_index = next(
+                    (
+                        index for index, item in enumerate(related_rows)
+                        if (item.cleaned_text or item.raw_text or "").strip()
+                    ),
+                    0,
+                )
+                caption_index = min(caption_index, len(copied_message_ids) - 1)
+                await self.telegram_adapter.edit_message_caption(
                     bot_token=bot_token,
                     channel_id=channel.tg_channel_id,
-                    from_chat_id=from_chat_id,
-                    message_id=message_id,
-                    caption=(
-                        self.format_publication_text(
-                            source_text,
-                            channel,
-                            submission,
-                            channel_signature=channel_signature,
-                            channel_title=channel_title,
-                            add_channel_signature=add_channel_signature,
-                        )
-                        if index == 0
-                        else None
-                    ),
+                    message_id=copied_message_ids[caption_index],
+                    caption=formatted_caption,
                     parse_mode=parse_mode,
                 )
-                if first_message_id is None:
-                    first_message_id = copied_id
-            if first_message_id is None:
-                raise RuntimeError("Telegram returned no copied media group messages")
-            return first_message_id
+            return copied_message_ids[0]
 
         if submission.content_type in {"photo", "video", "animation"}:
             source_text = self._get_related_submission_source_text(related_rows)

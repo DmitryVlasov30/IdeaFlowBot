@@ -8,6 +8,7 @@ from src.editorial.services.publication_signature import (
     publication_signature_html,
     should_add_publication_signature,
 )
+from src.legacy_media_groups import LegacyMediaGroupReference
 from src.utils import Utils
 from config import settings
 
@@ -475,7 +476,7 @@ class MarkupButton:
             channel_id,
             is_anon,
             channel_title=None,
-            media_group_message_ids: list[int] | None = None,
+            media_group: LegacyMediaGroupReference | None = None,
     ):
         try:
             markup_post = None
@@ -503,21 +504,17 @@ class MarkupButton:
                 channel_id=int(channel_id),
             )
 
-            if media_group_message_ids and len(media_group_message_ids) > 1:
+            if media_group is not None and media_group.source_message_ids:
                 copied_messages = await self.bot.copy_messages(
                     chat_id=channel_id,
-                    from_chat_id=call.message.chat.id,
-                    message_ids=media_group_message_ids,
+                    from_chat_id=media_group.source_chat_id,
+                    message_ids=media_group.source_message_ids,
                 )
                 copied_message_ids = [int(item.message_id) for item in copied_messages]
                 if not copied_message_ids:
                     raise RuntimeError("Telegram returned no copied media group messages")
-                try:
-                    control_index = media_group_message_ids.index(call.message.message_id)
-                except ValueError:
-                    control_index = 0
-                control_index = min(control_index, len(copied_message_ids) - 1)
-                published_control_message_id = copied_message_ids[control_index]
+                caption_index = min(media_group.caption_index, len(copied_message_ids) - 1)
+                published_caption_message_id = copied_message_ids[caption_index]
 
                 if add_signature:
                     signature_html = publication_signature_html(
@@ -526,9 +523,9 @@ class MarkupButton:
                     )
                     await self.bot.edit_message_caption(
                         chat_id=channel_id,
-                        message_id=published_control_message_id,
+                        message_id=published_caption_message_id,
                         caption=format_publication_html(
-                            call.message.caption,
+                            media_group.caption,
                             signature_html=signature_html,
                         ),
                         parse_mode="HTML",
@@ -537,7 +534,7 @@ class MarkupButton:
                 elif markup_post is not None:
                     await self.bot.edit_message_reply_markup(
                         chat_id=channel_id,
-                        message_id=published_control_message_id,
+                        message_id=published_caption_message_id,
                         reply_markup=markup_post,
                     )
             elif not add_signature:

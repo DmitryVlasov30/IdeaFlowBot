@@ -149,14 +149,16 @@ class TelegramPublisherAdapter:
         channel_id: int,
         from_chat_id: int,
         message_ids: list[int],
-    ) -> int:
+    ) -> list[int]:
         if len(message_ids) == 1:
-            return await self.copy_message(
-                bot_token=bot_token,
-                channel_id=channel_id,
-                from_chat_id=from_chat_id,
-                message_id=message_ids[0],
-            )
+            return [
+                await self.copy_message(
+                    bot_token=bot_token,
+                    channel_id=channel_id,
+                    from_chat_id=from_chat_id,
+                    message_id=message_ids[0],
+                )
+            ]
 
         payload = {
             "chat_id": channel_id,
@@ -190,4 +192,23 @@ class TelegramPublisherAdapter:
         copied_items = result.get("result") or []
         if not copied_items:
             raise RuntimeError("Telegram returned no copied messages")
-        return int(copied_items[0]["message_id"])
+        return [int(item["message_id"]) for item in copied_items]
+
+    async def edit_message_caption(
+        self,
+        bot_token: str,
+        channel_id: int,
+        message_id: int,
+        caption: str,
+        parse_mode: str | None = None,
+    ) -> None:
+        async with telegram_bot_session(bot_token) as bot:
+            await run_telegram_operation(
+                bot.edit_message_caption(
+                    chat_id=channel_id,
+                    message_id=message_id,
+                    caption=caption,
+                    parse_mode=parse_mode,
+                ),
+                operation="editMessageCaption",
+            )

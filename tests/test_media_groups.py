@@ -6,6 +6,8 @@ import pytest
 
 from src.markups import MarkupButton
 from src.master import MasterBot
+from src.editorial.services.publisher import PublisherService
+from src.legacy_media_groups import LegacyMediaGroupReference
 from src.worker import SubBot
 
 
@@ -20,11 +22,12 @@ def _message(message_id: int, *, caption: str | None = None):
 
 
 @pytest.mark.asyncio
-async def test_legacy_review_copies_album_once_and_saves_each_message_link() -> None:
+async def test_legacy_review_sends_one_control_card_for_the_whole_album() -> None:
     copied_messages = [SimpleNamespace(message_id=501), SimpleNamespace(message_id=502)]
+    control_message = SimpleNamespace(message_id=503)
     bot = SimpleNamespace(
         copy_messages=AsyncMock(return_value=copied_messages),
-        edit_message_reply_markup=AsyncMock(),
+        send_message=AsyncMock(return_value=control_message),
         get_chat=AsyncMock(return_value=SimpleNamespace(username="author")),
     )
     subbot = SubBot.__new__(SubBot)
@@ -45,16 +48,18 @@ async def test_legacy_review_copies_album_once_and_saves_each_message_link() -> 
         from_chat_id=1001,
         message_ids=[11, 12],
     )
-    bot.edit_message_reply_markup.assert_awaited_once()
-    assert bot.edit_message_reply_markup.await_args.kwargs["message_id"] == 501
+    bot.send_message.assert_awaited_once()
+    assert bot.send_message.await_args.kwargs["chat_id"] == -10055
+    assert "Действия ниже применяются ко всему альбому" in bot.send_message.await_args.kwargs["text"]
+    assert bot.send_message.await_args.kwargs["reply_markup"] is not None
     assert subbot._save_incoming_message.await_args_list == [
-        ((messages[1], copied_messages[0]), {}),
-        ((messages[0], copied_messages[1]), {}),
+        ((messages[1], control_message), {}),
+        ((messages[0], control_message), {}),
     ]
     subbot.callback_new_submission.assert_awaited_once_with(
         channel_tg_id=-10077,
         review_chat_id=-10055,
-        review_message_id=501,
+        review_message_id=503,
     )
 
 
@@ -99,12 +104,18 @@ async def test_legacy_approval_publishes_album_with_copy_messages(monkeypatch) -
     call = SimpleNamespace(
         data="send_suggest;1001",
         message=SimpleNamespace(
-            message_id=501,
+            message_id=503,
             chat=SimpleNamespace(id=-10055),
-            content_type="photo",
-            text=None,
-            caption="Album caption",
+            content_type="text",
+            text="Media group controls",
+            caption=None,
         ),
+    )
+    media_group = LegacyMediaGroupReference(
+        source_chat_id=1001,
+        source_message_ids=[11, 12],
+        caption="Album caption",
+        caption_index=0,
     )
 
     sent = await MarkupButton(bot).send_suggest(
@@ -113,16 +124,123 @@ async def test_legacy_approval_publishes_album_with_copy_messages(monkeypatch) -
         -10077,
         False,
         "Channel",
-        media_group_message_ids=[501, 502],
+        media_group=media_group,
     )
 
     assert sent is True
     bot.copy_messages.assert_awaited_once_with(
         chat_id=-10077,
-        from_chat_id=-10055,
-        message_ids=[501, 502],
+        from_chat_id=1001,
+        message_ids=[11, 12],
     )
     bot.copy_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_legacy_delayed_publication_copies_album_from_original_messages(monkeypatch) -> None:
+    media_group = LegacyMediaGroupReference(
+        source_chat_id=1001,
+        source_message_ids=[11, 12],
+        caption="Album caption",
+        caption_index=0,
+    )
+    copied_messages = [SimpleNamespace(message_id=701), SimpleNamespace(message_id=702)]
+    bot = SimpleNamespace(
+        token="1:test",
+        copy_messages=AsyncMock(return_value=copied_messages),
+        copy_message=AsyncMock(),
+        edit_message_reply_markup=AsyncMock(),
+        get_chat=AsyncMock(return_value=SimpleNamespace(username="author")),
+    )
+    subbot = SubBot.__new__(SubBot)
+    subbot.sup_bot = bot
+    subbot.channel_id = -10077
+    subbot.chat_suggest = -10055
+    subbot.channel_username = "@channel"
+    subbot.channel_title = "Channel"
+    subbot.channel_signature_ref = "@channel"
+    subbot.delayed_message = {503: [100, 1001]}
+    subbot.anonym_send = set()
+    subbot._get_review_media_group = AsyncMock(return_value=media_group)
+    subbot.legacy_moderation_sync = SimpleNamespace(
+        mark_legacy_delayed_published=AsyncMock(return_value=True)
+    )
+    monkeypatch.setattr(
+        "src.worker.should_add_publication_signature",
+        AsyncMock(return_value=False),
+    )
+
+    sent = await subbot.send_delayed_message(503, 1001)
+
+    assert sent is True
+    bot.copy_messages.assert_awaited_once_with(
+        from_chat_id=1001,
+        chat_id=-10077,
+        message_ids=[11, 12],
+    )
+    bot.copy_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_slot_publisher_uses_original_album_when_review_rows_share_control_card() -> None:
+    submission = SimpleNamespace(
+        id=1,
+        channel_id=7,
+        media_group_id="album-1",
+        source_chat_id=1001,
+        source_message_id=11,
+        cleaned_text=None,
+        raw_text=None,
+        is_anonymous=False,
+        username="author",
+    )
+    caption_submission = SimpleNamespace(
+        id=2,
+        channel_id=7,
+        media_group_id="album-1",
+        source_chat_id=1001,
+        source_message_id=12,
+        cleaned_text="Album caption",
+        raw_text="Album caption",
+        is_anonymous=False,
+        username="author",
+    )
+    related_rows = [submission, caption_submission]
+    legacy_rows = [
+        SimpleNamespace(review_chat_id=-10055, review_message_id=503),
+        SimpleNamespace(review_chat_id=-10055, review_message_id=503),
+    ]
+    result = SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: related_rows))
+    session = SimpleNamespace(
+        get=AsyncMock(return_value=submission),
+        execute=AsyncMock(return_value=result),
+    )
+    adapter = SimpleNamespace(
+        copy_messages=AsyncMock(return_value=[701, 702]),
+        edit_message_caption=AsyncMock(),
+    )
+    service = PublisherService(telegram_adapter=adapter)
+    service.should_add_channel_signature = AsyncMock(return_value=False)
+    service._get_related_legacy_rows = AsyncMock(return_value=legacy_rows)
+    channel = SimpleNamespace(id=7, tg_channel_id=-10077, short_code="channel", title="Channel")
+    content_item = SimpleNamespace(origin_submission_id=1)
+
+    published_id = await service._publish_submission_based_item(
+        session,
+        content_item,
+        channel,
+        "1:test",
+    )
+
+    assert published_id == 701
+    adapter.copy_messages.assert_awaited_once_with(
+        bot_token="1:test",
+        channel_id=-10077,
+        from_chat_id=1001,
+        message_ids=[11, 12],
+    )
+    adapter.edit_message_caption.assert_awaited_once()
+    assert adapter.edit_message_caption.await_args.kwargs["message_id"] == 702
 
 
 @pytest.mark.asyncio
