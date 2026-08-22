@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
 import aiohttp
+from loguru import logger
 
 from telebot.async_telebot import AsyncTeleBot, asyncio_helper
 
@@ -16,6 +19,18 @@ class TelegramChatInfo:
     title: str | None = None
     tag: str | None = None
     invite_link: str | None = None
+
+
+@asynccontextmanager
+async def telegram_bot_session(bot_token: str) -> AsyncIterator[AsyncTeleBot]:
+    bot = AsyncTeleBot(bot_token)
+    try:
+        yield bot
+    finally:
+        try:
+            await bot.close_session()
+        except Exception as exc:
+            logger.warning("Failed to close Telegram bot session: {}", exc)
 
 
 class TelegramPublisherAdapter:
@@ -36,35 +51,35 @@ class TelegramPublisherAdapter:
         parse_mode: str | None = None,
         disable_web_page_preview: bool | None = None,
     ) -> int:
-        bot = AsyncTeleBot(bot_token)
-        message = await run_telegram_operation(
-            bot.send_message(
-                chat_id=channel_id,
-                text=text,
-                parse_mode=parse_mode,
-                disable_web_page_preview=disable_web_page_preview,
-            ),
-            operation="sendMessage",
-        )
-        return int(message.message_id)
+        async with telegram_bot_session(bot_token) as bot:
+            message = await run_telegram_operation(
+                bot.send_message(
+                    chat_id=channel_id,
+                    text=text,
+                    parse_mode=parse_mode,
+                    disable_web_page_preview=disable_web_page_preview,
+                ),
+                operation="sendMessage",
+            )
+            return int(message.message_id)
 
     async def get_chat_tag(self, bot_token: str, channel_id: int) -> str | None:
         return (await self.get_chat_info(bot_token=bot_token, channel_id=channel_id)).tag
 
     async def get_chat_info(self, bot_token: str, channel_id: int) -> TelegramChatInfo:
-        bot = AsyncTeleBot(bot_token)
-        chat = await run_telegram_operation(
-            bot.get_chat(channel_id),
-            operation="getChat",
-        )
-        title = getattr(chat, "title", None)
-        username = getattr(chat, "username", None)
-        invite_link = getattr(chat, "invite_link", None)
-        return TelegramChatInfo(
-            title=title,
-            tag=f"@{username}" if username else None,
-            invite_link=invite_link,
-        )
+        async with telegram_bot_session(bot_token) as bot:
+            chat = await run_telegram_operation(
+                bot.get_chat(channel_id),
+                operation="getChat",
+            )
+            title = getattr(chat, "title", None)
+            username = getattr(chat, "username", None)
+            invite_link = getattr(chat, "invite_link", None)
+            return TelegramChatInfo(
+                title=title,
+                tag=f"@{username}" if username else None,
+                invite_link=invite_link,
+            )
 
     async def send_text_with_entities(
         self,
@@ -115,18 +130,18 @@ class TelegramPublisherAdapter:
         caption: str | None = None,
         parse_mode: str | None = None,
     ) -> int:
-        bot = AsyncTeleBot(bot_token)
-        message = await run_telegram_operation(
-            bot.copy_message(
-                chat_id=channel_id,
-                from_chat_id=from_chat_id,
-                message_id=message_id,
-                caption=caption,
-                parse_mode=parse_mode,
-            ),
-            operation="copyMessage",
-        )
-        return int(message.message_id)
+        async with telegram_bot_session(bot_token) as bot:
+            message = await run_telegram_operation(
+                bot.copy_message(
+                    chat_id=channel_id,
+                    from_chat_id=from_chat_id,
+                    message_id=message_id,
+                    caption=caption,
+                    parse_mode=parse_mode,
+                ),
+                operation="copyMessage",
+            )
+            return int(message.message_id)
 
     async def copy_messages(
         self,

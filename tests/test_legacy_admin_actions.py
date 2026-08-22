@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from src.markups import MarkupButton
+from src.markups import MarkupButton, build_slot_status_markup
 from src.utils import Utils
 
 
@@ -37,6 +37,63 @@ async def test_legacy_approval_saves_admin_who_pressed_button(callback_data):
     assert saved["button"] == callback_data.split(";", 1)[0]
     assert saved["message_id"] == call.message.id
     assert saved["chat_id"] == call.message.chat.id
+
+
+@pytest.mark.asyncio
+async def test_approved_slot_button_shows_moderator_username() -> None:
+    bot = SimpleNamespace(edit_message_reply_markup=AsyncMock())
+
+    await MarkupButton(bot).approve_to_slot_button(
+        chat_id=-100123,
+        message_id=4321,
+        sender_id=1001,
+        moderator_id=987654321,
+        moderator_username="review_admin",
+        moderator_first_name="Admin",
+    )
+
+    markup = bot.edit_message_reply_markup.await_args.kwargs["reply_markup"]
+    markup_dict = markup.to_dict()
+    assert markup_dict["inline_keyboard"][0][0] == {
+        "text": "@review_admin (одобрено в слот)",
+        "callback_data": "add_info;1001",
+    }
+    assert markup_dict["inline_keyboard"][1][0] == {
+        "text": "↩️ Отменить слот",
+        "callback_data": "cancel_approve_to_slot;1001",
+    }
+
+
+def test_published_slot_button_keeps_moderator_username_and_removes_cancel() -> None:
+    markup = build_slot_status_markup(
+        sender_id=1001,
+        moderator_id=987654321,
+        moderator_username="review_admin",
+        moderator_first_name="Admin",
+        state="published",
+    )
+
+    markup_dict = markup.to_dict()
+    assert markup_dict["inline_keyboard"] == [
+        [
+            {
+                "text": "@review_admin (опубликовано)",
+                "callback_data": "add_info;1001",
+            }
+        ]
+    ]
+
+
+def test_slot_status_falls_back_to_moderator_name_without_username() -> None:
+    markup = build_slot_status_markup(
+        sender_id=1001,
+        moderator_id=987654321,
+        moderator_username=None,
+        moderator_first_name="Admin",
+        state="published",
+    )
+
+    assert markup.to_dict()["inline_keyboard"][0][0]["text"] == "Admin (опубликовано)"
 
 
 @pytest.mark.asyncio

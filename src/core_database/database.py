@@ -177,8 +177,30 @@ async def _set_postgres_sequence(conn, table_name: str) -> None:
 
 
 async def _ensure_postgres_bigint_columns(conn) -> None:
+    result = await conn.exec_driver_sql(
+        """
+        SELECT table_name, column_name, udt_name
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+        """
+    )
+    existing_column_types = {
+        (str(row[0]), str(row[1])): str(row[2])
+        for row in result.fetchall()
+    }
+
     for table_name, column_names in POSTGRES_BIGINT_COLUMNS.items():
         for column_name in column_names:
+            current_type = existing_column_types.get((table_name, column_name))
+            if current_type is None or current_type == "int8":
+                continue
+
+            logger.info(
+                "Converting legacy PostgreSQL column {}.{} from {} to BIGINT",
+                table_name,
+                column_name,
+                current_type,
+            )
             await conn.exec_driver_sql(
                 f'''
                 ALTER TABLE "{table_name}"

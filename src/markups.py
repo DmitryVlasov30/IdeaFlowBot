@@ -12,6 +12,42 @@ from src.utils import Utils
 from config import settings
 
 
+def build_slot_status_markup(
+        *,
+        sender_id: int | None,
+        moderator_id: int,
+        moderator_username: str | None,
+        moderator_first_name: str | None,
+        state: str,
+        allow_cancel: bool = False,
+) -> InlineKeyboardMarkup:
+    status_labels = {
+        "approved": "\u043e\u0434\u043e\u0431\u0440\u0435\u043d\u043e \u0432 \u0441\u043b\u043e\u0442",
+        "published": "\u043e\u043f\u0443\u0431\u043b\u0438\u043a\u043e\u0432\u0430\u043d\u043e",
+    }
+    username = (moderator_username or "").lstrip("@")
+    moderator_text = (
+        f"@{username}"
+        if username
+        else moderator_first_name or str(moderator_id)
+    )
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton(
+            text=f"{moderator_text} ({status_labels[state]})",
+            callback_data=f"add_info;{sender_id or 0}",
+        )
+    )
+    if allow_cancel:
+        markup.add(
+            InlineKeyboardButton(
+                text="\u21a9\ufe0f \u041e\u0442\u043c\u0435\u043d\u0438\u0442\u044c \u0441\u043b\u043e\u0442",
+                callback_data=f"cancel_approve_to_slot;{sender_id or 0}",
+            )
+        )
+    return markup
+
+
 class MarkupButton:
     def __init__(self, bot: AsyncTeleBot):
         self.bot = bot
@@ -310,20 +346,24 @@ class MarkupButton:
         )
 
     @logger.catch
-    async def approve_to_slot_button(self, chat_id, message_id, sender_id=None):
-        markup = InlineKeyboardMarkup()
-        info_sender = await self.bot.get_chat(sender_id)
-        author = f"@{info_sender.username}" if info_sender.username else str(info_sender.id)
-        button_info = InlineKeyboardButton(
-            text=f"{author} (\u043e\u0434\u043e\u0431\u0440\u0435\u043d\u043e \u0432 \u0441\u043b\u043e\u0442)",
-            callback_data=f"add_info;{sender_id}"
+    async def approve_to_slot_button(
+            self,
+            chat_id,
+            message_id,
+            sender_id,
+            *,
+            moderator_id,
+            moderator_username=None,
+            moderator_first_name=None,
+    ):
+        markup = build_slot_status_markup(
+            sender_id=sender_id,
+            moderator_id=moderator_id,
+            moderator_username=moderator_username,
+            moderator_first_name=moderator_first_name,
+            state="approved",
+            allow_cancel=True,
         )
-        cancel_button = InlineKeyboardButton(
-            text="\u21a9\ufe0f \u041e\u0442\u043c\u0435\u043d\u0438\u0442\u044c \u0441\u043b\u043e\u0442",
-            callback_data=f"cancel_approve_to_slot;{sender_id}"
-        )
-        markup.add(button_info)
-        markup.add(cancel_button)
         await self.bot.edit_message_reply_markup(
             chat_id=chat_id,
             message_id=message_id,

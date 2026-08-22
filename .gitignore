@@ -5,5 +5,7 @@ __pycache__/
 .venv/
 logs/
 data/bot_network_db.db
+/data/backup_*/
+/ideaflow_editorial.sql
 log_data.log
 

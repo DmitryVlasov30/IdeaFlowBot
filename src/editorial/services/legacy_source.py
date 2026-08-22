@@ -4,7 +4,6 @@ from dataclasses import dataclass
 
 from sqlalchemy import select
 
-from src.core_database.database import ensure_legacy_schema
 from src.core_database.models.bots_data import BotsData
 from src.core_database.models.db_helper import db_helper as legacy_db_helper
 from src.core_database.models.sender_info import SenderData
@@ -42,7 +41,6 @@ class LegacyCollectorReader:
     """Read-only bridge to the current legacy collector database."""
 
     async def fetch_sender_rows(self, after_id: int = 0, limit: int = 200) -> list[LegacySenderRow]:
-        await ensure_legacy_schema()
         async with legacy_db_helper.engine.connect() as conn:
             result = await conn.execute(
                 select(
@@ -95,7 +93,6 @@ class LegacyCollectorReader:
     async def fetch_sender_rows_by_ids(self, row_ids: list[int]) -> list[LegacySenderRow]:
         if not row_ids:
             return []
-        await ensure_legacy_schema()
         async with legacy_db_helper.engine.connect() as conn:
             result = await conn.execute(
                 select(
@@ -150,7 +147,6 @@ class LegacyCollectorReader:
         review_chat_id: int,
         review_message_id: int,
     ) -> LegacySenderRow | None:
-        await ensure_legacy_schema()
         async with legacy_db_helper.engine.connect() as conn:
             result = await conn.execute(
                 select(

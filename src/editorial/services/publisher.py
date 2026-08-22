@@ -17,6 +17,7 @@ from src.editorial.models.publication import PublicationLog
 from src.editorial.models.submission import Submission
 from src.editorial.services.legacy_audit import LEGACY_DELAYED_AUDIT_TEMPLATE_KEY
 from src.editorial.services.legacy_source import LegacyCollectorReader, LegacySenderRow
+from src.legacy_publication_status import LegacyPublicationStatusService
 from src.editorial.services.paste_service import PasteService
 from src.editorial.services.publication_signature import (
     channel_publication_signature_html,
@@ -52,10 +53,14 @@ class PublisherService:
         telegram_adapter: TelegramPublisherAdapter | None = None,
         legacy_reader: LegacyCollectorReader | None = None,
         paste_service: PasteService | None = None,
+        legacy_publication_status: LegacyPublicationStatusService | None = None,
     ) -> None:
         self.telegram_adapter = telegram_adapter or TelegramPublisherAdapter()
         self.legacy_reader = legacy_reader or LegacyCollectorReader()
         self.paste_service = paste_service or PasteService()
+        self.legacy_publication_status = (
+            legacy_publication_status or LegacyPublicationStatusService(self.legacy_reader)
+        )
         self._channel_signature_cache: dict[tuple[str, int], ChannelPublicationSignature] = {}
 
     @staticmethod
@@ -511,6 +516,7 @@ class PublisherService:
                 await session.commit()
                 continue
 
+            published_content_item_id: int | None = None
             operation_started = perf_counter()
             try:
                 telegram_message_id = await self._publish_submission_based_item(
@@ -533,6 +539,7 @@ class PublisherService:
                         content_item_id=content_item.id,
                     )
                 result.sent += 1
+                published_content_item_id = int(content_item.id)
             except Exception as ex:
                 if is_transient_telegram_error(ex):
                     self.defer_transient_publication(
@@ -563,6 +570,17 @@ class PublisherService:
                 result.failed += 1
 
             await session.commit()
+            if published_content_item_id is not None:
+                try:
+                    await self.legacy_publication_status.mark_content_item_published(
+                        published_content_item_id
+                    )
+                except Exception as ex:
+                    logger.error(
+                        "Published content item {}, but failed to update its legacy review status: {}",
+                        published_content_item_id,
+                        ex,
+                    )
 
         logger.info(
             "Publisher run completed in {:.2f}s: attempted={}, sent={}, deferred={}, failed={}",

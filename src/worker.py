@@ -677,13 +677,9 @@ class SubBot:
                         call.message.chat.id,
                         call.message.message_id,
                         sender_id,
-                    )
-                    await self.sup_bot.send_message(
-                        chat_id=call.message.chat.id,
-                        text=(
-                            f"\u0421\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435 \u043e\u0434\u043e\u0431\u0440\u0435\u043d\u043e \u0432 \u0441\u043b\u043e\u0442. "
-                            f"Content item #{item.id}."
-                        ),
+                        moderator_id=call.from_user.id,
+                        moderator_username=getattr(call.from_user, "username", None),
+                        moderator_first_name=getattr(call.from_user, "first_name", None),
                     )
                 case "cancel_approve_to_slot":
                     sender_id = int(call.data.split(";")[1])

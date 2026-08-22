@@ -89,9 +89,11 @@ async def test_successful_retry_marks_message_sent(monkeypatch) -> None:
     legacy_reader = SimpleNamespace(
         get_bot_binding=AsyncMock(return_value=SimpleNamespace(bot_api_token="1:token"))
     )
+    status_sync = SimpleNamespace(mark_content_item_published=AsyncMock(return_value=1))
     service = PublisherService(
         telegram_adapter=SimpleNamespace(),
         legacy_reader=legacy_reader,
+        legacy_publication_status=status_sync,
     )
     service._publish_submission_based_item = AsyncMock(return_value=777)
 
@@ -105,3 +107,4 @@ async def test_successful_retry_marks_message_sent(monkeypatch) -> None:
     assert log_item.retry_after is None
     assert log_item.error_text is None
     assert item.status == ContentItemStatus.PUBLISHED
+    status_sync.mark_content_item_published.assert_awaited_once_with(item.id)
