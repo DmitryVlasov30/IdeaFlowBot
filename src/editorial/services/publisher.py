@@ -601,6 +601,17 @@ class PublisherService:
                         ex,
                     )
 
+        reconcile_legacy_statuses = getattr(
+            self.legacy_publication_status,
+            "reconcile_published_review_statuses",
+            None,
+        )
+        if reconcile_legacy_statuses is not None:
+            try:
+                await reconcile_legacy_statuses(limit=20)
+            except Exception as ex:
+                logger.error("Failed to reconcile legacy publication statuses: {}", ex)
+
         logger.info(
             "Publisher run completed in {:.2f}s: attempted={}, sent={}, deferred={}, failed={}",
             perf_counter() - run_started,

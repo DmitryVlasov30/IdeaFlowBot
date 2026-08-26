@@ -1,20 +1,41 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import and_, exists, select
+from sqlalchemy.orm import aliased
 from telebot.async_telebot import AsyncTeleBot
 
 from src.editorial.db.session import session_factory
 from src.editorial.models.channel import Channel
-from src.editorial.models.content import ContentItem
-from src.editorial.models.enums import ContentItemStatus, ReviewDecision
+from src.editorial.models.content import ContentItem, ContentItemSource
+from src.editorial.models.enums import (
+    ContentItemStatus,
+    ContentSourceType,
+    PublicationStatus,
+    ReviewDecision,
+)
+from src.editorial.models.publication import PublicationLog
 from src.editorial.models.review import Review
 from src.editorial.models.submission import Submission
 from src.editorial.services.legacy_source import LegacyCollectorReader
 from src.editorial.services.moderation import ModerationService
 from src.editorial.services.telegram_publisher import telegram_bot_session
-from src.editorial.services.telegram_resilience import run_telegram_operation
+from src.editorial.services.telegram_resilience import (
+    is_telegram_message_not_modified,
+    run_telegram_operation,
+)
 from src.markups import build_slot_status_markup
+
+
+LEGACY_PUBLISHED_SOURCE_ROLE = "legacy_published"
+
+
+@dataclass(slots=True)
+class _PublicationReviewTarget:
+    submission: Submission
+    reviewer_id: int
 
 
 class LegacyPublicationStatusService:
@@ -58,17 +79,125 @@ class LegacyPublicationStatusService:
                 return 0
 
             related_submissions = await self.moderation.get_related_submissions(session, submission)
-            submission_by_legacy_row_id = {
-                related.legacy_row_id: related
+            target_by_submission_id = {
+                int(related.id): _PublicationReviewTarget(
+                    submission=related,
+                    reviewer_id=int(latest_approval.reviewer_id),
+                )
                 for related in related_submissions
                 if related.legacy_row_id is not None
             }
-            moderator_id = int(latest_approval.reviewer_id)
+
+            duplicate_items: list[ContentItem] = []
+            if submission.content_type == "text" and item.text_hash:
+                duplicate_rows = (
+                    await session.execute(
+                        select(ContentItem, Submission)
+                        .join(Submission, Submission.id == ContentItem.origin_submission_id)
+                        .where(
+                            ContentItem.id != item.id,
+                            ContentItem.channel_id == item.channel_id,
+                            ContentItem.source_type == ContentSourceType.SUBMISSION,
+                            ContentItem.text_hash == item.text_hash,
+                            ContentItem.status.in_(
+                                {ContentItemStatus.APPROVED, ContentItemStatus.SCHEDULED}
+                            ),
+                            Submission.content_type == "text",
+                            Submission.legacy_row_id.is_not(None),
+                        )
+                        .order_by(ContentItem.created_at.asc(), ContentItem.id.asc())
+                    )
+                ).all()
+                duplicate_items = [duplicate_item for duplicate_item, _ in duplicate_rows]
+                duplicate_item_ids = [int(duplicate_item.id) for duplicate_item in duplicate_items]
+
+                duplicate_approvals: dict[int, Review] = {}
+                if duplicate_item_ids:
+                    approval_rows = list(
+                        (
+                            await session.execute(
+                                select(Review)
+                                .where(
+                                    Review.content_item_id.in_(duplicate_item_ids),
+                                    Review.decision.in_(
+                                        {ReviewDecision.APPROVE, ReviewDecision.EDIT_AND_APPROVE}
+                                    ),
+                                )
+                                .order_by(
+                                    Review.content_item_id.asc(),
+                                    Review.created_at.desc(),
+                                    Review.id.desc(),
+                                )
+                            )
+                        ).scalars().all()
+                    )
+                    for approval in approval_rows:
+                        duplicate_approvals.setdefault(int(approval.content_item_id), approval)
+
+                for duplicate_item, duplicate_submission in duplicate_rows:
+                    approval = duplicate_approvals.get(int(duplicate_item.id))
+                    if approval is None:
+                        continue
+                    target_by_submission_id[int(duplicate_submission.id)] = _PublicationReviewTarget(
+                        submission=duplicate_submission,
+                        reviewer_id=int(approval.reviewer_id),
+                    )
+
+                scheduled_duplicate_ids = [
+                    int(duplicate_item.id)
+                    for duplicate_item in duplicate_items
+                    if duplicate_item.status == ContentItemStatus.SCHEDULED
+                ]
+                if scheduled_duplicate_ids:
+                    scheduled_logs = list(
+                        (
+                            await session.execute(
+                                select(PublicationLog).where(
+                                    PublicationLog.content_item_id.in_(scheduled_duplicate_ids),
+                                    PublicationLog.publish_status == PublicationStatus.SCHEDULED,
+                                )
+                            )
+                        ).scalars().all()
+                    )
+                    for log_item in scheduled_logs:
+                        log_item.publish_status = PublicationStatus.CANCELLED
+                        log_item.error_text = (
+                            f"Exact text duplicate of published content item {content_item_id}"
+                        )
+                    for duplicate_item in duplicate_items:
+                        if duplicate_item.status == ContentItemStatus.SCHEDULED:
+                            duplicate_item.status = ContentItemStatus.APPROVED
+                            duplicate_item.scheduled_for = None
+                    await session.commit()
+
+            if not target_by_submission_id:
+                return 0
+
+            already_synced_ids = set(
+                (
+                    await session.execute(
+                        select(ContentItemSource.submission_id).where(
+                            ContentItemSource.submission_id.in_(target_by_submission_id),
+                            ContentItemSource.role == LEGACY_PUBLISHED_SOURCE_ROLE,
+                        )
+                    )
+                ).scalars().all()
+            )
+            pending_targets = {
+                submission_id: target
+                for submission_id, target in target_by_submission_id.items()
+                if submission_id not in already_synced_ids
+            }
             channel_tg_id = int(channel.tg_channel_id)
 
-        if not submission_by_legacy_row_id:
+        if not pending_targets:
             return 0
-        legacy_rows = await self.legacy_reader.fetch_sender_rows_by_ids(list(submission_by_legacy_row_id))
+        target_by_legacy_row_id = {
+            int(target.submission.legacy_row_id): target
+            for target in pending_targets.values()
+            if target.submission.legacy_row_id is not None
+        }
+        legacy_rows = await self.legacy_reader.fetch_sender_rows_by_ids(list(target_by_legacy_row_id))
         review_rows = [
             row
             for row in legacy_rows
@@ -81,27 +210,44 @@ class LegacyPublicationStatusService:
         if binding is None:
             return 0
         async with telegram_bot_session(binding.bot_api_token) as bot:
-            moderator_username, moderator_first_name = await self._resolve_moderator_identity(
-                bot,
-                moderator_id=moderator_id,
-                review_chat_ids=[int(row.review_chat_id) for row in review_rows],
-            )
+            identity_by_moderator_id: dict[int, tuple[str | None, str | None]] = {}
+            for moderator_id in dict.fromkeys(
+                target_by_legacy_row_id[row.id].reviewer_id
+                for row in review_rows
+                if row.id in target_by_legacy_row_id
+            ):
+                moderator_review_chat_ids = [
+                    int(row.review_chat_id)
+                    for row in review_rows
+                    if row.id in target_by_legacy_row_id
+                    and target_by_legacy_row_id[row.id].reviewer_id == moderator_id
+                ]
+                identity_by_moderator_id[moderator_id] = await self._resolve_moderator_identity(
+                    bot,
+                    moderator_id=moderator_id,
+                    review_chat_ids=moderator_review_chat_ids,
+                )
 
             updated_count = 0
+            synced_submission_ids: set[int] = set()
             for row in review_rows:
-                related_submission = submission_by_legacy_row_id.get(row.id)
+                target = target_by_legacy_row_id.get(row.id)
+                if target is None:
+                    continue
+                related_submission = target.submission
                 sender_id = row.user_id or (
-                    related_submission.source_user_id if related_submission is not None else None
+                    related_submission.source_user_id
                 )
                 sender_username = getattr(row, "username", None) or (
                     getattr(related_submission, "username", None)
-                    if related_submission is not None
-                    else None
                 )
                 sender_first_name = getattr(row, "first_name", None) or (
                     getattr(related_submission, "first_name", None)
-                    if related_submission is not None
-                    else None
+                )
+                moderator_id = target.reviewer_id
+                moderator_username, moderator_first_name = identity_by_moderator_id.get(
+                    moderator_id,
+                    (None, None),
                 )
                 markup = build_slot_status_markup(
                     sender_id=sender_id,
@@ -122,7 +268,12 @@ class LegacyPublicationStatusService:
                         operation="editPublishedReviewMarkup",
                     )
                     updated_count += 1
+                    synced_submission_ids.add(int(related_submission.id))
                 except Exception as ex:
+                    if is_telegram_message_not_modified(ex):
+                        updated_count += 1
+                        synced_submission_ids.add(int(related_submission.id))
+                        continue
                     logger.error(
                         "Failed to mark published content item {} on review message {} in chat {}: {}",
                         content_item_id,
@@ -130,7 +281,132 @@ class LegacyPublicationStatusService:
                         row.review_chat_id,
                         ex,
                     )
-            return updated_count
+
+        if synced_submission_ids:
+            async with session_factory() as session:
+                existing_ids = set(
+                    (
+                        await session.execute(
+                            select(ContentItemSource.submission_id).where(
+                                ContentItemSource.submission_id.in_(synced_submission_ids),
+                                ContentItemSource.role == LEGACY_PUBLISHED_SOURCE_ROLE,
+                            )
+                        )
+                    ).scalars().all()
+                )
+                session.add_all(
+                    [
+                        ContentItemSource(
+                            content_item_id=content_item_id,
+                            submission_id=submission_id,
+                            role=LEGACY_PUBLISHED_SOURCE_ROLE,
+                        )
+                        for submission_id in synced_submission_ids
+                        if submission_id not in existing_ids
+                    ]
+                )
+                await session.commit()
+
+        return updated_count
+
+    async def reconcile_published_review_statuses(self, limit: int = 20) -> int:
+        """Retry stale legacy markups and close exact-text duplicates."""
+        if limit <= 0:
+            return 0
+
+        published_item = aliased(ContentItem)
+        duplicate_item = aliased(ContentItem)
+        published_submission = aliased(Submission)
+        duplicate_submission = aliased(Submission)
+        origin_submission = aliased(Submission)
+
+        any_sync_for_duplicate = exists(
+            select(ContentItemSource.id).where(
+                ContentItemSource.submission_id == duplicate_submission.id,
+                ContentItemSource.role == LEGACY_PUBLISHED_SOURCE_ROLE,
+            )
+        )
+        any_sync_for_origin = exists(
+            select(ContentItemSource.id).where(
+                ContentItemSource.submission_id == origin_submission.id,
+                ContentItemSource.role == LEGACY_PUBLISHED_SOURCE_ROLE,
+            )
+        )
+
+        async with session_factory() as session:
+            duplicate_ids = list(
+                (
+                    await session.execute(
+                        select(published_item.id)
+                        .join(
+                            duplicate_item,
+                            and_(
+                                duplicate_item.channel_id == published_item.channel_id,
+                                duplicate_item.text_hash == published_item.text_hash,
+                                duplicate_item.id != published_item.id,
+                            ),
+                        )
+                        .join(
+                            published_submission,
+                            published_submission.id == published_item.origin_submission_id,
+                        )
+                        .join(
+                            duplicate_submission,
+                            duplicate_submission.id == duplicate_item.origin_submission_id,
+                        )
+                        .where(
+                            published_item.status == ContentItemStatus.PUBLISHED,
+                            published_item.origin_submission_id.is_not(None),
+                            published_item.text_hash != "",
+                            published_submission.content_type == "text",
+                            duplicate_item.source_type == ContentSourceType.SUBMISSION,
+                            duplicate_item.status.in_(
+                                {ContentItemStatus.APPROVED, ContentItemStatus.SCHEDULED}
+                            ),
+                            duplicate_submission.content_type == "text",
+                            duplicate_submission.legacy_row_id.is_not(None),
+                            ~any_sync_for_duplicate,
+                        )
+                        .order_by(published_item.id.desc())
+                        .distinct()
+                        .limit(limit)
+                    )
+                ).scalars().all()
+            )
+
+            remaining = max(0, limit - len(duplicate_ids))
+            origin_ids: list[int] = []
+            if remaining:
+                origin_ids = list(
+                    (
+                        await session.execute(
+                            select(published_item.id)
+                            .join(
+                                origin_submission,
+                                origin_submission.id == published_item.origin_submission_id,
+                            )
+                            .where(
+                                published_item.status == ContentItemStatus.PUBLISHED,
+                                origin_submission.legacy_row_id.is_not(None),
+                                ~any_sync_for_origin,
+                            )
+                            .order_by(published_item.id.desc())
+                            .limit(remaining)
+                        )
+                    ).scalars().all()
+                )
+
+        updated_count = 0
+        for published_item_id in dict.fromkeys([*duplicate_ids, *origin_ids]):
+            try:
+                updated_count += await self.mark_content_item_published(int(published_item_id))
+            except Exception as ex:
+                logger.error(
+                    "Failed to reconcile published content item {} with legacy moderation: {}",
+                    published_item_id,
+                    ex,
+                )
+        return updated_count
 
     @staticmethod
     async def _resolve_moderator_identity(

@@ -52,9 +52,14 @@ async def test_transient_error_keeps_message_scheduled_for_later_retry(monkeypat
     legacy_reader = SimpleNamespace(
         get_bot_binding=AsyncMock(return_value=SimpleNamespace(bot_api_token="1:token"))
     )
+    status_sync = SimpleNamespace(
+        mark_content_item_published=AsyncMock(return_value=0),
+        reconcile_published_review_statuses=AsyncMock(return_value=0),
+    )
     service = PublisherService(
         telegram_adapter=SimpleNamespace(),
         legacy_reader=legacy_reader,
+        legacy_publication_status=status_sync,
     )
     service._publish_submission_based_item = AsyncMock(
         side_effect=TelegramOperationTimeout("Telegram sendMessage exceeded 15 seconds")
@@ -73,6 +78,7 @@ async def test_transient_error_keeps_message_scheduled_for_later_retry(monkeypat
     assert log_item.retry_after == now + timedelta(seconds=60)
     assert "retry scheduled" in log_item.error_text
     session.commit.assert_awaited_once()
+    status_sync.reconcile_published_review_statuses.assert_awaited_once_with(limit=20)
 
 
 @pytest.mark.asyncio
@@ -89,7 +95,10 @@ async def test_successful_retry_marks_message_sent(monkeypatch) -> None:
     legacy_reader = SimpleNamespace(
         get_bot_binding=AsyncMock(return_value=SimpleNamespace(bot_api_token="1:token"))
     )
-    status_sync = SimpleNamespace(mark_content_item_published=AsyncMock(return_value=1))
+    status_sync = SimpleNamespace(
+        mark_content_item_published=AsyncMock(return_value=1),
+        reconcile_published_review_statuses=AsyncMock(return_value=0),
+    )
     service = PublisherService(
         telegram_adapter=SimpleNamespace(),
         legacy_reader=legacy_reader,
@@ -108,3 +117,4 @@ async def test_successful_retry_marks_message_sent(monkeypatch) -> None:
     assert log_item.error_text is None
     assert item.status == ContentItemStatus.PUBLISHED
     status_sync.mark_content_item_published.assert_awaited_once_with(item.id)
+    status_sync.reconcile_published_review_statuses.assert_awaited_once_with(limit=20)

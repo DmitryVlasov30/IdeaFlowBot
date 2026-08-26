@@ -89,6 +89,14 @@ def is_transient_telegram_error(exc: BaseException) -> bool:
     return False
 
 
+def is_telegram_message_not_modified(exc: BaseException) -> bool:
+    """Return whether Telegram rejected an idempotent message edit."""
+    for item in _exception_chain(exc):
+        if "message is not modified" in str(item).lower():
+            return True
+    return False
+
+
 def telegram_retry_after_seconds(exc: BaseException) -> int | None:
     for item in _exception_chain(exc):
         result_json = getattr(item, "result_json", None)
