@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
+from xml.etree import ElementTree
 from zipfile import ZipFile
 
 import pytest
@@ -45,6 +46,62 @@ def test_statistics_export_writes_minimal_xlsx(tmp_path) -> None:
     assert "<v>7</v>" in sheet_xml
     assert "<v>11</v>" in sheet_xml
     assert 'autoFilter ref="A1:E2"' in sheet_xml
+
+
+def test_statistics_export_sorts_and_colors_subscriber_bands(tmp_path) -> None:
+    export_path = tmp_path / "stats_bands.xlsx"
+    service = StatisticsExportService(export_dir=tmp_path)
+    subscriber_counts = [49, 1000, None, 500, 99, 499, 50, 1, 100]
+
+    service._write_xlsx(
+        export_path,
+        [
+            ChannelStatisticsRow(
+                title=f"Channel {subscriber_count}",
+                tag=f"@channel_{subscriber_count}",
+                subscriber_count=subscriber_count,
+                delta_count=0,
+                submission_count=0,
+            )
+            for subscriber_count in subscriber_counts
+        ],
+    )
+
+    with ZipFile(export_path) as archive:
+        sheet_xml = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
+        styles_xml = archive.read("xl/styles.xml").decode("utf-8")
+
+    namespace = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    sheet = ElementTree.fromstring(sheet_xml)
+    data_rows = sheet.findall("x:sheetData/x:row", namespace)[1:]
+    ordered_counts = [
+        int(cell.text) if cell is not None else None
+        for row in data_rows
+        for cell in [row.find("x:c[3]/x:v", namespace)]
+    ]
+    assert ordered_counts == [1000, 500, 499, 100, 99, 50, 49, 1, None]
+
+    expected_styles = ["2", "3", "4", "4", "5", "5", "6", "6", None]
+    for row, expected_style in zip(data_rows, expected_styles, strict=True):
+        assert {cell.get("s") for cell in row.findall("x:c", namespace)} == {expected_style}
+
+    sort_condition = sheet.find("x:autoFilter/x:sortState/x:sortCondition", namespace)
+    assert sort_condition is not None
+    assert sort_condition.get("ref") == "C2:C10"
+    assert sort_condition.get("descending") == "1"
+
+    styles = ElementTree.fromstring(styles_xml)
+    fill_colors = [
+        color.get("rgb")
+        for color in styles.findall("x:fills/x:fill/x:patternFill/x:fgColor", namespace)
+    ]
+    assert fill_colors == [
+        "FFDBECD3",
+        "FFD4E6ED",
+        "FFEEE3CD",
+        "FFF1D7C6",
+        "FFE4D8E2",
+    ]
 
 
 @pytest.mark.asyncio

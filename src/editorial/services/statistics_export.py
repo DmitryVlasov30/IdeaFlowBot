@@ -176,6 +176,14 @@ class StatisticsExportService:
         delta_days: int = DEFAULT_STATISTICS_DELTA_DAYS,
     ) -> None:
         delta_days = validate_statistics_delta_days(delta_days)
+        sorted_rows = sorted(
+            rows,
+            key=lambda row: (
+                row.subscriber_count is None,
+                -(row.subscriber_count or 0),
+                row.title.casefold(),
+            ),
+        )
         sheet_rows: list[list[str | int | None]] = [
             [
                 "\u041d\u0430\u0437\u0432\u0430\u043d\u0438\u0435 \u043a\u0430\u043d\u0430\u043b\u0430",
@@ -187,7 +195,7 @@ class StatisticsExportService:
         ]
         sheet_rows.extend(
             [row.title, row.tag, row.subscriber_count, row.delta_count, row.submission_count]
-            for row in rows
+            for row in sorted_rows
         )
 
         with ZipFile(path, "w", ZIP_DEFLATED) as archive:
@@ -207,13 +215,34 @@ class StatisticsExportService:
             letters = chr(65 + remainder) + letters
         return f"{letters}{row_index}"
 
+    @staticmethod
+    def _subscriber_style_id(subscriber_count: int | None) -> int:
+        if subscriber_count is None or subscriber_count < 1:
+            return 0
+        if subscriber_count >= 1000:
+            return 2
+        if subscriber_count >= 500:
+            return 3
+        if subscriber_count >= 100:
+            return 4
+        if subscriber_count >= 50:
+            return 5
+        return 6
+
     def _sheet_xml(self, rows: list[list[str | int | None]]) -> str:
         row_xml = []
         for row_index, row in enumerate(rows, start=1):
             cells = []
+            row_style_id = (
+                1
+                if row_index == 1
+                else self._subscriber_style_id(
+                    row[2] if len(row) > 2 and isinstance(row[2], int) else None
+                )
+            )
             for col_index, value in enumerate(row, start=1):
                 ref = self._cell_ref(row_index, col_index)
-                style = ' s="1"' if row_index == 1 else ""
+                style = f' s="{row_style_id}"' if row_style_id else ""
                 if value is None:
                     cells.append(f'<c r="{ref}"{style}/>')
                 elif isinstance(value, int):
@@ -224,6 +253,12 @@ class StatisticsExportService:
             row_xml.append(f'<row r="{row_index}">{"".join(cells)}</row>')
 
         filter_ref = f"A1:E{max(len(rows), 1)}"
+        sort_state = (
+            f'<sortState ref="{filter_ref}"><sortCondition ref="C2:C{len(rows)}" '
+            'descending="1"/></sortState>'
+            if len(rows) > 1
+            else ""
+        )
         return (
             '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
@@ -237,7 +272,7 @@ class StatisticsExportService:
             '<col min="5" max="5" width="32" customWidth="1"/>'
             '</cols>'
             f'<sheetData>{"".join(row_xml)}</sheetData>'
-            f'<autoFilter ref="{filter_ref}"/>'
+            f'<autoFilter ref="{filter_ref}">{sort_state}</autoFilter>'
             '</worksheet>'
         )
 
@@ -290,11 +325,25 @@ class StatisticsExportService:
             '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
             '<fonts count="2"><font><sz val="11"/><name val="Calibri"/></font>'
             '<font><b/><sz val="11"/><name val="Calibri"/></font></fonts>'
-            '<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>'
+            '<fills count="7">'
+            '<fill><patternFill patternType="none"/></fill>'
+            '<fill><patternFill patternType="gray125"/></fill>'
+            '<fill><patternFill patternType="solid"><fgColor rgb="FFDBECD3"/><bgColor indexed="64"/></patternFill></fill>'
+            '<fill><patternFill patternType="solid"><fgColor rgb="FFD4E6ED"/><bgColor indexed="64"/></patternFill></fill>'
+            '<fill><patternFill patternType="solid"><fgColor rgb="FFEEE3CD"/><bgColor indexed="64"/></patternFill></fill>'
+            '<fill><patternFill patternType="solid"><fgColor rgb="FFF1D7C6"/><bgColor indexed="64"/></patternFill></fill>'
+            '<fill><patternFill patternType="solid"><fgColor rgb="FFE4D8E2"/><bgColor indexed="64"/></patternFill></fill>'
+            '</fills>'
             '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
             '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
-            '<cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
-            '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs>'
+            '<cellXfs count="7"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+            '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>'
+            '<xf numFmtId="0" fontId="0" fillId="2" borderId="0" xfId="0" applyFill="1"/>'
+            '<xf numFmtId="0" fontId="0" fillId="3" borderId="0" xfId="0" applyFill="1"/>'
+            '<xf numFmtId="0" fontId="0" fillId="4" borderId="0" xfId="0" applyFill="1"/>'
+            '<xf numFmtId="0" fontId="0" fillId="5" borderId="0" xfId="0" applyFill="1"/>'
+            '<xf numFmtId="0" fontId="0" fillId="6" borderId="0" xfId="0" applyFill="1"/>'
+            '</cellXfs>'
             '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
             '</styleSheet>'
         )
