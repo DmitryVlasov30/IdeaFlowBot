@@ -7,6 +7,7 @@ from sqlalchemy import select
 from telebot.async_telebot import AsyncTeleBot
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from src.markups import build_rejection_status_markup, build_slot_status_markup
 from src.editorial.db.session import session_factory
 from src.editorial.models.channel import Channel
 from src.editorial.models.content import ContentItem
@@ -40,6 +41,22 @@ class LegacyModerationSyncService:
 
     async def mark_panel_submission_rejected(self, submission_id: int) -> int:
         return await self._sync_panel_review_markup(submission_id, state="rejected")
+
+    async def mark_panel_submission_agent_approved(self, submission_id: int) -> int:
+        return await self._sync_panel_review_markup(
+            submission_id,
+            state="approved",
+            moderator_label="agent",
+            allow_cancel=True,
+        )
+
+    async def mark_panel_submission_agent_rejected(self, submission_id: int) -> int:
+        return await self._sync_panel_review_markup(
+            submission_id,
+            state="rejected",
+            moderator_label="agent",
+            allow_cancel=True,
+        )
 
     async def mark_panel_submission_banned(self, submission_id: int) -> int:
         return await self._sync_panel_review_markup(submission_id, state="banned")
@@ -494,7 +511,14 @@ class LegacyModerationSyncService:
             .limit(1)
         )
 
-    async def _sync_panel_review_markup(self, submission_id: int, state: str) -> int:
+    async def _sync_panel_review_markup(
+        self,
+        submission_id: int,
+        state: str,
+        *,
+        moderator_label: str | None = None,
+        allow_cancel: bool = False,
+    ) -> int:
         async with session_factory() as session:
             submission = await session.get(Submission, submission_id)
             if submission is None:
@@ -535,6 +559,8 @@ class LegacyModerationSyncService:
                 user_id=row.user_id or (related_submission.source_user_id if related_submission else None),
                 username=row.username or (related_submission.username if related_submission else None),
                 first_name=row.first_name or (related_submission.first_name if related_submission else None),
+                moderator_label=moderator_label,
+                allow_cancel=allow_cancel,
             )
             try:
                 await bot.edit_message_reply_markup(
@@ -560,7 +586,33 @@ class LegacyModerationSyncService:
         user_id: int | None,
         username: str | None,
         first_name: str | None,
+        moderator_label: str | None = None,
+        allow_cancel: bool = False,
     ) -> InlineKeyboardMarkup:
+        if moderator_label is not None and state == "approved":
+            return build_slot_status_markup(
+                sender_id=user_id,
+                sender_username=username,
+                sender_first_name=first_name,
+                moderator_id=0,
+                moderator_username=None,
+                moderator_first_name=moderator_label,
+                state="approved",
+                allow_cancel=allow_cancel,
+                moderator_callback_data="agent_info",
+                always_show_sender=True,
+            )
+        if moderator_label is not None and state == "rejected":
+            return build_rejection_status_markup(
+                sender_id=user_id,
+                sender_username=username,
+                sender_first_name=first_name,
+                moderator_id=0,
+                moderator_username=None,
+                moderator_first_name=moderator_label,
+                moderator_callback_data="agent_info",
+            )
+
         labels = {
             "approved": "Одобрено",
             "rejected": "Отклонено",

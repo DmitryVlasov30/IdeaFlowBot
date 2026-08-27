@@ -23,6 +23,8 @@ def build_slot_status_markup(
         sender_username: str | None = None,
         sender_first_name: str | None = None,
         allow_cancel: bool = False,
+        moderator_callback_data: str | None = None,
+        always_show_sender: bool = False,
 ) -> InlineKeyboardMarkup:
     status_labels = {
         "approved": "\u043e\u0434\u043e\u0431\u0440\u0435\u043d\u043e \u0432 \u0441\u043b\u043e\u0442",
@@ -41,7 +43,8 @@ def build_slot_status_markup(
         else moderator_first_name or str(moderator_id)
     )
     markup = InlineKeyboardMarkup(row_width=1)
-    if sender_username or sender_first_name:
+    show_sender_row = bool(sender_username or sender_first_name or always_show_sender)
+    if show_sender_row:
         markup.add(
             InlineKeyboardButton(
                 text=f"\U0001f464 {sender_text}",
@@ -56,7 +59,7 @@ def build_slot_status_markup(
     markup.add(
         InlineKeyboardButton(
             text=f"{status_prefix}{moderator_text} ({status_labels[state]})",
-            callback_data=f"add_info;{status_callback_id}",
+            callback_data=moderator_callback_data or f"add_info;{status_callback_id}",
         )
     )
     if allow_cancel:
@@ -77,6 +80,7 @@ def build_rejection_status_markup(
         moderator_id: int,
         moderator_username: str | None,
         moderator_first_name: str | None,
+        moderator_callback_data: str | None = None,
 ) -> InlineKeyboardMarkup:
     sender_username = (sender_username or "").lstrip("@")
     sender_text = (
@@ -101,7 +105,7 @@ def build_rejection_status_markup(
     markup.add(
         InlineKeyboardButton(
             text=f"\u274c {moderator_text} (\u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u043e)",
-            callback_data=f"add_info;{moderator_id}",
+            callback_data=moderator_callback_data or f"add_info;{moderator_id}",
         )
     )
     markup.add(

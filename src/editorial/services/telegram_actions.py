@@ -1408,6 +1408,12 @@ class TelegramEditorialActions:
     async def sync_panel_submission_rejected(self, submission_id: int) -> int:
         return await self.legacy_moderation_sync.mark_panel_submission_rejected(submission_id)
 
+    async def sync_panel_submission_agent_approved(self, submission_id: int) -> int:
+        return await self.legacy_moderation_sync.mark_panel_submission_agent_approved(submission_id)
+
+    async def sync_panel_submission_agent_rejected(self, submission_id: int) -> int:
+        return await self.legacy_moderation_sync.mark_panel_submission_agent_rejected(submission_id)
+
     async def sync_panel_submission_banned(self, submission_id: int) -> int:
         return await self.legacy_moderation_sync.mark_panel_submission_banned(submission_id)
 

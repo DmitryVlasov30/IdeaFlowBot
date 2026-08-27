@@ -556,12 +556,15 @@ class SubBot:
         async def callback(call: CallbackQuery) -> None:
             buttons_func = MarkupButton(self.sup_bot)
             utils_func = Utils()
-            await utils_func.save_admin_action(call)
             action = call.data.split(";")[0]
-            if action not in {"send_suggest", "day_choice"}:
+            if action != "agent_info":
+                await utils_func.save_admin_action(call)
+            if action not in {"send_suggest", "day_choice", "agent_info"}:
                 await self._safe_answer_callback(call)
 
             match action:
+                case "agent_info":
+                    await self._safe_answer_callback(call, text="Обработано агентом")
                 case "banned_user":
                     await buttons_func.add_ban_user(call, self.ban_database, self.channel_id, self.bot_info, self.chat_suggest)
                     await self._sync_editorial_submission_status(

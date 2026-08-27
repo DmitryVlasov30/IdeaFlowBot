@@ -550,9 +550,9 @@ class McpModerationService:
                     raise ValueError(f"MCP operation {operation_id} not found")
                 submission_id = operation.submission_id
             if decision == MCP_APPROVE:
-                sync_count = await actions.sync_panel_submission_approved(submission_id)
+                sync_count = await actions.sync_panel_submission_agent_approved(submission_id)
             else:
-                sync_count = await actions.sync_panel_submission_rejected(submission_id)
+                sync_count = await actions.sync_panel_submission_agent_rejected(submission_id)
         except Exception as exc:
             warning = f"Moderation was applied, but Telegram review markup sync failed: {exc}"
 
