@@ -4,7 +4,7 @@ import asyncio
 
 from loguru import logger
 from telebot.async_telebot import AsyncTeleBot
-from telebot.types import Message
+from telebot.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from config import settings
 from src.editorial.db.session import session_factory
@@ -51,6 +51,21 @@ class ConfessionPublisherRuntime:
         value = message.text if message.text is not None else message.caption
         return bool(value and value.lstrip().startswith("/"))
 
+    @staticmethod
+    def _candidate_review_markup(candidate_id: int) -> InlineKeyboardMarkup:
+        markup = InlineKeyboardMarkup(row_width=2)
+        markup.row(
+            InlineKeyboardButton(
+                "Да",
+                callback_data=f"confession_candidate:yes:{int(candidate_id)}",
+            ),
+            InlineKeyboardButton(
+                "Нет",
+                callback_data=f"confession_candidate:no:{int(candidate_id)}",
+            ),
+        )
+        return markup
+
     def _setup_handlers(self) -> None:
         @self.bot.message_handler(commands=["connect_confessions"])
         async def connect_storage(message: Message) -> None:
@@ -89,7 +104,7 @@ class ConfessionPublisherRuntime:
                 return
             await self.bot.reply_to(
                 message,
-                "Чат подключён. Теперь каждое новое сообщение здесь будет сохранено как паста признавашек.",
+                "Чат подключён. После каждого нового сообщения бот предложит подтвердить его добавление в пасты признавашек.",
             )
 
         async def store_message(message: Message) -> None:
@@ -97,29 +112,104 @@ class ConfessionPublisherRuntime:
                 return
             try:
                 async with session_factory() as session:
-                    _paste, created = await self.service.create_storage_paste(
+                    candidate, created = await self.service.create_candidate(
                         session,
                         publisher_id=self.publisher_id,
                         storage_chat_id=message.chat.id,
                         storage_message_id=message.message_id,
                         content_type=message.content_type or "text",
                         body_text=self._message_body(message),
-                        created_by=message.from_user.id if message.from_user else None,
+                        submitted_by=message.from_user.id if message.from_user else None,
                     )
-                if created:
-                    logger.info(
-                        "Saved confession paste from chat {} message {}",
-                        message.chat.id,
-                        message.message_id,
+                if not created or candidate is None:
+                    return
+
+                prompt = await self.bot.reply_to(
+                    message,
+                    "Добавить эту пасту в базу?",
+                    reply_markup=self._candidate_review_markup(candidate.id),
+                )
+                try:
+                    async with session_factory() as session:
+                        await self.service.set_candidate_prompt_message(
+                            session,
+                            candidate_id=candidate.id,
+                            prompt_message_id=prompt.message_id,
+                        )
+                except Exception:
+                    logger.exception(
+                        "Failed to save confirmation message for confession candidate {}",
+                        candidate.id,
                     )
-            except ValueError as exc:
-                if "не из подключённого" not in str(exc):
-                    logger.warning("Confession paste was not saved: {}", exc)
-            except Exception:
-                logger.exception(
-                    "Failed to save confession paste from chat {} message {}",
+                logger.info(
+                    "Created confession paste candidate from chat {} message {}",
                     message.chat.id,
                     message.message_id,
+                )
+            except ValueError as exc:
+                if "не из подключённого" not in str(exc):
+                    logger.warning("Confession paste candidate was not saved: {}", exc)
+            except Exception:
+                logger.exception(
+                    "Failed to create confession paste candidate from chat {} message {}",
+                    message.chat.id,
+                    message.message_id,
+                )
+
+        @self.bot.callback_query_handler(
+            func=lambda call: bool(
+                call.data and call.data.startswith("confession_candidate:")
+            )
+        )
+        async def review_candidate(call: CallbackQuery) -> None:
+            try:
+                _prefix, action, raw_candidate_id = (call.data or "").split(":", maxsplit=2)
+                candidate_id = int(raw_candidate_id)
+                reviewer_id = call.from_user.id if call.from_user else None
+                if action not in {"yes", "no"}:
+                    raise ValueError("Неизвестное действие.")
+
+                async with session_factory() as session:
+                    if action == "yes":
+                        await self.service.approve_candidate(
+                            session,
+                            candidate_id=candidate_id,
+                            reviewed_by=reviewer_id,
+                        )
+                        status_text = "✅ Паста добавлена в базу."
+                        callback_text = "Паста добавлена."
+                    else:
+                        await self.service.reject_candidate(
+                            session,
+                            candidate_id=candidate_id,
+                            reviewed_by=reviewer_id,
+                        )
+                        status_text = "❌ Паста не добавлена."
+                        callback_text = "Паста отклонена."
+
+                if call.message is not None:
+                    try:
+                        await self.bot.edit_message_text(
+                            status_text,
+                            chat_id=call.message.chat.id,
+                            message_id=call.message.message_id,
+                            reply_markup=None,
+                        )
+                    except Exception as exc:
+                        logger.debug(
+                            "Could not update confession candidate prompt {}: {}",
+                            candidate_id,
+                            exc,
+                        )
+                await self.bot.answer_callback_query(call.id, callback_text)
+            except ValueError as exc:
+                await self.bot.answer_callback_query(call.id, str(exc), show_alert=True)
+            except Exception:
+                logger.exception("Failed to review confession paste candidate")
+                await self.bot.answer_callback_query(
+                    call.id,
+                    "Не удалось изменить статус пасты.",
+                    show_alert=True,
                 )
 
         self.bot.register_message_handler(store_message, content_types=CONFESSION_CONTENT_TYPES)

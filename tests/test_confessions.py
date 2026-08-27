@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from src.editorial.models.enums import ContentFamily, PasteDeliveryMode, PasteStatus
+from src.editorial.models.confession import ConfessionPasteCandidate
 from src.editorial.models.paste import PasteLibrary
 from src.editorial.services.confession_service import ConfessionService
 from src.editorial.services.paste_service import PasteAvailabilityContext
@@ -71,6 +72,16 @@ def test_slash_prefix_marks_storage_message_as_service(
     assert ConfessionPublisherRuntime._is_service_message(message) is expected
 
 
+def test_confession_candidate_confirmation_buttons() -> None:
+    markup = ConfessionPublisherRuntime._candidate_review_markup(15)
+
+    assert [button.text for button in markup.keyboard[0]] == ["Да", "Нет"]
+    assert [button.callback_data for button in markup.keyboard[0]] == [
+        "confession_candidate:yes:15",
+        "confession_candidate:no:15",
+    ]
+
+
 @pytest.mark.asyncio
 async def test_confession_paste_is_published_with_copy_message() -> None:
     paste = _paste(2, ContentFamily.CONFESSION.value)
@@ -125,3 +136,106 @@ async def test_storage_message_becomes_telegram_copy_paste() -> None:
     assert paste.storage_chat_id == -100500
     assert paste.storage_message_id == 77
     session.add.assert_called_once_with(paste)
+
+
+@pytest.mark.asyncio
+async def test_storage_message_stays_candidate_until_confirmation() -> None:
+    publisher = SimpleNamespace(id=3, is_active=True, storage_chat_id=-100500)
+    session = SimpleNamespace(
+        get=AsyncMock(return_value=publisher),
+        scalar=AsyncMock(side_effect=[None, None]),
+        add=Mock(),
+        commit=AsyncMock(),
+        refresh=AsyncMock(),
+    )
+
+    candidate, created = await ConfessionService().create_candidate(
+        session,
+        publisher_id=3,
+        storage_chat_id=-100500,
+        storage_message_id=78,
+        content_type="text",
+        body_text="Признание",
+        submitted_by=42,
+    )
+
+    assert created is True
+    assert isinstance(candidate, ConfessionPasteCandidate)
+    assert candidate.status == ConfessionService.CANDIDATE_PENDING
+    assert candidate.storage_message_id == 78
+    added_object = session.add.call_args.args[0]
+    assert isinstance(added_object, ConfessionPasteCandidate)
+    assert not isinstance(added_object, PasteLibrary)
+
+
+@pytest.mark.asyncio
+async def test_approving_candidate_creates_active_paste() -> None:
+    candidate = ConfessionPasteCandidate(
+        publisher_id=3,
+        storage_chat_id=-100500,
+        storage_message_id=79,
+        content_type="sticker",
+        body_text="💘",
+        submitted_by=42,
+        status=ConfessionService.CANDIDATE_PENDING,
+    )
+    candidate.id = 11
+    publisher = SimpleNamespace(id=3, is_active=True, storage_chat_id=-100500)
+    session = SimpleNamespace(
+        get=AsyncMock(return_value=publisher),
+        scalar=AsyncMock(side_effect=[candidate, None]),
+        add=Mock(),
+        flush=AsyncMock(),
+        commit=AsyncMock(),
+        refresh=AsyncMock(),
+    )
+
+    async def assign_paste_id() -> None:
+        session.add.call_args.args[0].id = 501
+
+    session.flush.side_effect = assign_paste_id
+
+    paste, created = await ConfessionService().approve_candidate(
+        session,
+        candidate_id=11,
+        reviewed_by=99,
+    )
+
+    assert created is True
+    assert paste.id == 501
+    assert paste.status == PasteStatus.ACTIVE
+    assert paste.delivery_mode == PasteDeliveryMode.TELEGRAM_COPY.value
+    assert candidate.status == ConfessionService.CANDIDATE_APPROVED
+    assert candidate.paste_id == 501
+    assert candidate.reviewed_by == 99
+
+
+@pytest.mark.asyncio
+async def test_rejecting_candidate_does_not_create_paste() -> None:
+    candidate = ConfessionPasteCandidate(
+        publisher_id=3,
+        storage_chat_id=-100500,
+        storage_message_id=80,
+        content_type="text",
+        body_text="Не добавлять",
+        submitted_by=42,
+        status=ConfessionService.CANDIDATE_PENDING,
+    )
+    candidate.id = 12
+    session = SimpleNamespace(
+        scalar=AsyncMock(return_value=candidate),
+        add=Mock(),
+        commit=AsyncMock(),
+        refresh=AsyncMock(),
+    )
+
+    result, changed = await ConfessionService().reject_candidate(
+        session,
+        candidate_id=12,
+        reviewed_by=99,
+    )
+
+    assert changed is True
+    assert result.status == ConfessionService.CANDIDATE_REJECTED
+    assert result.paste_id is None
+    session.add.assert_not_called()

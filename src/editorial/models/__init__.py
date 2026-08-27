@@ -2,7 +2,7 @@ from src.editorial.models.channel import Channel, ChannelSettingProfile, Channel
 from src.editorial.models.ad_blackout import ChannelAdBlackout
 from src.editorial.models.channel_history import ChannelHistoryMessage
 from src.editorial.models.content import ContentItem, ContentItemSource
-from src.editorial.models.confession import ConfessionPublisher
+from src.editorial.models.confession import ConfessionPasteCandidate, ConfessionPublisher
 from src.editorial.models.enums import (
     ContentItemStatus,
     ContentSourceType,
@@ -38,6 +38,7 @@ __all__ = [
     "ChannelSubscriberSnapshot",
     "ContentItem",
     "ConfessionPublisher",
+    "ConfessionPasteCandidate",
     "ContentFamily",
     "ContentItemSource",
     "ContentItemStatus",
