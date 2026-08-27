@@ -12,7 +12,13 @@ from src.editorial.config import settings
 from src.editorial.models.ad_blackout import ChannelAdBlackout
 from src.editorial.models.channel import Channel
 from src.editorial.models.content import ContentItem
-from src.editorial.models.enums import ContentFamily, ContentItemStatus, PasteDeliveryMode, PublicationStatus
+from src.editorial.models.enums import (
+    ContentFamily,
+    ContentItemStatus,
+    ContentSourceType,
+    PasteDeliveryMode,
+    PublicationStatus,
+)
 from src.editorial.models.paste import PasteLibrary
 from src.editorial.models.publication import PublicationLog
 from src.editorial.models.submission import Submission
@@ -27,6 +33,7 @@ from src.editorial.services.publication_signature import (
     publication_signature_enabled,
     should_add_publication_signature,
 )
+from src.editorial.services.scheduler import SchedulerService
 from src.editorial.services.telegram_publisher import TelegramPublisherAdapter
 from src.editorial.services.telegram_resilience import (
     is_transient_telegram_error,
@@ -57,11 +64,13 @@ class PublisherService:
         paste_service: PasteService | None = None,
         legacy_publication_status: LegacyPublicationStatusService | None = None,
         confession_service: ConfessionService | None = None,
+        scheduler: SchedulerService | None = None,
     ) -> None:
         self.telegram_adapter = telegram_adapter or TelegramPublisherAdapter()
         self.legacy_reader = legacy_reader or LegacyCollectorReader()
         self.paste_service = paste_service or PasteService()
         self.confession_service = confession_service or ConfessionService()
+        self.scheduler = scheduler or SchedulerService()
         self.legacy_publication_status = (
             legacy_publication_status or LegacyPublicationStatusService(self.legacy_reader)
         )
@@ -563,6 +572,15 @@ class PublisherService:
                 )
                 await session.commit()
                 continue
+
+            if content_item.source_type == ContentSourceType.PASTE:
+                content_item = await self.scheduler.replace_scheduled_paste_with_live_candidate(
+                    session,
+                    log_item=log_item,
+                    scheduled_item=content_item,
+                    channel=channel,
+                    eligible_at=current_time,
+                )
 
             result.attempted += 1
             log_item.attempt_count = int(log_item.attempt_count or 0) + 1

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from loguru import logger
 from sqlalchemy import case, desc, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -46,6 +47,17 @@ class SchedulerService:
         now = now or datetime.now(timezone.utc)
         result = SchedulerRunResult()
         channels = list((await session.execute(select(Channel).where(Channel.is_active.is_(True)))).scalars().all())
+        channels_by_id = {channel.id: channel for channel in channels}
+        replaced_pastes = await self._rebalance_scheduled_pastes(
+            session,
+            channels_by_id=channels_by_id,
+            now=now,
+        )
+        if replaced_pastes:
+            logger.info(
+                "Replaced {} scheduled fallback pastes with approved live content",
+                replaced_pastes,
+            )
         channel_ids = [channel.id for channel in channels]
         slots_by_channel = await self._load_active_slots(session, channel_ids)
         used_slot_keys = await self._load_recent_used_slot_keys(session, now, channel_ids)
@@ -119,6 +131,108 @@ class SchedulerService:
 
         await session.commit()
         return result
+
+    async def _rebalance_scheduled_pastes(
+        self,
+        session: AsyncSession,
+        *,
+        channels_by_id: dict[int, Channel],
+        now: datetime,
+    ) -> int:
+        if not channels_by_id:
+            return 0
+
+        rows = (
+            await session.execute(
+                select(PublicationLog, ContentItem)
+                .join(ContentItem, ContentItem.id == PublicationLog.content_item_id)
+                .where(
+                    PublicationLog.channel_id.in_(list(channels_by_id)),
+                    PublicationLog.publish_status == PublicationStatus.SCHEDULED,
+                    PublicationLog.scheduled_for > now,
+                    PublicationLog.retry_after.is_(None),
+                    PublicationLog.attempt_count == 0,
+                    ContentItem.source_type == ContentSourceType.PASTE,
+                    ContentItem.status == ContentItemStatus.SCHEDULED,
+                )
+                .order_by(PublicationLog.scheduled_for.asc(), PublicationLog.id.asc())
+                .with_for_update(skip_locked=True)
+            )
+        ).all()
+
+        replaced = 0
+        for log_item, scheduled_item in rows:
+            channel = channels_by_id.get(log_item.channel_id)
+            if channel is None:
+                continue
+            replacement = await self.replace_scheduled_paste_with_live_candidate(
+                session,
+                log_item=log_item,
+                scheduled_item=scheduled_item,
+                channel=channel,
+                eligible_at=log_item.scheduled_for,
+            )
+            if replacement is not scheduled_item:
+                replaced += 1
+        return replaced
+
+    async def replace_scheduled_paste_with_live_candidate(
+        self,
+        session: AsyncSession,
+        *,
+        log_item: PublicationLog,
+        scheduled_item: ContentItem,
+        channel: Channel,
+        eligible_at: datetime,
+    ) -> ContentItem:
+        if (
+            channel.content_family == ContentFamily.CONFESSION.value
+            or scheduled_item.source_type != ContentSourceType.PASTE
+            or scheduled_item.status != ContentItemStatus.SCHEDULED
+            or log_item.publish_status != PublicationStatus.SCHEDULED
+            or int(log_item.attempt_count or 0) != 0
+            or log_item.retry_after is not None
+        ):
+            return scheduled_item
+
+        replacement = await self._pick_live_candidate(
+            session,
+            channel,
+            eligible_at,
+            lock_for_update=True,
+        )
+        if replacement is None:
+            return scheduled_item
+
+        scheduled_item.status = ContentItemStatus.APPROVED
+        scheduled_item.scheduled_for = None
+        replacement.status = ContentItemStatus.SCHEDULED
+        replacement.scheduled_for = log_item.scheduled_for
+        log_item.content_item_id = replacement.id
+        logger.info(
+            "Promoted approved live content item {} over scheduled paste item {} in publication log {}",
+            replacement.id,
+            scheduled_item.id,
+            log_item.id,
+        )
+        return replacement
+
+    async def _pick_live_candidate(
+        self,
+        session: AsyncSession,
+        channel: Channel,
+        slot_dt: datetime,
+        *,
+        lock_for_update: bool = False,
+    ) -> ContentItem | None:
+        return await self._pick_existing_candidate(
+            session,
+            channel,
+            slot_dt,
+            include_generated=False,
+            source_types=(ContentSourceType.SUBMISSION, ContentSourceType.EDITORIAL),
+            lock_for_update=lock_for_update,
+        )
 
     async def _load_active_slots(
         self,
@@ -398,6 +512,9 @@ class SchedulerService:
         channel: Channel,
         slot_dt: datetime,
         include_generated: bool,
+        *,
+        source_types: tuple[ContentSourceType, ...] | None = None,
+        lock_for_update: bool = False,
     ) -> ContentItem | None:
         priority_case = case(
             (ContentItem.source_type == ContentSourceType.SUBMISSION, 0),
@@ -423,6 +540,10 @@ class SchedulerService:
             stmt = stmt.where(ContentItem.source_type == ContentSourceType.GENERATED)
         else:
             stmt = stmt.where(ContentItem.source_type != ContentSourceType.GENERATED)
+        if source_types is not None:
+            stmt = stmt.where(ContentItem.source_type.in_(source_types))
+        if lock_for_update:
+            stmt = stmt.with_for_update(skip_locked=True)
 
         candidates = list(((await session.execute(stmt)).scalars().all()))
 
