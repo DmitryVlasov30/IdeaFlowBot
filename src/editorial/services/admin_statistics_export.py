@@ -124,6 +124,7 @@ class AdminStatisticsExportService:
                 ModerationCase.finalized_at < ended_at,
                 ModerationCase.voided_at.is_(None),
                 ModerationCase.decision.in_({MODERATION_APPROVED, MODERATION_REJECTED}),
+                ModerationCase.source != "mcp_codex",
             )
             .order_by(ModerationCase.moderator_id.asc(), ModerationCase.finalized_at.asc())
         )

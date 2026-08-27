@@ -144,6 +144,7 @@ class ModerationService:
         submission_id: int,
         status: SubmissionStatus,
         moderator_note: str | None = None,
+        commit: bool = True,
     ) -> Submission:
         submission = await session.get(Submission, submission_id)
         if submission is None:
@@ -154,8 +155,11 @@ class ModerationService:
             item.status = status
             item.moderator_note = moderator_note
             item.reviewed_at = reviewed_at
-        await session.commit()
-        await session.refresh(submission)
+        if commit:
+            await session.commit()
+            await session.refresh(submission)
+        else:
+            await session.flush()
         return submission
 
     async def create_content_from_submission(
@@ -169,6 +173,7 @@ class ModerationService:
         template_key: str | None = None,
         tone_key: str = "community",
         scheduled_for: datetime | None = None,
+        commit: bool = True,
     ) -> ContentItem:
         submission = await session.get(Submission, submission_id)
         if submission is None:
@@ -207,8 +212,11 @@ class ModerationService:
         for related_item in related_submissions:
             related_item.status = SubmissionStatus.CONTENT_CREATED
             related_item.reviewed_at = reviewed_at
-        await session.commit()
-        await session.refresh(item)
+        if commit:
+            await session.commit()
+            await session.refresh(item)
+        else:
+            await session.flush()
         return item
 
     async def list_content_items(
@@ -232,6 +240,7 @@ class ModerationService:
         edited_text: str | None = None,
         moderation_source: str = "api",
         moderation_action: str = "content_review",
+        commit: bool = True,
     ) -> ContentItem:
         item = await session.get(ContentItem, content_item_id)
         if item is None:
@@ -247,8 +256,11 @@ class ModerationService:
                     source=moderation_source,
                     action=moderation_action,
                 )
-                await session.commit()
-                await session.refresh(item)
+                if commit:
+                    await session.commit()
+                    await session.refresh(item)
+                else:
+                    await session.flush()
                 return item
             raise ValueError("Scheduled or published content cannot be reviewed again")
 
@@ -266,8 +278,11 @@ class ModerationService:
                 source=moderation_source,
                 action=moderation_action,
             )
-            await session.commit()
-            await session.refresh(item)
+            if commit:
+                await session.commit()
+                await session.refresh(item)
+            else:
+                await session.flush()
             return item
 
         if decision == ReviewDecision.APPROVE:
@@ -313,6 +328,9 @@ class ModerationService:
             source=moderation_source,
             action=moderation_action,
         )
-        await session.commit()
-        await session.refresh(item)
+        if commit:
+            await session.commit()
+            await session.refresh(item)
+        else:
+            await session.flush()
         return item

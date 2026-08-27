@@ -67,6 +67,29 @@ services:
     ports:
       - "8081:8080"
 
+  editorial-mcp:
+    image: ideaflowbot-app:local
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: uvicorn src.editorial.mcp.server:app --host 0.0.0.0 --port 8082
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      editorial-migrate:
+        condition: service_completed_successfully
+    ports:
+      # Bind locally by default. Put HTTPS/VPN in front before remote access.
+      - "${EDITORIAL_MCP_BIND_ADDRESS:-127.0.0.1}:${EDITORIAL_MCP_PORT:-8082}:8082"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; raise SystemExit(0 if requests.get('http://127.0.0.1:8082/health', timeout=5).ok else 1)"]
+      interval: 15s
+      timeout: 7s
+      retries: 5
+
   editorial-importer:
     image: ideaflowbot-app:local
     restart: unless-stopped

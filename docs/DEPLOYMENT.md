@@ -18,6 +18,7 @@
 
 - `collector-bot` — старый Telegram collector
 - `editorial-api` — HTTP API для review/import/manual actions
+- `editorial-mcp` — защищённый MCP endpoint для модерации через Codex
 - `editorial-importer` — переносит новые legacy сообщения в `submissions`
 - `editorial-scheduler` — раскладывает approved контент по слотам
 - `editorial-publisher` — публикует scheduled контент в Telegram
@@ -112,6 +113,7 @@ python -m src.editorial.cli generate --channel-id 1
 - `PUBLICATION_SIGNATURE_SKIP_IF_ADMIN_BOT_USERNAME`, если подпись нужно отключать в каналах, где уже админит отдельный бот подписей
 - `EDITORIAL_POSTGRES_DSN`
 - `EDITORIAL_REVIEW_API_KEY`
+- `EDITORIAL_MCP_TOKEN` и `EDITORIAL_MCP_WRITE_ENABLED` для MCP-модерации
 - `OPENROUTER_API_KEY`, если нужен OpenRouter
 - слоты публикации `channel_slots`
 
@@ -125,6 +127,8 @@ EDITORIAL_PUBLISHER_RETRY_MAX_SECONDS=900
 ```
 
 Без слотов scheduler ничего не запланирует, и это нормально.
+
+Подключение агента и безопасный порядок запуска описаны в `docs/MCP_MODERATION.md`.
 
 Если пока хочешь жить без генерации, просто выставь:
 
