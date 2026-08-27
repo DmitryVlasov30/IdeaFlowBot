@@ -7,7 +7,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.editorial.db.base import BaseIdMixin, EditorialBase, TimestampMixin
-from src.editorial.models.enums import PasteStatus, enum_column
+from src.editorial.models.enums import ContentFamily, PasteDeliveryMode, PasteStatus, enum_column
 
 
 class PasteLibrary(EditorialBase, BaseIdMixin, TimestampMixin):
@@ -15,6 +15,21 @@ class PasteLibrary(EditorialBase, BaseIdMixin, TimestampMixin):
 
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     body_text: Mapped[str] = mapped_column(Text, nullable=False)
+    content_family: Mapped[str] = mapped_column(
+        String(32),
+        default=ContentFamily.OVERHEARD.value,
+        nullable=False,
+        index=True,
+    )
+    delivery_mode: Mapped[str] = mapped_column(
+        String(32),
+        default=PasteDeliveryMode.TEXT.value,
+        nullable=False,
+        index=True,
+    )
+    storage_chat_id: Mapped[int | None] = mapped_column(BigInteger, index=True)
+    storage_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    storage_content_type: Mapped[str | None] = mapped_column(String(32))
     normalized_text: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     text_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     source_submission_id: Mapped[int | None] = mapped_column(ForeignKey("submissions.id", ondelete="SET NULL"), index=True)

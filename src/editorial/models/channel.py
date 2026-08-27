@@ -6,6 +6,7 @@ from sqlalchemy import BigInteger, Boolean, Date, DateTime, ForeignKey, Integer,
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.editorial.db.base import BaseIdMixin, EditorialBase, TimestampMixin
+from src.editorial.models.enums import ContentFamily
 
 
 class Channel(EditorialBase, BaseIdMixin, TimestampMixin):
@@ -14,6 +15,12 @@ class Channel(EditorialBase, BaseIdMixin, TimestampMixin):
     tg_channel_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False, index=True)
     title: Mapped[str | None] = mapped_column(String(255))
     short_code: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
+    content_family: Mapped[str] = mapped_column(
+        String(32),
+        default=ContentFamily.OVERHEARD.value,
+        nullable=False,
+        index=True,
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     timezone: Mapped[str] = mapped_column(String(64), default="Europe/Moscow", nullable=False)
     min_gap_minutes: Mapped[int] = mapped_column(Integer, default=1, nullable=False)

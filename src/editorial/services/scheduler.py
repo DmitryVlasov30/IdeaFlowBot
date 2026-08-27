@@ -13,7 +13,7 @@ from src.editorial.config import settings
 from src.editorial.models.ad_blackout import ChannelAdBlackout
 from src.editorial.models.channel import Channel, ChannelSlot
 from src.editorial.models.content import ContentItem
-from src.editorial.models.enums import ContentItemStatus, ContentSourceType, PublicationStatus
+from src.editorial.models.enums import ContentFamily, ContentItemStatus, ContentSourceType, PublicationStatus
 from src.editorial.models.paste import PasteLibrary
 from src.editorial.models.publication import PublicationLog
 from src.editorial.services.paste_service import PasteAvailabilityContext, PasteService
@@ -54,6 +54,7 @@ class SchedulerService:
             session,
             channel_ids=paste_channel_ids,
             now=now,
+            channel_families={channel.id: channel.content_family for channel in channels},
         )
         pending_items = 0
 
@@ -416,7 +417,9 @@ class SchedulerService:
             .order_by(priority_case.asc(), ContentItem.priority.asc(), ContentItem.created_at.asc())
             .limit(50)
         )
-        if include_generated:
+        if channel.content_family == ContentFamily.CONFESSION.value:
+            stmt = stmt.where(ContentItem.source_type == ContentSourceType.PASTE)
+        elif include_generated:
             stmt = stmt.where(ContentItem.source_type == ContentSourceType.GENERATED)
         else:
             stmt = stmt.where(ContentItem.source_type != ContentSourceType.GENERATED)
@@ -520,6 +523,14 @@ class SchedulerService:
                 return False
             if candidate.origin_paste_id is not None:
                 paste = await session.get(PasteLibrary, candidate.origin_paste_id)
+                paste_family = (
+                    getattr(paste, "content_family", None) or ContentFamily.OVERHEARD.value
+                    if paste is not None
+                    else None
+                )
+                channel_family = channel.content_family or ContentFamily.OVERHEARD.value
+                if paste_family != channel_family:
+                    return False
                 if paste and await self.paste_service._is_paste_in_cooldown(session, paste, channel.id):
                     return False
                 latest_same_paste = await session.scalar(

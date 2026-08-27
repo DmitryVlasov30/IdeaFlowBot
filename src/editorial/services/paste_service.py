@@ -7,12 +7,14 @@ from random import SystemRandom
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.editorial.models.channel import Channel
 from src.editorial.models.channel_history import ChannelHistoryMessage
 from src.editorial.models.content import ContentItem
 from src.editorial.models.enums import (
     ChannelPasteTagRuleMode,
     ContentItemStatus,
     ContentSourceType,
+    ContentFamily,
     PasteStatus,
     PublicationStatus,
     SubmissionStatus,
@@ -57,6 +59,7 @@ class PasteAvailabilityContext:
     reference_now: datetime
     channel_ids: frozenset[int]
     pastes: list[PasteLibrary]
+    channel_families: dict[int, str] = field(default_factory=dict)
     explicitly_allowed_pairs: set[tuple[int, int]] = field(default_factory=set)
     global_included: set[str] = field(default_factory=set)
     global_excluded: set[str] = field(default_factory=set)
@@ -77,21 +80,26 @@ class PasteAvailabilityContext:
         available: list[PasteLibrary] = []
         channel_included = self.channel_included.get(channel_id, set())
         channel_excluded = self.channel_excluded.get(channel_id, set())
+        channel_family = self.channel_families.get(channel_id, ContentFamily.OVERHEARD.value)
 
         for paste in self.pastes:
+            paste_family = getattr(paste, "content_family", None) or ContentFamily.OVERHEARD.value
+            if paste_family != channel_family:
+                continue
             if not paste.allow_all_channels and (paste.id, channel_id) not in self.explicitly_allowed_pairs:
                 continue
 
-            paste_tags = set(paste.tags or [])
-            if paste.primary_tag:
-                paste_tags.add(paste.primary_tag)
-            if not TagService._is_allowed_by_tag_sets(
-                paste_tags,
-                global_included=self.global_included,
-                channel_included=channel_included,
-                excluded=self.global_excluded | channel_excluded,
-            ):
-                continue
+            if channel_family != ContentFamily.CONFESSION.value:
+                paste_tags = set(paste.tags or [])
+                if paste.primary_tag:
+                    paste_tags.add(paste.primary_tag)
+                if not TagService._is_allowed_by_tag_sets(
+                    paste_tags,
+                    global_included=self.global_included,
+                    channel_included=channel_included,
+                    excluded=self.global_excluded | channel_excluded,
+                ):
+                    continue
 
             global_cooldown_days = max(
                 0,
@@ -153,10 +161,13 @@ class PasteService:
         session: AsyncSession,
         status: PasteStatus | None = None,
         limit: int | None = 50,
+        content_family: str | None = None,
     ) -> list[PasteLibrary]:
         stmt = select(PasteLibrary).order_by(PasteLibrary.updated_at.desc())
         if status is not None:
             stmt = stmt.where(PasteLibrary.status == status)
+        if content_family is not None:
+            stmt = stmt.where(PasteLibrary.content_family == content_family)
         if limit is not None:
             stmt = stmt.limit(limit)
         return list((await session.execute(stmt)).scalars().all())
@@ -251,9 +262,13 @@ class PasteService:
         if paste is None:
             raise ValueError(f"Paste {paste_id} not found")
 
-        await self.tag_service.refresh_paste_tag_cache(session, paste)
-        tags = list(paste.tags or [])
-        primary_tag = paste.primary_tag or await self.tag_service.pick_primary_tag(session, tags)
+        if paste.content_family == ContentFamily.CONFESSION.value:
+            tags = []
+            primary_tag = None
+        else:
+            await self.tag_service.refresh_paste_tag_cache(session, paste)
+            tags = list(paste.tags or [])
+            primary_tag = paste.primary_tag or await self.tag_service.pick_primary_tag(session, tags)
         item = ContentItem(
             channel_id=channel_id,
             source_type=ContentSourceType.PASTE,
@@ -297,9 +312,14 @@ class PasteService:
         availability_context: PasteAvailabilityContext | None = None,
     ) -> list[PasteLibrary]:
         if availability_context is None or not availability_context.covers_channel(channel_id):
+            channel = await session.get(Channel, channel_id)
+            channel_family = (
+                getattr(channel, "content_family", None) or ContentFamily.OVERHEARD.value
+            )
             availability_context = await self.build_availability_context(
                 session,
                 channel_ids=[channel_id],
+                channel_families={channel_id: channel_family},
             )
         available = availability_context.available_for_channel(channel_id)
 
@@ -314,6 +334,7 @@ class PasteService:
         *,
         channel_ids: list[int],
         now: datetime | None = None,
+        channel_families: dict[int, str] | None = None,
     ) -> PasteAvailabilityContext:
         reference_now = now or datetime.now(timezone.utc)
         unique_channel_ids = frozenset(int(channel_id) for channel_id in channel_ids)
@@ -330,6 +351,7 @@ class PasteService:
             reference_now=reference_now,
             channel_ids=unique_channel_ids,
             pastes=pastes,
+            channel_families=channel_families or {},
         )
         if not pastes or not unique_channel_ids:
             return context

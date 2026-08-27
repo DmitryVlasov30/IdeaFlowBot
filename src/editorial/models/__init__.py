@@ -2,11 +2,14 @@ from src.editorial.models.channel import Channel, ChannelSettingProfile, Channel
 from src.editorial.models.ad_blackout import ChannelAdBlackout
 from src.editorial.models.channel_history import ChannelHistoryMessage
 from src.editorial.models.content import ContentItem, ContentItemSource
+from src.editorial.models.confession import ConfessionPublisher
 from src.editorial.models.enums import (
     ContentItemStatus,
     ContentSourceType,
+    ContentFamily,
     GenerationStatus,
     PasteStatus,
+    PasteDeliveryMode,
     PublicationStatus,
     ReviewDecision,
     SubmissionStatus,
@@ -34,6 +37,8 @@ __all__ = [
     "ChannelSlot",
     "ChannelSubscriberSnapshot",
     "ContentItem",
+    "ConfessionPublisher",
+    "ContentFamily",
     "ContentItemSource",
     "ContentItemStatus",
     "ContentSourceType",
@@ -46,6 +51,7 @@ __all__ = [
     "NotificationSubscription",
     "PasteChannelRule",
     "PasteLibrary",
+    "PasteDeliveryMode",
     "PasteStatus",
     "PasteUsage",
     "PasteTagAssignment",

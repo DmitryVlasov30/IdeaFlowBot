@@ -61,6 +61,16 @@ class PasteStatus(StrEnum):
     ARCHIVED = "archived"
 
 
+class ContentFamily(StrEnum):
+    OVERHEARD = "overheard"
+    CONFESSION = "confession"
+
+
+class PasteDeliveryMode(StrEnum):
+    TEXT = "text"
+    TELEGRAM_COPY = "telegram_copy"
+
+
 class TagMatchType(StrEnum):
     CONTAINS = "contains"
     WORD = "word"

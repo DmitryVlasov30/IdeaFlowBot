@@ -17,6 +17,7 @@ def build_main_panel(is_general_admin: bool) -> InlineKeyboardMarkup:
         InlineKeyboardButton("\u041f\u0430\u0441\u0442\u044b", callback_data="panel:pastes"),
         InlineKeyboardButton("\u041a\u0430\u043d\u0430\u043b\u044b \u0438 \u0441\u043b\u043e\u0442\u044b", callback_data="panel:channels"),
     )
+    markup.add(InlineKeyboardButton("Признавашки", callback_data="panel:confessions"))
     markup.add(
         InlineKeyboardButton("Теги", callback_data="panel:tags"),
     )
@@ -53,6 +54,112 @@ def build_extra_panel(is_general_admin: bool = False) -> InlineKeyboardMarkup:
         )
     markup.add(InlineKeyboardButton("SQL -> CSV", callback_data="panel:sql_export"))
     markup.add(InlineKeyboardButton("\u041d\u0430\u0437\u0430\u0434 \u0432 \u043f\u0430\u043d\u0435\u043b\u044c", callback_data="panel:main"))
+    return markup
+
+
+def build_confessions_menu(is_general_admin: bool) -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup(row_width=1)
+    if is_general_admin:
+        markup.add(
+            InlineKeyboardButton(
+                "Подключить саббота",
+                callback_data="confessions:connect_publisher",
+            ),
+            InlineKeyboardButton(
+                "Добавить чат для паст",
+                callback_data="confessions:connect_storage",
+            ),
+        )
+    markup.add(
+        InlineKeyboardButton("Пасты", callback_data="confessions:pastes"),
+        InlineKeyboardButton("Паблики", callback_data="confessions:channels:0"),
+    )
+    markup.add(InlineKeyboardButton("Назад в панель", callback_data="panel:main"))
+    return markup
+
+
+def build_confession_paste_actions(
+    paste_id: int,
+    *,
+    has_previous: bool,
+    has_next: bool,
+) -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup(row_width=2)
+    nav_buttons = []
+    if has_previous:
+        nav_buttons.append(InlineKeyboardButton("⬅️", callback_data=f"confession_paste:prev:{paste_id}"))
+    if has_next:
+        nav_buttons.append(InlineKeyboardButton("➡️", callback_data=f"confession_paste:next:{paste_id}"))
+    if nav_buttons:
+        markup.row(*nav_buttons)
+    markup.add(
+        InlineKeyboardButton(
+            "Удалить пасту",
+            callback_data=f"confession_paste:delete:{paste_id}",
+        )
+    )
+    markup.add(InlineKeyboardButton("Назад к признавашкам", callback_data="panel:confessions"))
+    return markup
+
+
+def build_confession_paste_delete_confirm(paste_id: int) -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.row(
+        InlineKeyboardButton(
+            "Да, удалить",
+            callback_data=f"confession_paste:delete_confirm:{paste_id}",
+        ),
+        InlineKeyboardButton(
+            "Отмена",
+            callback_data=f"confession_paste:delete_cancel:{paste_id}",
+        ),
+    )
+    return markup
+
+
+def build_empty_confession_paste_actions() -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(InlineKeyboardButton("Назад к признавашкам", callback_data="panel:confessions"))
+    return markup
+
+
+def build_confession_channels_actions(
+    channel_buttons: list[tuple[int, str]],
+    *,
+    page: int,
+    has_previous: bool,
+    has_next: bool,
+    is_general_admin: bool,
+) -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup(row_width=1)
+    if is_general_admin:
+        markup.add(InlineKeyboardButton("Подключить паблик", callback_data="confessions:add_channel"))
+    for channel_id, title in channel_buttons:
+        markup.add(
+            InlineKeyboardButton(title, callback_data=f"confession_channel:view:{channel_id}")
+        )
+    nav_buttons = []
+    if has_previous:
+        nav_buttons.append(
+            InlineKeyboardButton("⬅️ Назад", callback_data=f"confessions:channels:{page - 1}")
+        )
+    if has_next:
+        nav_buttons.append(
+            InlineKeyboardButton("Вперёд ➡️", callback_data=f"confessions:channels:{page + 1}")
+        )
+    if nav_buttons:
+        markup.row(*nav_buttons)
+    markup.add(InlineKeyboardButton("Назад к признавашкам", callback_data="panel:confessions"))
+    return markup
+
+
+def build_confession_channel_actions(channel_id: int) -> InlineKeyboardMarkup:
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("Добавить слоты", callback_data=f"confession_channel:add_slot:{channel_id}"),
+        InlineKeyboardButton("Удалить слоты", callback_data=f"confession_channel:delete_slots:{channel_id}"),
+    )
+    markup.add(InlineKeyboardButton("Назад к пабликам", callback_data="confessions:channels:0"))
     return markup
 
 

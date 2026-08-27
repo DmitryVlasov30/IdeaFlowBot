@@ -15,6 +15,7 @@ from src.editorial.models.channel import Channel
 from src.editorial.models.content import ContentItem
 from src.editorial.models.enums import (
     ChannelPasteTagRuleMode,
+    ContentFamily,
     ContentItemStatus,
     ContentSourceType,
     PasteStatus,
@@ -34,6 +35,7 @@ from src.editorial.services.auto_slot_planner import AutoSlotPlannerService
 from src.editorial.services.channel_profile_service import ChannelProfileService
 from src.editorial.services.channel_history_service import ChannelHistoryImportResult, ChannelHistoryService
 from src.editorial.services.channel_service import ChannelService
+from src.editorial.services.confession_service import ConfessionService
 from src.editorial.services.generation.service import GenerationService
 from src.editorial.services.import_legacy import LegacyImporter
 from src.editorial.services.legacy_moderation_sync import LegacyModerationSyncService
@@ -125,6 +127,7 @@ class TelegramEditorialActions:
         self.paste_service = PasteService()
         self.channel_history_service = ChannelHistoryService()
         self.channel_service = ChannelService()
+        self.confession_service = ConfessionService()
         self.auto_slot_planner = AutoSlotPlannerService()
         self.channel_profile_service = ChannelProfileService(legacy_reader=self.legacy_reader)
         self.tag_service = TagService()
@@ -148,22 +151,43 @@ class TelegramEditorialActions:
             if active_tg_channel_ids:
                 await session.execute(
                     sql_update(Channel)
-                    .where(Channel.tg_channel_id.in_(active_tg_channel_ids))
+                    .where(
+                        Channel.content_family == ContentFamily.OVERHEARD.value,
+                        Channel.tg_channel_id.in_(active_tg_channel_ids),
+                    )
                     .values(is_active=True)
                 )
                 await session.execute(
                     sql_update(Channel)
-                    .where(~Channel.tg_channel_id.in_(active_tg_channel_ids))
+                    .where(
+                        Channel.content_family == ContentFamily.OVERHEARD.value,
+                        ~Channel.tg_channel_id.in_(active_tg_channel_ids),
+                    )
                     .values(is_active=False)
                 )
             else:
-                await session.execute(sql_update(Channel).values(is_active=False))
+                await session.execute(
+                    sql_update(Channel)
+                    .where(Channel.content_family == ContentFamily.OVERHEARD.value)
+                    .values(is_active=False)
+                )
             await session.commit()
 
     async def list_channels(self) -> list[Channel]:
         await self.sync_channel_activity_from_bindings()
         async with session_factory() as session:
-            return await self.channel_service.list_channels(session)
+            return list(
+                (
+                    await session.execute(
+                        select(Channel)
+                        .where(
+                            Channel.is_active.is_(True),
+                            Channel.content_family == ContentFamily.OVERHEARD.value,
+                        )
+                        .order_by(Channel.id.asc())
+                    )
+                ).scalars().all()
+            )
 
     async def get_channel(self, channel_id: int) -> Channel | None:
         async with session_factory() as session:
@@ -885,7 +909,60 @@ class TelegramEditorialActions:
 
     async def list_pastes(self, limit: int | None = None) -> list[PasteLibrary]:
         async with session_factory() as session:
-            return await self.paste_service.list_pastes(session=session, status=None, limit=limit)
+            return await self.paste_service.list_pastes(
+                session=session,
+                status=None,
+                limit=limit,
+                content_family=ContentFamily.OVERHEARD.value,
+            )
+
+    async def get_active_confession_publisher(self):
+        async with session_factory() as session:
+            return await self.confession_service.get_active_publisher(session)
+
+    async def configure_confession_publisher(
+        self,
+        *,
+        bot_api_token: str,
+        bot_user_id: int,
+        bot_username: str | None,
+        created_by: int | None,
+    ):
+        async with session_factory() as session:
+            return await self.confession_service.configure_publisher(
+                session,
+                bot_api_token=bot_api_token,
+                bot_user_id=bot_user_id,
+                bot_username=bot_username,
+                created_by=created_by,
+            )
+
+    async def refresh_confession_bind_code(self, publisher_id: int):
+        async with session_factory() as session:
+            return await self.confession_service.refresh_bind_code(session, publisher_id)
+
+    async def list_confession_pastes(self, limit: int | None = None) -> list[PasteLibrary]:
+        async with session_factory() as session:
+            return await self.confession_service.list_pastes(session, limit=limit)
+
+    async def list_confession_channels(self) -> list[Channel]:
+        async with session_factory() as session:
+            return await self.confession_service.list_channels(session)
+
+    async def ensure_confession_channel(
+        self,
+        *,
+        tg_channel_id: int,
+        title: str | None,
+        username: str | None,
+    ) -> Channel:
+        async with session_factory() as session:
+            return await self.confession_service.ensure_channel(
+                session,
+                tg_channel_id=tg_channel_id,
+                title=title,
+                username=username,
+            )
 
     async def get_paste(self, paste_id: int) -> PasteLibrary | None:
         async with session_factory() as session:
@@ -903,7 +980,9 @@ class TelegramEditorialActions:
             pastes = list(
                 (
                     await session.execute(
-                        select(PasteLibrary).order_by(PasteLibrary.updated_at.desc())
+                        select(PasteLibrary)
+                        .where(PasteLibrary.content_family == channel.content_family)
+                        .order_by(PasteLibrary.updated_at.desc())
                     )
                 ).scalars().all()
             )
@@ -1101,6 +1180,31 @@ class TelegramEditorialActions:
             paste = await session.get(PasteLibrary, paste_id)
             if paste is None:
                 raise ValueError(f"Paste {paste_id} not found")
+            paste_title = paste.title
+            paste_pk = paste.id
+            await session.delete(paste)
+            await session.commit()
+            return paste_pk, paste_title
+
+    async def delete_confession_paste(self, paste_id: int) -> tuple[int, str]:
+        async with session_factory() as session:
+            paste = await session.get(PasteLibrary, paste_id)
+            if paste is None or paste.content_family != ContentFamily.CONFESSION.value:
+                raise ValueError(f"Паста признавашек #{paste_id} не найдена.")
+
+            unpublished_items = list(
+                (
+                    await session.execute(
+                        select(ContentItem).where(
+                            ContentItem.origin_paste_id == paste.id,
+                            ContentItem.status != ContentItemStatus.PUBLISHED,
+                        )
+                    )
+                ).scalars().all()
+            )
+            for item in unpublished_items:
+                await session.delete(item)
+
             paste_title = paste.title
             paste_pk = paste.id
             await session.delete(paste)

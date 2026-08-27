@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.editorial.config import settings
 from src.editorial.models.channel_history import ChannelHistoryMessage
-from src.editorial.models.enums import PasteStatus
+from src.editorial.models.enums import ContentFamily, PasteStatus
 from src.editorial.models.paste import PasteLibrary
 from src.editorial.utils.text import compute_text_hash, normalize_text, similarity_score
 
@@ -97,6 +97,7 @@ class ChannelHistoryService:
                 select(PasteLibrary)
                 .where(
                     PasteLibrary.status == PasteStatus.ACTIVE,
+                    PasteLibrary.content_family == ContentFamily.OVERHEARD.value,
                     PasteLibrary.text_hash == text_hash,
                 )
                 .order_by(desc(PasteLibrary.updated_at))
@@ -111,7 +112,10 @@ class ChannelHistoryService:
             (
                 await session.execute(
                     select(PasteLibrary)
-                    .where(PasteLibrary.status == PasteStatus.ACTIVE)
+                    .where(
+                        PasteLibrary.status == PasteStatus.ACTIVE,
+                        PasteLibrary.content_family == ContentFamily.OVERHEARD.value,
+                    )
                     .order_by(desc(PasteLibrary.updated_at))
                 )
             ).scalars().all()

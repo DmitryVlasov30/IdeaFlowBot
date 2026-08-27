@@ -12,13 +12,15 @@ from src.editorial.config import settings
 from src.editorial.models.ad_blackout import ChannelAdBlackout
 from src.editorial.models.channel import Channel
 from src.editorial.models.content import ContentItem
-from src.editorial.models.enums import ContentItemStatus, PublicationStatus
+from src.editorial.models.enums import ContentFamily, ContentItemStatus, PasteDeliveryMode, PublicationStatus
+from src.editorial.models.paste import PasteLibrary
 from src.editorial.models.publication import PublicationLog
 from src.editorial.models.submission import Submission
 from src.editorial.services.legacy_audit import LEGACY_DELAYED_AUDIT_TEMPLATE_KEY
 from src.editorial.services.legacy_source import LegacyCollectorReader, LegacySenderRow
 from src.legacy_publication_status import LegacyPublicationStatusService
 from src.editorial.services.paste_service import PasteService
+from src.editorial.services.confession_service import ConfessionService
 from src.editorial.services.publication_signature import (
     channel_publication_signature_html,
     format_publication_html,
@@ -54,10 +56,12 @@ class PublisherService:
         legacy_reader: LegacyCollectorReader | None = None,
         paste_service: PasteService | None = None,
         legacy_publication_status: LegacyPublicationStatusService | None = None,
+        confession_service: ConfessionService | None = None,
     ) -> None:
         self.telegram_adapter = telegram_adapter or TelegramPublisherAdapter()
         self.legacy_reader = legacy_reader or LegacyCollectorReader()
         self.paste_service = paste_service or PasteService()
+        self.confession_service = confession_service or ConfessionService()
         self.legacy_publication_status = (
             legacy_publication_status or LegacyPublicationStatusService(self.legacy_reader)
         )
@@ -215,6 +219,19 @@ class PublisherService:
         channel: Channel,
         bot_token: str,
     ) -> int:
+        origin_paste_id = getattr(content_item, "origin_paste_id", None)
+        if origin_paste_id is not None:
+            paste = await session.get(PasteLibrary, origin_paste_id)
+            if paste is not None and paste.delivery_mode == PasteDeliveryMode.TELEGRAM_COPY.value:
+                if paste.storage_chat_id is None or paste.storage_message_id is None:
+                    raise ValueError(f"Confession paste {paste.id} has no storage message reference")
+                return await self.telegram_adapter.copy_message(
+                    bot_token=bot_token,
+                    channel_id=channel.tg_channel_id,
+                    from_chat_id=int(paste.storage_chat_id),
+                    message_id=int(paste.storage_message_id),
+                )
+
         add_channel_signature = await self.should_add_channel_signature(bot_token, channel)
         channel_publication_signature = (
             await self.resolve_channel_publication_signature(bot_token, channel)
@@ -432,6 +449,31 @@ class PublisherService:
             .limit(1)
         )
 
+    async def _resolve_publication_bot_token(
+        self,
+        session: AsyncSession,
+        content_item: ContentItem,
+        channel: Channel,
+    ) -> str:
+        origin_paste_id = getattr(content_item, "origin_paste_id", None)
+        if origin_paste_id is not None:
+            paste = await session.get(PasteLibrary, origin_paste_id)
+            if paste is not None and paste.delivery_mode == PasteDeliveryMode.TELEGRAM_COPY.value:
+                publisher = await self.confession_service.get_active_publisher(session)
+                if publisher is None:
+                    raise ValueError("Active confession publisher bot not found")
+                if publisher.storage_chat_id != paste.storage_chat_id:
+                    raise ValueError("Confession paste belongs to a different storage chat")
+                return publisher.bot_api_token
+
+        if getattr(channel, "content_family", None) == ContentFamily.CONFESSION.value:
+            raise ValueError("Confession channel can only publish Telegram-copy confession pastes")
+
+        binding = await self.legacy_reader.get_bot_binding(channel.tg_channel_id)
+        if binding is None:
+            raise ValueError(f"Legacy bot binding for channel {channel.tg_channel_id} not found")
+        return binding.bot_api_token
+
     @staticmethod
     def defer_transient_publication(
         log_item: PublicationLog,
@@ -526,23 +568,15 @@ class PublisherService:
             log_item.attempt_count = int(log_item.attempt_count or 0) + 1
             log_item.last_attempt_at = current_time
 
-            binding = await self.legacy_reader.get_bot_binding(channel.tg_channel_id)
-            if binding is None:
-                log_item.publish_status = PublicationStatus.FAILED
-                log_item.error_text = f"Legacy bot binding for channel {channel.tg_channel_id} not found"
-                content_item.status = ContentItemStatus.APPROVED
-                result.failed += 1
-                await session.commit()
-                continue
-
             published_content_item_id: int | None = None
             operation_started = perf_counter()
             try:
+                bot_token = await self._resolve_publication_bot_token(session, content_item, channel)
                 telegram_message_id = await self._publish_submission_based_item(
                     session=session,
                     content_item=content_item,
                     channel=channel,
-                    bot_token=binding.bot_api_token,
+                    bot_token=bot_token,
                 )
                 log_item.telegram_message_id = telegram_message_id
                 log_item.publish_status = PublicationStatus.SENT

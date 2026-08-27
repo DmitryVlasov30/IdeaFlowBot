@@ -21,7 +21,7 @@ from telebot.types import (
 
 from config import settings
 from src.core_database.database import CrudBotAdmins, CrudBotsData, CrudDelayedPosts
-from src.editorial.models.enums import ChannelPasteTagRuleMode, SubmissionStatus
+from src.editorial.models.enums import ChannelPasteTagRuleMode, ContentFamily, SubmissionStatus
 from src.editorial.services.advertising import send_advertising_flow
 from src.editorial.services.admin_statistics_export import parse_admin_statistics_month
 from src.editorial.services.db_export import DatabaseExportService
@@ -33,6 +33,7 @@ from src.editorial.services.statistics_export import (
     validate_statistics_delta_days,
 )
 from src.editorial.services.telegram_actions import TelegramEditorialActions
+from src.confession_publisher import ConfessionPublisherRuntime
 from src.telegram_runtime import calculate_telegram_request_limit
 from src.panel_markups import (
     build_admin_menu,
@@ -42,8 +43,14 @@ from src.panel_markups import (
     build_channel_paste_tag_actions,
     build_channel_slots_actions,
     build_channels_actions,
+    build_confession_channel_actions,
+    build_confession_channels_actions,
+    build_confession_paste_actions,
+    build_confession_paste_delete_confirm,
+    build_confessions_menu,
     build_content_actions,
     build_empty_paste_actions,
+    build_empty_confession_paste_actions,
     build_extra_panel,
     build_global_paste_tag_rule_actions,
     build_main_panel,
@@ -83,6 +90,7 @@ class MasterBot:
         self.delayed_task = None
         self.subscriber_snapshot_task = None
         self.main_polling_task = None
+        self.confession_publisher_runtime: ConfessionPublisherRuntime | None = None
         self.bot_info = None
         self.flag_register_push_message = False
         self.user_states: dict[int, dict[str, Any]] = {}
@@ -168,6 +176,26 @@ class MasterBot:
             logger.debug("Failed to close shared Telegram aiohttp session: {}", ex)
         finally:
             asyncio_helper.session_manager.session = None
+
+    async def _start_confession_publisher_runtime(self, publisher) -> None:
+        current = self.confession_publisher_runtime
+        if (
+            current is not None
+            and current.publisher_id == publisher.id
+            and current.bot_api_token == publisher.bot_api_token
+            and current.polling_task is not None
+            and not current.polling_task.done()
+        ):
+            return
+        if current is not None:
+            await current.stop()
+        runtime = ConfessionPublisherRuntime(
+            publisher_id=publisher.id,
+            bot_api_token=publisher.bot_api_token,
+            bot_user_id=publisher.bot_user_id,
+        )
+        await runtime.start()
+        self.confession_publisher_runtime = runtime
 
     @staticmethod
     def _normalize_username(value: str | None) -> str:
@@ -1956,6 +1984,117 @@ class MasterBot:
 
         await self._show_paste_at_index(chat_id, pastes, index)
 
+    async def _show_confessions_menu(self, chat_id: int) -> None:
+        publisher = await self.editorial_actions.get_active_confession_publisher()
+        if publisher is None:
+            status = "Саббот для публикаций пока не подключён."
+        else:
+            bot_label = f"@{publisher.bot_username}" if publisher.bot_username else str(publisher.bot_user_id)
+            storage_label = publisher.storage_chat_title or publisher.storage_chat_id or "не подключён"
+            status = f"Саббот: {bot_label}\nЧат паст: {storage_label}"
+        await self.main_bot.send_message(
+            chat_id,
+            "Признавашки.\n\n" + status,
+            reply_markup=build_confessions_menu(self._is_general_admin(chat_id)),
+        )
+
+    @staticmethod
+    def _format_confession_paste(paste) -> str:
+        body = paste.body_text or f"<{paste.storage_content_type or 'message'}>"
+        if len(body) > 3000:
+            body = body[:3000] + "..."
+        return (
+            f"Паста признавашек #{paste.id}\n"
+            f"Тип: {paste.storage_content_type or 'message'}\n"
+            f"Сообщение в хранилище: {paste.storage_message_id or '-'}\n\n"
+            f"{body}"
+        )
+
+    async def _show_confession_paste_at_index(self, chat_id: int, pastes: list, index: int) -> None:
+        index = min(max(index, 0), len(pastes) - 1)
+        paste = pastes[index]
+        await self.main_bot.send_message(
+            chat_id,
+            f"Паста {index + 1}/{len(pastes)}\n\n{self._format_confession_paste(paste)}",
+            reply_markup=build_confession_paste_actions(
+                paste.id,
+                has_previous=index > 0,
+                has_next=len(pastes) > index + 1,
+            ),
+        )
+
+    async def _show_first_confession_paste(
+        self,
+        chat_id: int,
+        current_id: int | None = None,
+        step: int = 1,
+    ) -> None:
+        pastes = await self.editorial_actions.list_confession_pastes(limit=None)
+        if not pastes:
+            await self.main_bot.send_message(
+                chat_id,
+                "Паст признавашек пока нет. Добавьте сообщения в подключённый чат паст.",
+                reply_markup=build_empty_confession_paste_actions(),
+            )
+            return
+        index = 0
+        if current_id is not None:
+            for idx, paste in enumerate(pastes):
+                if paste.id == current_id:
+                    index = min(max(idx + step, 0), len(pastes) - 1)
+                    break
+        await self._show_confession_paste_at_index(chat_id, pastes, index)
+
+    @staticmethod
+    def _confession_channel_label(channel) -> str:
+        return channel.title or channel.short_code or str(channel.tg_channel_id)
+
+    async def _show_confession_channels_menu(self, chat_id: int, page: int = 0) -> None:
+        channels = await self.editorial_actions.list_confession_channels()
+        page = self._normalize_panel_page(page, len(channels))
+        start, end, has_previous, has_next = self._page_bounds(page, len(channels))
+        visible = channels[start:end]
+        buttons = [(channel.id, self._confession_channel_label(channel)) for channel in visible]
+        lines = [f"Паблики признавашек ({len(channels)}):"]
+        if visible:
+            lines.extend(
+                f"{channel.id}. {self._confession_channel_label(channel)}"
+                for channel in visible
+            )
+        else:
+            lines.append("Пока не подключено ни одного паблика.")
+        await self.main_bot.send_message(
+            chat_id,
+            "\n".join(lines),
+            reply_markup=build_confession_channels_actions(
+                buttons,
+                page=page,
+                has_previous=has_previous,
+                has_next=has_next,
+                is_general_admin=self._is_general_admin(chat_id),
+            ),
+        )
+
+    async def _show_confession_channel_slots(self, chat_id: int, channel_id: int) -> None:
+        channel = await self.editorial_actions.get_channel(channel_id)
+        if channel is None or channel.content_family != ContentFamily.CONFESSION.value:
+            await self.main_bot.send_message(chat_id, "Паблик признавашек не найден.")
+            return
+        slots = await self.editorial_actions.list_channel_slots(channel_id)
+        lines = [f"Слоты для {self._confession_channel_label(channel)}:"]
+        if slots:
+            lines.extend(
+                f"#{slot.id} {self._weekday_label(slot.weekday)} {slot.slot_time.strftime('%H:%M')}"
+                for slot in slots
+            )
+        else:
+            lines.append("Слотов пока нет.")
+        await self.main_bot.send_message(
+            chat_id,
+            "\n".join(lines),
+            reply_markup=build_confession_channel_actions(channel_id),
+        )
+
     async def _show_tags_menu(self, chat_id: int) -> None:
         tags = await self.editorial_actions.list_tags(include_inactive=True)
         buttons = [(tag.slug, tag.title, tag.is_active) for tag in tags]
@@ -2206,6 +2345,122 @@ class MasterBot:
         if action != "await_import_channel_history":
             self._clear_user_state(message.chat.id)
         text_value = (message.text or message.caption or "").strip()
+
+        if action == "await_confession_publisher_token":
+            if not self._is_general_admin(message.from_user.id if message.from_user else message.chat.id):
+                await self.main_bot.send_message(message.chat.id, "Только для генерального администратора.")
+                return True
+            if not text_value:
+                self._set_user_state(message.chat.id, action)
+                await self.main_bot.send_message(message.chat.id, "Отправьте токен отдельного бота.")
+                return True
+            publisher_bot = AsyncTeleBot(text_value)
+            try:
+                bot_info = await publisher_bot.get_me()
+            except Exception as exc:
+                self._set_user_state(message.chat.id, action)
+                await self.main_bot.send_message(message.chat.id, f"Не удалось проверить токен: {exc}")
+                return True
+            finally:
+                try:
+                    await publisher_bot.close_session()
+                except Exception:
+                    pass
+            if self.bot_info is not None and bot_info.id == self.bot_info.id:
+                await self.main_bot.send_message(
+                    message.chat.id,
+                    "Нужен отдельный бот, токен главного бота панели использовать нельзя.",
+                )
+                return True
+            publisher = await self.editorial_actions.configure_confession_publisher(
+                bot_api_token=text_value,
+                bot_user_id=bot_info.id,
+                bot_username=bot_info.username,
+                created_by=message.from_user.id if message.from_user else message.chat.id,
+            )
+            await self._start_confession_publisher_runtime(publisher)
+            await self.main_bot.send_message(
+                message.chat.id,
+                (
+                    f"Саббот @{bot_info.username} подключён.\n\n"
+                    "1. Создайте закрытую группу для паст.\n"
+                    f"2. Добавьте @{bot_info.username} в администраторы группы.\n"
+                    "3. Отправьте в этой группе команду:\n"
+                    f"/connect_confessions {publisher.bind_code}\n\n"
+                    "Код действует 30 минут. После привязки все новые сообщения группы будут попадать в базу признавашек."
+                ),
+            )
+            await self._show_confessions_menu(message.chat.id)
+            return True
+
+        if action == "await_confession_add_channel":
+            if not self._is_general_admin(message.from_user.id if message.from_user else message.chat.id):
+                await self.main_bot.send_message(message.chat.id, "Только для генерального администратора.")
+                return True
+            publisher = await self.editorial_actions.get_active_confession_publisher()
+            if publisher is None:
+                await self.main_bot.send_message(message.chat.id, "Сначала подключите саббота признавашек.")
+                return True
+            try:
+                chat_ref: int | str = int(text_value)
+            except ValueError:
+                chat_ref = text_value if text_value.startswith("@") else f"@{text_value}"
+            publisher_bot = AsyncTeleBot(publisher.bot_api_token)
+            try:
+                telegram_chat = await publisher_bot.get_chat(chat_ref)
+                if telegram_chat.type != "channel":
+                    raise ValueError("Нужен именно Telegram-канал, а не группа или личный чат.")
+                member = await publisher_bot.get_chat_member(telegram_chat.id, publisher.bot_user_id)
+                raw_member_status = getattr(member, "status", "")
+                member_status = str(getattr(raw_member_status, "value", raw_member_status))
+                if member_status not in {"administrator", "creator"}:
+                    raise ValueError("Саббот не является администратором этого канала.")
+                if member_status == "administrator" and not getattr(member, "can_post_messages", False):
+                    raise ValueError("У саббота нет права публиковать сообщения в этом канале.")
+                channel = await self.editorial_actions.ensure_confession_channel(
+                    tg_channel_id=telegram_chat.id,
+                    title=getattr(telegram_chat, "title", None),
+                    username=getattr(telegram_chat, "username", None),
+                )
+            except Exception as exc:
+                self._set_user_state(message.chat.id, action)
+                await self.main_bot.send_message(
+                    message.chat.id,
+                    f"Не удалось подключить паблик: {exc}\nПроверьте ссылку и права саббота, затем отправьте паблик ещё раз.",
+                )
+                return True
+            finally:
+                try:
+                    await publisher_bot.close_session()
+                except Exception:
+                    pass
+            await self.main_bot.send_message(
+                message.chat.id,
+                f"Паблик {self._confession_channel_label(channel)} подключён.",
+            )
+            await self._show_confession_channel_slots(message.chat.id, channel.id)
+            return True
+
+        if action in {"await_confession_add_slot", "await_confession_delete_slots"}:
+            channel_id = int(state["channel_id"])
+            try:
+                weekdays, slot_times = self._parse_slot_input(text_value)
+            except ValueError as exc:
+                self._set_user_state(message.chat.id, action, channel_id=channel_id)
+                await self.main_bot.send_message(
+                    message.chat.id,
+                    f"{exc}\n\nПримеры:\n10:00 15:00\nall 10:00 15:00\n0,2,4 18:00 21:00",
+                )
+                return True
+            if action == "await_confession_add_slot":
+                changed_count = await self.editorial_actions.add_slots(channel_id, slot_times, weekdays)
+                result_label = "Добавлено"
+            else:
+                changed_count = await self.editorial_actions.remove_slots(channel_id, slot_times, weekdays)
+                result_label = "Удалено"
+            await self.main_bot.send_message(message.chat.id, f"{result_label} слотов: {changed_count}.")
+            await self._show_confession_channel_slots(message.chat.id, channel_id)
+            return True
 
         if action == "await_paste_jump":
             await self._show_paste_from_input(message.chat.id, text_value)
@@ -3072,6 +3327,10 @@ class MasterBot:
                         await self._safe_answer_callback(self.main_bot, call.id)
                         answered_early = True
                         await self._show_first_paste(call.message.chat.id)
+                    case "confessions":
+                        await self._safe_answer_callback(self.main_bot, call.id)
+                        answered_early = True
+                        await self._show_confessions_menu(call.message.chat.id)
                     case "tags":
                         await self._safe_answer_callback(self.main_bot, call.id)
                         answered_early = True
@@ -3195,6 +3454,162 @@ class MasterBot:
                         await self._show_subbots_menu(call.message.chat.id, page=page)
                 if not answered_early:
                     await self._safe_answer_callback(self.main_bot, call.id)
+                return
+
+            if data.startswith("confessions:"):
+                parts = data.split(":")
+                action = parts[1]
+                await self._safe_answer_callback(self.main_bot, call.id)
+                if action == "connect_publisher":
+                    if not self._is_general_admin(call.from_user.id):
+                        await self.main_bot.send_message(call.message.chat.id, "Только для генерального администратора.")
+                        return
+                    self._set_user_state(call.message.chat.id, "await_confession_publisher_token")
+                    await self.main_bot.send_message(
+                        call.message.chat.id,
+                        "Отправьте токен отдельного бота, который будет хранить и копировать пасты признавашек.",
+                    )
+                    return
+                if action == "connect_storage":
+                    if not self._is_general_admin(call.from_user.id):
+                        await self.main_bot.send_message(call.message.chat.id, "Только для генерального администратора.")
+                        return
+                    publisher = await self.editorial_actions.get_active_confession_publisher()
+                    if publisher is None:
+                        await self.main_bot.send_message(
+                            call.message.chat.id,
+                            "Сначала нажмите «Подключить саббота» и отправьте токен отдельного бота.",
+                        )
+                        return
+                    publisher = await self.editorial_actions.refresh_confession_bind_code(publisher.id)
+                    await self._start_confession_publisher_runtime(publisher)
+                    bot_label = f"@{publisher.bot_username}" if publisher.bot_username else str(publisher.bot_user_id)
+                    await self.main_bot.send_message(
+                        call.message.chat.id,
+                        (
+                            "Подключение чата для паст.\n\n"
+                            "1. Создайте закрытую группу или откройте уже существующую.\n"
+                            f"2. Добавьте {bot_label} в администраторы группы.\n"
+                            "3. Отправьте в этой группе команду:\n"
+                            f"/connect_confessions {publisher.bind_code}\n\n"
+                            "Код действует 30 минут. Чат, в котором будет отправлена команда, станет хранилищем паст признавашек."
+                        ),
+                    )
+                    return
+                if action == "pastes":
+                    await self._show_first_confession_paste(call.message.chat.id)
+                    return
+                if action == "add_channel":
+                    if not self._is_general_admin(call.from_user.id):
+                        await self.main_bot.send_message(call.message.chat.id, "Только для генерального администратора.")
+                        return
+                    self._set_user_state(call.message.chat.id, "await_confession_add_channel")
+                    await self.main_bot.send_message(
+                        call.message.chat.id,
+                        (
+                            "Добавьте саббота признавашек в администраторы паблика с правом публикации, "
+                            "затем отправьте @username паблика или его numeric id."
+                        ),
+                    )
+                    return
+                if action == "channels":
+                    page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+                    await self._show_confession_channels_menu(call.message.chat.id, page=page)
+                    return
+                await self._show_confessions_menu(call.message.chat.id)
+                return
+
+            if data.startswith("confession_paste:"):
+                _prefix, action, value = data.split(":")
+                paste_id = int(value)
+                await self._safe_answer_callback(self.main_bot, call.id)
+                if action == "delete":
+                    paste = await self.editorial_actions.get_paste(paste_id)
+                    if paste is None or paste.content_family != ContentFamily.CONFESSION.value:
+                        await self.main_bot.send_message(call.message.chat.id, "Паста признавашек не найдена.")
+                        return
+                    await self.main_bot.send_message(
+                        call.message.chat.id,
+                        (
+                            f"Удалить пасту признавашек #{paste.id}: {paste.title}?\n\n"
+                            "Она исчезнет из базы и больше не будет публиковаться. "
+                            "Исходное сообщение в чате паст останется."
+                        ),
+                        reply_markup=build_confession_paste_delete_confirm(paste.id),
+                    )
+                    return
+                if action == "delete_cancel":
+                    await self._show_first_confession_paste(
+                        call.message.chat.id,
+                        current_id=paste_id,
+                        step=0,
+                    )
+                    return
+                if action == "delete_confirm":
+                    pastes_before = await self.editorial_actions.list_confession_pastes(limit=None)
+                    deleted_index = next(
+                        (index for index, paste in enumerate(pastes_before) if paste.id == paste_id),
+                        0,
+                    )
+                    try:
+                        deleted_id, deleted_title = await self.editorial_actions.delete_confession_paste(paste_id)
+                    except ValueError as exc:
+                        await self.main_bot.send_message(call.message.chat.id, str(exc))
+                        return
+                    await self.main_bot.send_message(
+                        call.message.chat.id,
+                        f"Паста признавашек #{deleted_id} удалена: {deleted_title}",
+                    )
+                    remaining = await self.editorial_actions.list_confession_pastes(limit=None)
+                    if remaining:
+                        await self._show_confession_paste_at_index(
+                            call.message.chat.id,
+                            remaining,
+                            min(deleted_index, len(remaining) - 1),
+                        )
+                    else:
+                        await self._show_first_confession_paste(call.message.chat.id)
+                    return
+                await self._show_first_confession_paste(
+                    call.message.chat.id,
+                    current_id=paste_id,
+                    step=-1 if action == "prev" else 1,
+                )
+                return
+
+            if data.startswith("confession_channel:"):
+                _prefix, action, value = data.split(":")
+                channel_id = int(value)
+                await self._safe_answer_callback(self.main_bot, call.id)
+                if action == "view":
+                    await self._show_confession_channel_slots(call.message.chat.id, channel_id)
+                    return
+                if action == "add_slot":
+                    self._set_user_state(
+                        call.message.chat.id,
+                        "await_confession_add_slot",
+                        channel_id=channel_id,
+                    )
+                    await self.main_bot.send_message(
+                        call.message.chat.id,
+                        (
+                            "Отправьте время для всех дней или '<дни> <времена...>'.\n"
+                            "Примеры:\n12:00 15:00\nall 10:00 15:00\n0,2,4 18:00 21:00\n"
+                            "Где 0 = понедельник, 6 = воскресенье."
+                        ),
+                    )
+                    return
+                if action == "delete_slots":
+                    self._set_user_state(
+                        call.message.chat.id,
+                        "await_confession_delete_slots",
+                        channel_id=channel_id,
+                    )
+                    await self.main_bot.send_message(
+                        call.message.chat.id,
+                        "Отправьте удаляемые времена в том же формате. Например: all 10:00 15:00",
+                    )
+                    return
                 return
 
             if data.startswith("profiles:"):
@@ -3963,7 +4378,10 @@ class MasterBot:
         logger.info("run_bot")
         await self.__load_dynamic_admins()
         bots_lst = self._filter_enabled_subbots(await self.bots_database.get_bots_info())
-        request_limit = self._configure_request_limit(len(bots_lst))
+        confession_publisher = await self.editorial_actions.get_active_confession_publisher()
+        request_limit = self._configure_request_limit(
+            len(bots_lst) + (1 if confession_publisher is not None else 0)
+        )
         await self._reset_telegram_session()
         self.bot_info = await self.main_bot.get_me()
 
@@ -3983,6 +4401,11 @@ class MasterBot:
                     request_timeout=settings.telegram_request_timeout_seconds,
                 )
             )
+            if confession_publisher is not None:
+                try:
+                    await self._start_confession_publisher_runtime(confession_publisher)
+                except Exception:
+                    logger.exception("Failed to start confession publisher bot. Continuing startup.")
             async with aiohttp.ClientSession() as session:
                 for api_token, bot_username, channel_id, _id_row in bots_lst:
                     try:
