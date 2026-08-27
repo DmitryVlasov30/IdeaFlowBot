@@ -117,6 +117,45 @@ def build_rejection_status_markup(
     return markup
 
 
+def build_advertising_status_markup(
+        *,
+        sender_id: int | None,
+        sender_username: str | None,
+        sender_first_name: str | None,
+        moderator_label: str | None = None,
+        moderator_callback_data: str | None = None,
+) -> InlineKeyboardMarkup:
+    sender_username = (sender_username or "").lstrip("@")
+    sender_text = (
+        f"@{sender_username}"
+        if sender_username
+        else sender_first_name or str(sender_id or 0)
+    )
+    markup = InlineKeyboardMarkup(row_width=1)
+    if moderator_label is None:
+        markup.add(
+            InlineKeyboardButton(
+                text=f"{sender_text} (реклама отправлена)",
+                callback_data=f"add_info;{sender_id or 0}",
+            )
+        )
+        return markup
+
+    markup.add(
+        InlineKeyboardButton(
+            text=f"👤 {sender_text}",
+            callback_data=f"add_info;{sender_id or 0}",
+        )
+    )
+    markup.add(
+        InlineKeyboardButton(
+            text=f"💵 {moderator_label} (реклама отправлена)",
+            callback_data=moderator_callback_data or "agent_info",
+        )
+    )
+    return markup
+
+
 class MarkupButton:
     def __init__(self, bot: AsyncTeleBot):
         self.bot = bot
@@ -649,14 +688,13 @@ class MarkupButton:
 
     async def advertising_button(self, call: CallbackQuery):
         logger.info(f"advertising button: {call.data}")
-        markup = InlineKeyboardMarkup()
         sender_id = call.data.split(";")[1]
         sender_info = await self.bot.get_chat(sender_id)
-        button_info = InlineKeyboardButton(
-            text=f"@{sender_info.username} (реклама отправлена)",
-            callback_data=f"add_info;{sender_id}"
+        markup = build_advertising_status_markup(
+            sender_id=int(sender_id),
+            sender_username=getattr(sender_info, "username", None),
+            sender_first_name=getattr(sender_info, "first_name", None),
         )
-        markup.add(button_info)
         await self.bot.edit_message_reply_markup(
             chat_id=call.message.chat.id,
             message_id=call.message.message_id,

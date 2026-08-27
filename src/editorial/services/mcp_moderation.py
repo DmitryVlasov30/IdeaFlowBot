@@ -25,7 +25,8 @@ MCP_MODERATION_SOURCE = "mcp_codex"
 MCP_APPROVE = "approve"
 MCP_REJECT = "reject"
 MCP_HOLD = "hold"
-McpDecision = Literal["approve", "reject", "hold"]
+MCP_ADVERTISING = "advertising"
+McpDecision = Literal["approve", "reject", "hold", "advertising"]
 PENDING_STATUSES = {SubmissionStatus.NEW, SubmissionStatus.HOLD}
 BATCH_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,119}$")
 
@@ -454,7 +455,7 @@ class McpModerationService:
                     error_text=str(exc),
                 )
 
-        if action.decision in {MCP_APPROVE, MCP_REJECT}:
+        if action.decision in {MCP_APPROVE, MCP_REJECT, MCP_ADVERTISING}:
             return await self._sync_legacy_panel(operation.id, action.decision)
         return self._operation_payload(operation)
 
@@ -520,6 +521,24 @@ class McpModerationService:
             await session.flush()
             return None
 
+        if action.decision == MCP_ADVERTISING:
+            await self.moderation.set_submission_status(
+                session=session,
+                submission_id=submission.id,
+                status=SubmissionStatus.ADVERTISING,
+                moderator_note=note,
+                commit=False,
+            )
+            await self.moderation_cases.void_submission_case(
+                session,
+                submission_id=submission.id,
+                moderator_id=self.actor_id,
+                source=MCP_MODERATION_SOURCE,
+                action="advertise_submission",
+            )
+            await session.flush()
+            return None
+
         await self.moderation.set_submission_status(
             session=session,
             submission_id=submission.id,
@@ -549,12 +568,9 @@ class McpModerationService:
                 if operation is None or operation.submission_id is None:
                     raise ValueError(f"MCP operation {operation_id} not found")
                 submission_id = operation.submission_id
-            if decision == MCP_APPROVE:
-                sync_count = await actions.sync_panel_submission_agent_approved(submission_id)
-            else:
-                sync_count = await actions.sync_panel_submission_agent_rejected(submission_id)
+            sync_count = await self._apply_telegram_side_effects(actions, submission_id, decision)
         except Exception as exc:
-            warning = f"Moderation was applied, but Telegram review markup sync failed: {exc}"
+            warning = f"Moderation was applied, but Telegram synchronization failed: {exc}"
 
         async with self.session_maker() as session:
             operation = await session.get(McpModerationAction, operation_id)
@@ -564,6 +580,17 @@ class McpModerationService:
             operation.warning_text = warning
             await session.commit()
             return self._operation_payload(operation)
+
+    @staticmethod
+    async def _apply_telegram_side_effects(actions, submission_id: int, decision: str) -> int:
+        if decision == MCP_APPROVE:
+            return await actions.sync_panel_submission_agent_approved(submission_id)
+        if decision == MCP_REJECT:
+            return await actions.sync_panel_submission_agent_rejected(submission_id)
+        if decision == MCP_ADVERTISING:
+            await actions.send_submission_advertising_reply_v2(submission_id)
+            return await actions.sync_panel_submission_agent_advertising(submission_id)
+        raise ValueError(f"Unsupported Telegram synchronization decision: {decision}")
 
     async def _record_failure(
         self,
@@ -651,7 +678,7 @@ class McpModerationService:
         for action in actions:
             if action.submission_id <= 0:
                 raise ValueError("submission_id must be positive")
-            if action.decision not in {MCP_APPROVE, MCP_REJECT, MCP_HOLD}:
+            if action.decision not in {MCP_APPROVE, MCP_REJECT, MCP_HOLD, MCP_ADVERTISING}:
                 raise ValueError(f"Unsupported decision: {action.decision}")
             reason = action.reason.strip()
             if len(reason) < 3 or len(reason) > 1_000:
@@ -670,6 +697,7 @@ class McpModerationService:
             MCP_APPROVE: SubmissionStatus.CONTENT_CREATED,
             MCP_REJECT: SubmissionStatus.REJECTED,
             MCP_HOLD: SubmissionStatus.HOLD,
+            MCP_ADVERTISING: SubmissionStatus.ADVERTISING,
         }[decision]
 
     @staticmethod

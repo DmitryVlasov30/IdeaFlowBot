@@ -1490,6 +1490,7 @@ class MasterBot:
             SubmissionStatus.CONTENT_CREATED.value: "черновик создан",
             SubmissionStatus.REJECTED.value: "отклонено",
             SubmissionStatus.HOLD.value: "hold",
+            SubmissionStatus.ADVERTISING.value: "реклама",
         }
         return labels.get(status, status)
 
@@ -3706,11 +3707,13 @@ class MasterBot:
                             )
                     case "advertise":
                         try:
-                            await self.editorial_actions.send_submission_advertising_reply_v2(submission_id)
+                            await self.editorial_actions.advertise_submission(submission_id, reviewer_id)
+                            await self.editorial_actions.sync_panel_submission_advertising(submission_id)
                             await self.main_bot.send_message(
                                 call.message.chat.id,
                                 f"Пользователю по сообщению {submission_id} отправлена инструкция по рекламе.",
                             )
+                            await self._show_first_pending_submission(call.message.chat.id, current_id=submission_id, user_id=call.from_user.id)
                         except Exception as ex:
                             await self.main_bot.send_message(
                                 call.message.chat.id,

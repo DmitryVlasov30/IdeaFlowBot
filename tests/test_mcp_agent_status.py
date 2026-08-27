@@ -5,6 +5,7 @@ import pytest
 
 from src.editorial.models.enums import ContentItemStatus, ReviewDecision, SubmissionStatus
 from src.editorial.services.legacy_moderation_sync import LegacyModerationSyncService
+from src.editorial.services.telegram_actions import TelegramEditorialActions
 
 
 class _SessionContext:
@@ -82,6 +83,31 @@ def test_agent_rejection_markup_matches_admin_status_with_cancel() -> None:
     ]
 
 
+def test_agent_advertising_markup_identifies_agent_and_author() -> None:
+    markup = LegacyModerationSyncService._build_panel_status_markup(
+        state="advertising",
+        user_id=1001,
+        username="suggest_sender",
+        first_name="Sender",
+        moderator_label="agent",
+    ).to_dict()
+
+    assert markup["inline_keyboard"] == [
+        [
+            {
+                "text": "👤 @suggest_sender",
+                "callback_data": "add_info;1001",
+            }
+        ],
+        [
+            {
+                "text": "💵 agent (реклама отправлена)",
+                "callback_data": "agent_info",
+            }
+        ],
+    ]
+
+
 @pytest.mark.asyncio
 async def test_agent_sync_methods_request_agent_markup() -> None:
     service = LegacyModerationSyncService(
@@ -89,13 +115,15 @@ async def test_agent_sync_methods_request_agent_markup() -> None:
         importer=SimpleNamespace(),
         moderation=SimpleNamespace(),
     )
-    service._sync_panel_review_markup = AsyncMock(side_effect=[2, 3])
+    service._sync_panel_review_markup = AsyncMock(side_effect=[2, 3, 4])
 
     approved_count = await service.mark_panel_submission_agent_approved(10)
     rejected_count = await service.mark_panel_submission_agent_rejected(11)
+    advertising_count = await service.mark_panel_submission_agent_advertising(12)
 
     assert approved_count == 2
     assert rejected_count == 3
+    assert advertising_count == 4
     assert service._sync_panel_review_markup.await_args_list[0].args == (10,)
     assert service._sync_panel_review_markup.await_args_list[0].kwargs == {
         "state": "approved",
@@ -108,6 +136,44 @@ async def test_agent_sync_methods_request_agent_markup() -> None:
         "moderator_label": "agent",
         "allow_cancel": True,
     }
+    assert service._sync_panel_review_markup.await_args_list[2].args == (12,)
+    assert service._sync_panel_review_markup.await_args_list[2].kwargs == {
+        "state": "advertising",
+        "moderator_label": "agent",
+    }
+
+
+@pytest.mark.asyncio
+async def test_panel_advertising_sends_reply_and_sets_terminal_status(monkeypatch) -> None:
+    submission = SimpleNamespace(id=12)
+    session = SimpleNamespace(commit=AsyncMock())
+    monkeypatch.setattr(
+        "src.editorial.services.telegram_actions.session_factory",
+        lambda: _SessionContext(session),
+    )
+    actions = object.__new__(TelegramEditorialActions)
+    actions.send_submission_advertising_reply_v2 = AsyncMock()
+    actions.moderation = SimpleNamespace(
+        set_submission_status=AsyncMock(return_value=submission),
+    )
+    actions.moderation_cases = SimpleNamespace(void_submission_case=AsyncMock())
+
+    result = await actions.advertise_submission(12, reviewer_id=9001)
+
+    assert result is submission
+    actions.send_submission_advertising_reply_v2.assert_awaited_once_with(12)
+    status_kwargs = actions.moderation.set_submission_status.await_args.kwargs
+    assert status_kwargs["submission_id"] == 12
+    assert status_kwargs["status"] == SubmissionStatus.ADVERTISING
+    assert status_kwargs["commit"] is False
+    actions.moderation_cases.void_submission_case.assert_awaited_once_with(
+        session,
+        submission_id=12,
+        moderator_id=9001,
+        source="panel",
+        action="advertise_submission",
+    )
+    session.commit.assert_awaited_once()
 
 
 @pytest.mark.asyncio

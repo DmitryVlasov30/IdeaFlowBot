@@ -872,6 +872,13 @@ class SubBot:
                             else call.message.text or call.message.caption
                         ),
                     )
+                    await self._sync_editorial_submission_status(
+                        review_message_id=call.message.message_id,
+                        status=SubmissionStatus.ADVERTISING,
+                        moderator_note="Handled in legacy moderation: advertising",
+                        reviewer_id=call.from_user.id,
+                        moderation_action="advertise_submission",
+                    )
 
     async def _send_review_message_to_legacy_chat(self, message: Message):
         try:

@@ -733,6 +733,31 @@ class TelegramEditorialActions:
             await session.commit()
             return submission
 
+    async def advertise_submission(
+        self,
+        submission_id: int,
+        reviewer_id: int,
+        note: str = "Advertising reply sent in Telegram panel",
+    ) -> Submission:
+        await self.send_submission_advertising_reply_v2(submission_id)
+        async with session_factory() as session:
+            submission = await self.moderation.set_submission_status(
+                session=session,
+                submission_id=submission_id,
+                status=SubmissionStatus.ADVERTISING,
+                moderator_note=note,
+                commit=False,
+            )
+            await self.moderation_cases.void_submission_case(
+                session,
+                submission_id=submission_id,
+                moderator_id=reviewer_id,
+                source="panel",
+                action="advertise_submission",
+            )
+            await session.commit()
+            return submission
+
     async def paste_submission(self, submission_id: int, reviewer_id: int):
         async with session_factory() as session:
             return await self.paste_service.create_paste_from_submission(
@@ -1413,6 +1438,12 @@ class TelegramEditorialActions:
 
     async def sync_panel_submission_agent_rejected(self, submission_id: int) -> int:
         return await self.legacy_moderation_sync.mark_panel_submission_agent_rejected(submission_id)
+
+    async def sync_panel_submission_advertising(self, submission_id: int) -> int:
+        return await self.legacy_moderation_sync.mark_panel_submission_advertising(submission_id)
+
+    async def sync_panel_submission_agent_advertising(self, submission_id: int) -> int:
+        return await self.legacy_moderation_sync.mark_panel_submission_agent_advertising(submission_id)
 
     async def sync_panel_submission_banned(self, submission_id: int) -> int:
         return await self.legacy_moderation_sync.mark_panel_submission_banned(submission_id)

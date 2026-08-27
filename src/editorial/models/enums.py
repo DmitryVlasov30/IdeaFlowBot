@@ -13,6 +13,7 @@ class SubmissionStatus(StrEnum):
     CONTENT_CREATED = "content_created"
     REJECTED = "rejected"
     HOLD = "hold"
+    ADVERTISING = "advertising"
 
 
 class ContentSourceType(StrEnum):

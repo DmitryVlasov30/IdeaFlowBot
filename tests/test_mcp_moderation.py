@@ -138,6 +138,51 @@ async def test_hold_voids_payable_case():
     assert void_kwargs["source"] == MCP_MODERATION_SOURCE
 
 
+@pytest.mark.asyncio
+async def test_advertising_sets_terminal_status_and_voids_payable_case():
+    service = McpModerationService(write_enabled=True, actor_id=0)
+    submission = _submission()
+    service.moderation.set_submission_status = AsyncMock(return_value=submission)
+    service.moderation_cases.void_submission_case = AsyncMock()
+    session = SimpleNamespace(flush=AsyncMock())
+
+    result = await service._apply_decision(
+        session=session,
+        submission=submission,
+        related=[submission],
+        action=_request(
+            decision="advertising",
+            reason="Коммерческое предложение для размещения",
+        ),
+    )
+
+    assert result is None
+    status_kwargs = service.moderation.set_submission_status.await_args.kwargs
+    assert status_kwargs["status"] == SubmissionStatus.ADVERTISING
+    assert status_kwargs["commit"] is False
+    void_kwargs = service.moderation_cases.void_submission_case.await_args.kwargs
+    assert void_kwargs["source"] == MCP_MODERATION_SOURCE
+    assert void_kwargs["action"] == "advertise_submission"
+
+
+@pytest.mark.asyncio
+async def test_advertising_telegram_side_effects_reuse_existing_flow():
+    actions = SimpleNamespace(
+        send_submission_advertising_reply_v2=AsyncMock(),
+        sync_panel_submission_agent_advertising=AsyncMock(return_value=2),
+    )
+
+    sync_count = await McpModerationService._apply_telegram_side_effects(
+        actions,
+        submission_id=15,
+        decision="advertising",
+    )
+
+    assert sync_count == 2
+    actions.send_submission_advertising_reply_v2.assert_awaited_once_with(15)
+    actions.sync_panel_submission_agent_advertising.assert_awaited_once_with(15)
+
+
 def test_operation_idempotency_requires_exact_same_arguments():
     now = datetime(2026, 8, 27, tzinfo=timezone.utc)
     operation = McpModerationAction(
@@ -180,6 +225,16 @@ def test_mcp_input_rejects_unknown_fields_and_strips_reason():
         }
     )
     assert item.reason == "Нужна проверка"
+
+    advertising = ModerationActionInput.model_validate(
+        {
+            "submission_id": 11,
+            "decision": "advertising",
+            "reason": "Запрос на размещение рекламы",
+            "expected_status": "new",
+        }
+    )
+    assert advertising.decision == "advertising"
 
     with pytest.raises(ValueError):
         ModerationActionInput.model_validate(

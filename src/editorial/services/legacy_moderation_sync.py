@@ -7,7 +7,11 @@ from sqlalchemy import select
 from telebot.async_telebot import AsyncTeleBot
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from src.markups import build_rejection_status_markup, build_slot_status_markup
+from src.markups import (
+    build_advertising_status_markup,
+    build_rejection_status_markup,
+    build_slot_status_markup,
+)
 from src.editorial.db.session import session_factory
 from src.editorial.models.channel import Channel
 from src.editorial.models.content import ContentItem
@@ -56,6 +60,19 @@ class LegacyModerationSyncService:
             state="rejected",
             moderator_label="agent",
             allow_cancel=True,
+        )
+
+    async def mark_panel_submission_advertising(self, submission_id: int) -> int:
+        return await self._sync_panel_review_markup(
+            submission_id,
+            state="advertising",
+        )
+
+    async def mark_panel_submission_agent_advertising(self, submission_id: int) -> int:
+        return await self._sync_panel_review_markup(
+            submission_id,
+            state="advertising",
+            moderator_label="agent",
         )
 
     async def mark_panel_submission_banned(self, submission_id: int) -> int:
@@ -611,6 +628,14 @@ class LegacyModerationSyncService:
                 moderator_username=None,
                 moderator_first_name=moderator_label,
                 moderator_callback_data="agent_info",
+            )
+        if state == "advertising":
+            return build_advertising_status_markup(
+                sender_id=user_id,
+                sender_username=username,
+                sender_first_name=first_name,
+                moderator_label=moderator_label,
+                moderator_callback_data="agent_info" if moderator_label is not None else None,
             )
 
         labels = {

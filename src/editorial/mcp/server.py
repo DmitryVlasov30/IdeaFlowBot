@@ -20,7 +20,8 @@ SERVER_INSTRUCTIONS = """
 Если решение зависит от невидимого фото/видео или есть сомнение, выбери hold. Изменяй статусы
 только после явного запроса пользователя: сначала dry_run, затем отдельный batch_id для применения.
 После записи обязательно вызови verify_moderation_batch. Доступ распространяется на все предложки,
-но сервер не предоставляет публикацию сейчас, бан, ответ автору, произвольный Telegram API или SQL.
+но сервер не предоставляет публикацию сейчас, бан, произвольный ответ автору, Telegram API или SQL.
+Решение advertising разрешает только фиксированный рекламный ответ и уведомление менеджеров.
 """.strip()
 
 
@@ -28,8 +29,11 @@ class ModerationActionInput(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     submission_id: int = Field(gt=0, description="ID предложки из list_pending_submissions")
-    decision: Literal["approve", "reject", "hold"] = Field(
-        description="approve — одобрить, reject — отклонить, hold — оставить человеку"
+    decision: Literal["approve", "reject", "hold", "advertising"] = Field(
+        description=(
+            "approve — одобрить, reject — отклонить, hold — оставить человеку, "
+            "advertising — отправить фиксированный рекламный ответ"
+        )
     )
     reason: str = Field(
         min_length=3,
@@ -141,7 +145,7 @@ async def list_human_moderation_examples(
 @mcp.tool(
     title="Применить решения модерации",
     description=(
-        "Проверяет или применяет пачку approve/reject/hold. "
+        "Проверяет или применяет пачку approve/reject/hold/advertising. "
         "Один batch_id идемпотентен: для dry-run и реального применения нужны разные batch_id. "
         "Реальная запись дополнительно требует EDITORIAL_MCP_WRITE_ENABLED=true."
     ),
