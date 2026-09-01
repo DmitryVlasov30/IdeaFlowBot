@@ -40,17 +40,21 @@ def build_advertising_alert_text(
     *,
     channel_label: str | None,
     source_text: str | None,
+    sender_user_id: int,
     sender_username: str | None,
     sender_first_name: str | None,
 ) -> str:
     safe_channel = escape(_normalize_channel_label(channel_label))
     safe_text = escape((source_text or "").strip() or "текста нет")
+    safe_sender_user_id = escape(str(sender_user_id))
     safe_sender_tag = escape(_sender_tag(sender_username))
     safe_sender_nick = escape(_sender_nick(sender_first_name))
     return (
         f"реклама: {safe_channel}\n"
         f"<blockquote>{safe_text}</blockquote>\n"
-        f"отправитель: {safe_sender_tag}, ник: {safe_sender_nick}"
+        f"отправитель: {safe_sender_tag}, "
+        f'tg id: <a href="tg://user?id={safe_sender_user_id}">{safe_sender_user_id}</a>, '
+        f"ник: {safe_sender_nick}"
     )
 
 
@@ -105,6 +109,7 @@ async def send_advertising_flow(
     advertiser_message = build_advertising_alert_text(
         channel_label=channel_label,
         source_text=source_text,
+        sender_user_id=recipient_user_id,
         sender_username=sender_username,
         sender_first_name=sender_first_name,
     )
