@@ -158,6 +158,14 @@ def build_confession_channel_actions(channel_id: int) -> InlineKeyboardMarkup:
     markup.add(
         InlineKeyboardButton("Добавить слоты", callback_data=f"confession_channel:add_slot:{channel_id}"),
         InlineKeyboardButton("Удалить слоты", callback_data=f"confession_channel:delete_slots:{channel_id}"),
+        InlineKeyboardButton(
+            "Поставить рекламное окно",
+            callback_data=f"confession_channel:add_ad_blackout:{channel_id}",
+        ),
+        InlineKeyboardButton(
+            "Удалить рекламное окно",
+            callback_data=f"confession_channel:delete_ad_blackout:{channel_id}",
+        ),
     )
     markup.add(InlineKeyboardButton("Назад к пабликам", callback_data="confessions:channels:0"))
     return markup

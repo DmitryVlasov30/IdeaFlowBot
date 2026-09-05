@@ -56,6 +56,13 @@ async def test_check_link_ignores_own_raw_channel_link() -> None:
 
 
 @pytest.mark.asyncio
+async def test_check_link_ignores_own_private_channel_link() -> None:
+    message = _message(text="https://t.me/c/1234567890/42")
+
+    assert not await Utils.check_link(message, ignored_channel_ref=-1001234567890)
+
+
+@pytest.mark.asyncio
 async def test_check_link_detects_external_inline_button() -> None:
     message = _message(
         text="Реклама",

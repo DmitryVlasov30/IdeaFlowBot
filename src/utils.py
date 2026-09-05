@@ -221,8 +221,8 @@ class Utils:
         return True if is_anon == "True" else False
 
     @staticmethod
-    def _tme_slug(value: str | None) -> str | None:
-        text = (value or "").strip().lower()
+    def _tme_slug(value: str | int | None) -> str | None:
+        text = str(value or "").strip().lower()
         if not text:
             return None
         if text.startswith("@"):
@@ -230,17 +230,36 @@ class Utils:
         text = text.removeprefix("https://").removeprefix("http://").removeprefix("www.")
         for prefix in ("t.me/", "telegram.me/"):
             if text.startswith(prefix):
-                slug = text.removeprefix(prefix).split("?", 1)[0].split("/", 1)[0]
+                path = text.removeprefix(prefix).split("?", 1)[0].strip("/")
+                if path.startswith("s/"):
+                    path = path[2:]
+                slug = path.split("/", 1)[0]
                 return slug or None
         if "/" not in text and not text.startswith("-"):
             return text
         return None
 
     @classmethod
-    def _is_ignored_channel_link(cls, url: str | None, ignored_channel_ref: str | None) -> bool:
+    def _is_ignored_channel_link(
+        cls,
+        url: str | None,
+        ignored_channel_ref: str | int | None,
+    ) -> bool:
         ignored_slug = cls._tme_slug(ignored_channel_ref)
         url_slug = cls._tme_slug(url)
-        return bool(ignored_slug and url_slug and ignored_slug == url_slug)
+        if ignored_slug and url_slug and ignored_slug == url_slug:
+            return True
+
+        ignored_value = str(ignored_channel_ref or "").strip()
+        if ignored_value.startswith("-100") and ignored_value[4:].isdigit():
+            ignored_private_id = ignored_value[4:]
+            normalized_url = str(url or "").strip().lower()
+            normalized_url = normalized_url.removeprefix("https://").removeprefix("http://").removeprefix("www.")
+            for prefix in ("t.me/c/", "telegram.me/c/"):
+                if normalized_url.startswith(prefix):
+                    linked_private_id = normalized_url.removeprefix(prefix).split("/", 1)[0].split("?", 1)[0]
+                    return linked_private_id == ignored_private_id
+        return False
 
     @staticmethod
     def _message_text_for_links(message: Message) -> str:
@@ -283,7 +302,11 @@ class Utils:
 
     @classmethod
     @logger.catch
-    async def check_link(cls, message: Message, ignored_channel_ref: str | None = None) -> bool:
+    async def check_link(
+        cls,
+        message: Message,
+        ignored_channel_ref: str | int | None = None,
+    ) -> bool:
         for link in cls._extract_message_links(message):
             if not cls._is_ignored_channel_link(link, ignored_channel_ref):
                 return True

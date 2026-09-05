@@ -2082,6 +2082,7 @@ class MasterBot:
             await self.main_bot.send_message(chat_id, "Паблик признавашек не найден.")
             return
         slots = await self.editorial_actions.list_channel_slots(channel_id)
+        ad_blackouts = await self.editorial_actions.list_channel_ad_blackouts(channel_id)
         lines = [f"Слоты для {self._confession_channel_label(channel)}:"]
         if slots:
             lines.extend(
@@ -2090,6 +2091,10 @@ class MasterBot:
             )
         else:
             lines.append("Слотов пока нет.")
+        if ad_blackouts:
+            lines.extend(["", "Рекламные окна:"])
+            for blackout in ad_blackouts:
+                lines.append(await self._format_ad_blackout(channel_id, blackout))
         await self.main_bot.send_message(
             chat_id,
             "\n".join(lines),
@@ -2602,8 +2607,9 @@ class MasterBot:
             await self._show_channel_slots_menu(message.chat.id, channel_id)
             return True
 
-        if action == "await_add_ad_blackout":
+        if action in {"await_add_ad_blackout", "await_confession_add_ad_blackout"}:
             channel_id = state["channel_id"]
+            is_confession = action == "await_confession_add_ad_blackout"
             try:
                 day_of_month, start_time, end_time = self._parse_ad_blackout_input(text_value)
                 blackout = await self.editorial_actions.create_channel_ad_blackout(
@@ -2625,15 +2631,19 @@ class MasterBot:
                 message.chat.id,
                 f"Для {label} добавлено рекламное окно:\n{await self._format_ad_blackout(channel_id, blackout)}",
             )
-            await self._show_channel_menu(
-                message.chat.id,
-                channel_id,
-                user_id=message.from_user.id if message.from_user else message.chat.id,
-            )
+            if is_confession:
+                await self._show_confession_channel_slots(message.chat.id, channel_id)
+            else:
+                await self._show_channel_menu(
+                    message.chat.id,
+                    channel_id,
+                    user_id=message.from_user.id if message.from_user else message.chat.id,
+                )
             return True
 
-        if action == "await_delete_ad_blackout":
+        if action in {"await_delete_ad_blackout", "await_confession_delete_ad_blackout"}:
             channel_id = state["channel_id"]
+            is_confession = action == "await_confession_delete_ad_blackout"
             try:
                 day_of_month, start_time, end_time = self._parse_ad_blackout_input(text_value)
                 blackout = await self.editorial_actions.delete_channel_ad_blackout(
@@ -2654,11 +2664,14 @@ class MasterBot:
                 message.chat.id,
                 f"\u0414\u043b\u044f {label} \u0443\u0434\u0430\u043b\u0435\u043d\u043e \u0440\u0435\u043a\u043b\u0430\u043c\u043d\u043e\u0435 \u043e\u043a\u043d\u043e:\n{await self._format_ad_blackout(channel_id, blackout)}",
             )
-            await self._show_channel_menu(
-                message.chat.id,
-                channel_id,
-                user_id=message.from_user.id if message.from_user else message.chat.id,
-            )
+            if is_confession:
+                await self._show_confession_channel_slots(message.chat.id, channel_id)
+            else:
+                await self._show_channel_menu(
+                    message.chat.id,
+                    channel_id,
+                    user_id=message.from_user.id if message.from_user else message.chat.id,
+                )
             return True
 
         if action == "await_update_channel_setting":
@@ -3609,6 +3622,33 @@ class MasterBot:
                     await self.main_bot.send_message(
                         call.message.chat.id,
                         "Отправьте удаляемые времена в том же формате. Например: all 10:00 15:00",
+                    )
+                    return
+                if action == "add_ad_blackout":
+                    self._set_user_state(
+                        call.message.chat.id,
+                        "await_confession_add_ad_blackout",
+                        channel_id=channel_id,
+                    )
+                    await self.main_bot.send_message(
+                        call.message.chat.id,
+                        "Отправьте рекламное окно в формате:\n"
+                        "21 15:00 18:00\n\n"
+                        "Это значит: 21 числа с 15:00 до 18:00 слоты паблика будут заблокированы. "
+                        "Уже занятые сообщения дождутся окончания окна.",
+                    )
+                    return
+                if action == "delete_ad_blackout":
+                    self._set_user_state(
+                        call.message.chat.id,
+                        "await_confession_delete_ad_blackout",
+                        channel_id=channel_id,
+                    )
+                    await self.main_bot.send_message(
+                        call.message.chat.id,
+                        "Отправьте рекламное окно, которое нужно удалить, в формате:\n"
+                        "21 15:00 18:00\n\n"
+                        "Ввод должен совпадать с ранее добавленным окном.",
                     )
                     return
                 return

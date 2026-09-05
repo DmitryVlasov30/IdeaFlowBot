@@ -13,6 +13,7 @@ from src.editorial.services.confession_service import ConfessionService
 from src.editorial.services.paste_service import PasteAvailabilityContext
 from src.editorial.services.publisher import PublisherService
 from src.confession_publisher import ConfessionPublisherRuntime
+from src.panel_markups import build_confession_channel_actions
 
 
 def _paste(paste_id: int, family: str) -> PasteLibrary:
@@ -80,6 +81,62 @@ def test_confession_candidate_confirmation_buttons() -> None:
         "confession_candidate:yes:15",
         "confession_candidate:no:15",
     ]
+
+
+def test_confession_channel_actions_include_ad_blackouts() -> None:
+    markup = build_confession_channel_actions(15)
+    callback_data = [button.callback_data for row in markup.keyboard for button in row]
+
+    assert "confession_channel:add_ad_blackout:15" in callback_data
+    assert "confession_channel:delete_ad_blackout:15" in callback_data
+
+
+def _channel_post(text: str, *, username: str | None = "confessions") -> SimpleNamespace:
+    return SimpleNamespace(
+        chat=SimpleNamespace(id=-1001234567890, type="channel", username=username),
+        message_id=77,
+        date=1_787_760_000,
+        text=text,
+        caption=None,
+        entities=[],
+        caption_entities=[],
+        reply_markup=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_confession_channel_own_link_does_not_create_blackout() -> None:
+    runtime = object.__new__(ConfessionPublisherRuntime)
+    runtime.publication_guard = SimpleNamespace(
+        ensure_automatic_ad_blackout_for_channel_post=AsyncMock()
+    )
+
+    result = await runtime._ensure_external_link_blackout(
+        _channel_post("Подпись: https://t.me/confessions")
+    )
+
+    assert result is None
+    runtime.publication_guard.ensure_automatic_ad_blackout_for_channel_post.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_confession_channel_external_link_creates_one_hour_blackout() -> None:
+    runtime = object.__new__(ConfessionPublisherRuntime)
+    blackout = SimpleNamespace(id=5)
+    runtime.publication_guard = SimpleNamespace(
+        ensure_automatic_ad_blackout_for_channel_post=AsyncMock(return_value=blackout)
+    )
+
+    result = await runtime._ensure_external_link_blackout(
+        _channel_post("https://t.me/confessions https://advertiser.example")
+    )
+
+    assert result is blackout
+    runtime.publication_guard.ensure_automatic_ad_blackout_for_channel_post.assert_awaited_once_with(
+        tg_channel_id=-1001234567890,
+        telegram_message_id=77,
+        published_at=datetime.fromtimestamp(1_787_760_000, tz=timezone.utc),
+    )
 
 
 @pytest.mark.asyncio

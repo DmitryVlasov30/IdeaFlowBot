@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 
 from loguru import logger
 from telebot.async_telebot import AsyncTeleBot
@@ -8,7 +9,10 @@ from telebot.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from config import settings
 from src.editorial.db.session import session_factory
+from src.editorial.models.ad_blackout import ChannelAdBlackout
 from src.editorial.services.confession_service import ConfessionService
+from src.editorial.services.legacy_publication_guard import LegacyPublicationGuard
+from src.utils import Utils
 
 
 CONFESSION_CONTENT_TYPES = [
@@ -34,6 +38,7 @@ class ConfessionPublisherRuntime:
         self.bot = AsyncTeleBot(bot_api_token)
         self.polling_task: asyncio.Task | None = None
         self.service = ConfessionService()
+        self.publication_guard = LegacyPublicationGuard()
         self._setup_handlers()
 
     @staticmethod
@@ -65,6 +70,44 @@ class ConfessionPublisherRuntime:
             ),
         )
         return markup
+
+    async def _ensure_external_link_blackout(
+        self,
+        message: Message,
+    ) -> ChannelAdBlackout | None:
+        if getattr(message.chat, "type", None) != "channel":
+            return None
+
+        channel_username = getattr(message.chat, "username", None)
+        own_channel_ref: str | int = (
+            f"@{channel_username}" if channel_username else int(message.chat.id)
+        )
+        if not await Utils.check_link(message, ignored_channel_ref=own_channel_ref):
+            return None
+
+        published_at = message.date
+        if not isinstance(published_at, datetime):
+            published_at = datetime.fromtimestamp(published_at, tz=timezone.utc)
+        elif published_at.tzinfo is None:
+            published_at = published_at.replace(tzinfo=timezone.utc)
+
+        blackout = await self.publication_guard.ensure_automatic_ad_blackout_for_channel_post(
+            tg_channel_id=message.chat.id,
+            telegram_message_id=message.message_id,
+            published_at=published_at,
+        )
+        if blackout is None:
+            logger.warning(
+                "Could not create automatic ad blackout: confession channel {} is not configured",
+                message.chat.id,
+            )
+        else:
+            logger.info(
+                "Created or found automatic ad blackout for confession channel post {} in {}",
+                message.message_id,
+                message.chat.id,
+            )
+        return blackout
 
     def _setup_handlers(self) -> None:
         @self.bot.message_handler(commands=["connect_confessions"])
@@ -108,6 +151,14 @@ class ConfessionPublisherRuntime:
             )
 
         async def store_message(message: Message) -> None:
+            try:
+                await self._ensure_external_link_blackout(message)
+            except Exception:
+                logger.exception(
+                    "Failed to create automatic ad blackout for confession channel post {} in {}",
+                    message.message_id,
+                    message.chat.id,
+                )
             if self._is_service_message(message):
                 return
             try:
@@ -214,6 +265,10 @@ class ConfessionPublisherRuntime:
 
         self.bot.register_message_handler(store_message, content_types=CONFESSION_CONTENT_TYPES)
         self.bot.register_channel_post_handler(store_message, content_types=CONFESSION_CONTENT_TYPES)
+        self.bot.register_edited_channel_post_handler(
+            store_message,
+            content_types=CONFESSION_CONTENT_TYPES,
+        )
 
     async def start(self) -> None:
         bot_info = await self.bot.get_me()
